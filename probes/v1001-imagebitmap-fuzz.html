@@ -1,0 +1,270 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V1001 - ImageBitmap Lifecycle Fuzzer</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>V1001 - ImageBitmap Lifecycle Fuzzer</h1>
+<p>Diagnostic only. Exercises createImageBitmap / close / transferToImageBitmap ordering. Per-iteration beacons pinpoint a crash.</p>
+<pre id="out">starting...</pre>
+<script>
+/* V1001: ImageBitmap lifecycle fuzzer (diagnostic).
+ *
+ * Why: createImageBitmap + close() + transferToImageBitmap has a long
+ * history of use-after-free / double-free bugs in WebKit. This surface
+ * was never tested on 14.20.
+ *
+ * Crash oracle: V1001-IT?d=i before, V1001-OK?d=i after.
+ * Beacon prefix: V1001-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ITERATIONS = 200;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V1001-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+var seed = 0x1421;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function spick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+function snum(n) { return Math.floor(srnd() * n); }
+
+/* 1x1 transparent PNG */
+var PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+function pngBlob() {
+  var bin = atob(PNG_B64);
+  var u8 = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: 'image/png' });
+}
+
+var SIZES = [1, 2, 3, 8, 33, 64, 257, 512];
+var OPTS = [
+  {},
+  { premultiplyAlpha: 'none' },
+  { premultiplyAlpha: 'premultiply' },
+  { premultiplyAlpha: 'default' },
+  { colorSpaceConversion: 'none' },
+  { colorSpaceConversion: 'default' },
+  { imageOrientation: 'flipY' },
+  { imageOrientation: 'from-image' },
+  { imageOrientation: 'none' },
+  { resizeWidth: 1 },
+  { resizeHeight: 1 },
+  { resizeWidth: 0 },
+  { resizeHeight: 0 },
+  { resizeWidth: 2, resizeHeight: 2 },
+  { resizeWidth: 4096, resizeHeight: 1 },
+  { resizeWidth: -1, resizeHeight: -1 },
+  { resizeWidth: 1e9, resizeHeight: 1e9 },
+  { resizeWidth: 4, resizeQuality: 'pixelated' },
+  { resizeHeight: 4, resizeQuality: 'low' },
+  { resizeQuality: 'high' },
+  { resizeQuality: 'bogus' },
+  { premultiplyAlpha: 'bogus' }
+];
+
+function makeCanvas(w, h) {
+  var c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  var g = c.getContext('2d');
+  if (g) {
+    g.fillStyle = 'rgba(10,20,30,0.5)';
+    g.fillRect(0, 0, w, h);
+  }
+  return c;
+}
+
+function makeImageData(w, h) {
+  var n = w * h * 4;
+  if (n <= 0 || n > 1024 * 1024) n = 4;
+  var d = new Uint8ClampedArray(n);
+  for (var i = 0; i < n; i++) d[i] = (i * 37) & 0xff;
+  return new ImageData(d, Math.max(1, w), Math.max(1, h));
+}
+
+var offscreen = null;
+var ocCanvas = null;
+try {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    ocCanvas = new OffscreenCanvas(16, 16);
+    var og = ocCanvas.getContext('2d');
+    if (og) { og.fillStyle = '#123456'; og.fillRect(0, 0, 16, 16); }
+    offscreen = true;
+  }
+} catch (e) { offscreen = false; }
+
+function iteration(i) {
+  var mode = i % 8;
+  var w = SIZES[snum(SIZES.length)];
+  var h = SIZES[snum(SIZES.length)];
+
+  if (mode === 0) {
+    /* canvas -> bitmap -> close -> draw */
+    var c = makeCanvas(w, h);
+    createImageBitmap(c, spick(OPTS)).then(function (bmp) {
+      try { bmp.close(); } catch (e) {}
+      try { c.getContext('2d').drawImage(bmp, 0, 0); } catch (e) {}
+      try { bmp.close(); } catch (e) {}
+    }).catch(function () {});
+  } else if (mode === 1) {
+    /* ImageData -> bitmap -> close -> second createImageBitmap from closed */
+    var id = makeImageData(w, h);
+    createImageBitmap(id, spick(OPTS)).then(function (bmp) {
+      try { bmp.close(); } catch (e) {}
+      try { createImageBitmap(bmp, spick(OPTS)).then(function (b2) {
+        try { b2.close(); } catch (e) {}
+      }).catch(function () {}); } catch (e) {}
+    }).catch(function () {});
+  } else if (mode === 2) {
+    /* Blob -> bitmap -> close while a draw is queued */
+    createImageBitmap(pngBlob(), spick(OPTS)).then(function (bmp) {
+      var c2 = makeCanvas(8, 8);
+      var g = c2.getContext('2d');
+      try { g.drawImage(bmp, 0, 0); } catch (e) {}
+      try { bmp.close(); } catch (e) {}
+      try { g.drawImage(bmp, 0, 0); } catch (e) {}
+    }).catch(function () {});
+  } else if (mode === 3) {
+    /* transferToImageBitmap twice + use after transfer */
+    if (ocCanvas) {
+      try {
+        var b1 = ocCanvas.transferToImageBitmap();
+        try { b1.close(); } catch (e) {}
+        var b2 = ocCanvas.transferToImageBitmap();
+        try { b2.close(); } catch (e) {}
+        var b3 = ocCanvas.transferToImageBitmap();
+        var c3 = makeCanvas(8, 8);
+        try { c3.getContext('2d').drawImage(b3, 0, 0); } catch (e) {}
+        try { b3.close(); } catch (e) {}
+      } catch (e) {}
+    }
+  } else if (mode === 4) {
+    /* create many, close in reverse order */
+    var n = 2 + snum(5);
+    var list = [];
+    for (var k = 0; k < n; k++) {
+      (function () {
+        createImageBitmap(makeCanvas(4, 4), spick(OPTS)).then(function (b) {
+          list.push(b);
+          if (list.length === n) {
+            while (list.length) {
+              var x = list.pop();
+              try { x.close(); } catch (e) {}
+            }
+          }
+        }).catch(function () {});
+      })();
+    }
+  } else if (mode === 5) {
+    /* structured clone / postMessage of a closed bitmap */
+    createImageBitmap(makeCanvas(4, 4), spick(OPTS)).then(function (bmp) {
+      try { bmp.close(); } catch (e) {}
+      try {
+        if (typeof structuredClone === 'function') {
+          var cl = structuredClone(bmp);
+          try { cl.close(); } catch (e) {}
+        }
+      } catch (e) {}
+      try {
+        var mc = new MessageChannel();
+        mc.port1.onmessage = function () {};
+        mc.port2.postMessage(bmp);
+        mc.port1.close(); mc.port2.close();
+      } catch (e) {}
+    }).catch(function () {});
+  } else if (mode === 6) {
+    /* resize options against a zero-size / huge-size canvas */
+    var cz = makeCanvas(0, 0);
+    createImageBitmap(cz, spick(OPTS)).then(function (bmp) {
+      try { bmp.close(); } catch (e) {}
+    }).catch(function () {});
+    var cb = makeCanvas(1, 1);
+    createImageBitmap(cb, { resizeWidth: 1e9, resizeHeight: 1, resizeQuality: spick(['low', 'medium', 'high', 'pixelated']) })
+      .then(function (bmp2) { try { bmp2.close(); } catch (e) {} })
+      .catch(function () {});
+  } else {
+    /* canvas 2d self-draw + ImageBitmap round-trip under re-entrant getter */
+    var cc = makeCanvas(w, h);
+    var settings = {};
+    Object.defineProperty(settings, 'alpha', {
+      get: function () {
+        try { cc.getContext('2d').fillRect(0, 0, 1, 1); } catch (e) {}
+        return true;
+      }
+    });
+    try { cc.getContext('bitmaprenderer', settings); } catch (e) {}
+    createImageBitmap(cc, spick(OPTS)).then(function (bmp3) {
+      try {
+        var g3 = cc.getContext('2d');
+        g3.drawImage(bmp3, 0, 0);
+      } catch (e) {}
+      try { bmp3.close(); } catch (e) {}
+    }).catch(function () {});
+  }
+}
+
+function run() {
+  bks('BOOT', 'v1001-imagebitmap,it=' + ITERATIONS + ',seed=' + seed);
+
+  if (typeof createImageBitmap !== 'function') {
+    bks('ABORT', 'no-createImageBitmap');
+    return;
+  }
+  bks('CAPS', 'offscreen=' + (offscreen ? 1 : 0) +
+              ',structuredClone=' + (typeof structuredClone === 'function' ? 1 : 0) +
+              ',MessageChannel=' + (typeof MessageChannel === 'function' ? 1 : 0));
+
+  var i = 0;
+  function step() {
+    var end = Math.min(i + 4, ITERATIONS);
+    for (; i < end; i++) {
+      bks('IT', i + ',m' + (i % 8));
+      try {
+        iteration(i);
+      } catch (e) {
+        bks('ITER-ERR', i + ',' + (e && e.name ? e.name : 'E'));
+      }
+      bks('OK', i);
+    }
+    if (i < ITERATIONS) {
+      setTimeout(step, 0);
+    } else {
+      setTimeout(function () {
+        bks('DONE', 'it=' + ITERATIONS);
+        say('DONE: ' + ITERATIONS + ' iterations completed without crash.');
+      }, 400);
+    }
+  }
+  setTimeout(step, 0);
+}
+
+run();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>PS5 14.20 - Diagnostic Probes</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:17px; margin:0 0 4px; }
+  p.sub { color:#8b949e; font-size:12px; margin:0 0 16px; }
+  h2 { color:#39c5bb; font-size:13px; margin:18px 0 6px; }
+  a { color:#3fb950; text-decoration:none; display:block; padding:10px 0; border-bottom:1px solid #1c2430; font-size:14px; }
+  a:hover { color:#58a6ff; }
+  p.note { color:#8b949e; font-size:11px; margin:4px 0 10px; }
+  .warn { color:#d29922; font-size:11px; }
+</style>
+</head>
+<body>
+<h1>PS5 14.20 - Diagnostic Probes</h1>
+<p class="sub">Diagnostics only. No exploit code. Results are printed on-page and sent to /beacon/* on the same origin.</p>
+
+<h2>Run everything</h2>
+<a href="v2000-all-in-one.html">V2000 - All-in-One Diagnostic Battery (23 tests)</a>
+<p class="note">Capabilities, Canvas2D, ImageData, ImageBitmap, SMIL, SVG filters, MSE, Streams, Web Animations, Cache, Blob, BroadcastChannel, custom elements, Shadow DOM, FontFace, Worker, storage, crypto, text, URL, CSS, structuredClone, then the Canvas UAF alias check last.</p>
+<p class="warn">Excluded on purpose: TransformStream writer.write() and forged m_stateStack read - both hang the renderer.</p>
+
+<h2>Single surfaces</h2>
+<a href="v1000-smil-fuzz.html">V1000 - SVG SMIL lifecycle fuzzer</a>
+<p class="note">240 iterations. Attach, remove, re-parent, clone and scrub the SMIL timeline.</p>
+<a href="v1001-imagebitmap-fuzz.html">V1001 - ImageBitmap lifecycle fuzzer</a>
+<p class="note">200 iterations. createImageBitmap / close / transferToImageBitmap ordering and resize options.</p>
+<a href="feature-detect.html">V900 - Capability snapshot</a>
+<p class="note">Reports which Web APIs are exposed on this firmware.</p>
+</body>
+</html>

