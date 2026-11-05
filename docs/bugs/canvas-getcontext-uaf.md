@@ -1,6 +1,6 @@
 ﻿# CVE-2026-43720 -- Canvas getContext() Reentrant UAF
 
-**Status:** CONFIRMED on PS5 14.10. Same-type reclaim + bidirectional R/W WORKING.
+**Status:** CONFIRMED on PS5 14.20. Same-type reclaim + bidirectional R/W WORKING.
 
 **Fix:** Commit 2693828e8d73 (2026-06-29). Not present in WK-1400.
 

@@ -1,8 +1,8 @@
 ﻿# Dead-End Investigations
 
-Comprehensive list of all investigated attack vectors confirmed dead on PS5 firmware 14.10. Documented to prevent duplicate effort.
+Comprehensive list of all investigated attack vectors confirmed dead on PS5 firmware 14.20. Documented to prevent duplicate effort.
 
-All investigations were performed against retail PS5 hardware running firmware 14.10, targeting the built-in browser (Safari 17.0 / WebKit-1400, LLInt-only, no JIT).
+All investigations target retail PS5 hardware running firmware 14.20 and the built-in browser. Entries originally established on firmware 14.10 are labelled as such; everything else was re-checked on 14.20.
 
 ---
 

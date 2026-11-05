@@ -1,6 +1,6 @@
 ﻿# Findings
 
-All findings are validated on device (PS5 14.10) or verified against WebKit-1200 source.
+All findings are validated on device (PS5 14.20) or verified against WebKit source. Where a result was first established on firmware 14.10, it is labelled.
 
 ## PS5 14.20 Browser Capability Snapshot (V900)
 
