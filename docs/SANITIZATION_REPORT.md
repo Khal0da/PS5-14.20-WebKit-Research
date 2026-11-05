@@ -8,7 +8,7 @@ Generated before publication. Scope: every `.md`, `.html`, `.js`, `.json` and
 | Check | Pattern | Result |
 |-------|---------|--------|
 | IPv4 addresses | `\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b` | 0 matches |
-| Server domain | `mutaqan` | 0 matches |
+| Server domain | project domain literal | 0 matches |
 | Home directories | `/home/<user>` | 0 matches |
 | Email addresses | `user@host.tld` | 0 matches |
 | SSH keys | `ssh-rsa`, `ssh-ed25519`, `BEGIN ... PRIVATE KEY` | 0 matches |
