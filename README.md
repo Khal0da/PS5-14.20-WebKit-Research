@@ -5,8 +5,6 @@ firmware **14.20**. This repository contains **diagnostics, probes and
 documentation only**. It does not contain a working exploit chain, shellcode,
 kernel payloads, or anything that grants code execution.
 
-> Arabic summary: هذا المستودع يحتوي على نتائج بحث وتشخيص فقط، بدون أي كود
-> استغلال جاهز أو تعديل للنظام.
 
 ---
 
