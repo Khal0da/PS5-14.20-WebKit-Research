@@ -1,5 +1,58 @@
 # Changelog
 
+## Nov 5 -- Final Recon Wave + APNG Claim Debunked
+- V682 text a=704 confirmed DEAD across all ctx variants (ctxhit=1, sus=0); real
+  CanvasRenderingContext2D objects always reclaim the 768B slot.
+- V700 HTMLParser Custom Element double-parent / microtask bypass DEAD: all 5
+  mutation patterns inside CE constructors executed but parser validation
+  handled them correctly.
+- V182 font parser loca OOB read DEAD: padding OOB, heap OOB (4-4096),
+  heap spray (1000x 4KB), and .notdef OOB all returned px=0/diff=0.
+- V800 WebAudio recon: `AudioContext`, `webkitAudioContext`, and
+  `OfflineAudioContext` are undefined on PS5 14.20; WebAudio is unavailable.
+- V900 browser capability snapshot: 21 APIs available, 14 unavailable
+  (documented in docs/PS5_1420_BROWSER_CAPABILITIES.md).
+- V910 MSE recon: basic `appendBuffer`, `remove`, `abort`, `changeType`, and
+  add/remove cycles all handled safely; no crash.
+- V920 CSSFontFaceSet reference_wrapper diagnostic: classic
+  `FontFace.prototype.then` trigger did not fire during mutation tests; no
+  crash. Reference_wrapper UAF remains unconfirmed as reachable.
+- **V674 APNG overread claim DEBUNKED:** `v592-ctl.html?op=apng` fails with
+  `APNGERR load-fail` on PS5 14.20. No pixel data and no heap pointers are
+  leaked. README claim of 1651 pointers is not reproducible.
+- README.md, FINDINGS.md, DEAD_ENDS.md updated to reflect APNG dead end.
+- docs/PROGRESS_AUDIT.md updated: info leak / ASLR defeat moved to BLOCKED.
+
+## Nov 4 -- Results Consolidation (Both Sessions)
+- V680-V688 on-device results recorded in docs/FINDINGS.md as a results matrix.
+- 4 new dead ends in docs/DEAD_ENDS.md: cross-type object reclaim (all miss), inline state
+  stack read, non-Vector member read, AB-owned slot JS->C++ calls.
+- docs/STRATEGY.md gained a "do not repeat" list plus a prioritized open-items list.
+- Rule confirmed twice independently: reclaim before you touch the dangling wrapper.
+- probes/index.html now links every probe from both sessions (46 links), including
+  V680-V689 and the V592 stage bisection; previous menu backed up as index.html.pre-v680-links.
+- Open items explicitly marked unresolved instead of dead: V682 text a=704 crash,
+  V689 canaries, v592 stage=5, v592-ctl reclaimread.
+
+## Nov 3 -- V592 Control Harness: Crash Localized + Guard Fixed
+- Stage bisection: stage 1 (trigger only) survives; stages 2-4 crash right after CONFIG.
+  The pre-read of freed-unreclaimed memory is the fault, not the trigger.
+- Same-type reclaim stable: `reclaimctx n=16` -> `lw=0x4012456d5cfaacda` (4.5678), reproduced twice.
+- `direct` AB(768) reclaim emits ABSPRAY then crashes, with `fill=marker` and `fill=zero`.
+  Cause: AB backing store zeroes `m_stateStack` at +112 -> first field read null-derefs.
+- `apng` is not implemented: `V592C-ERR unknown-op:apng`. No v674/APNG probe exists.
+  README/docs claims for V674 downgraded to UNVERIFIED.
+- Once-guard bug fixed: guard now reads/writes/clears BOTH sessionStorage and localStorage,
+  `reset=1` clears the key, `guard=0` bypasses, and `DONE` releases the key on a clean finish.
+- New read-only `reclaimread` op: reclaims N tagged contexts and reads all five state fields
+  (`lw, ml, ga, ldo, sb`) through the stale wrapper.
+
+## Nov 2 -- On-Device Beacons: V650 UAF Trigger + V592 Butterfly Harvest
+- V650: Canvas getContext() UAF trigger confirmed LIVE on PS5 14.20 (bmr=OK, getter=true, inner=OK)
+- V592: Butterfly harvest v2 — saves=32, cap=37, buf=14800, lwOff=12848 (4x consistent, crash/reload pattern)
+- Host server operational, beacons received from 192.168.1.176
+- Tooling made Windows-compatible (selftest, build_host, host.py, index.html)
+
 ## Oct 22-23 -- ASLR Defeat Work
 - APNG overread leaks 1651 heap pointers on device (V674)
 - Heap topology mapping via binary subdivision scanner (V650-V655)

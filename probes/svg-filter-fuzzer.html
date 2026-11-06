@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>SVG Filter Fuzzer (V950)</title>
+</head>
+<body>
+<pre id="out">SVG filter fuzzer running...</pre>
+<div id="sink" style="position:fixed; left:-9999px; top:0;"></div>
+<script>
+/* V950: SVG filter primitive fuzzer.
+ * Generates random SVG filter graphs and applies them to SVG elements.
+ * Read-only crash/hang detection. No forged pointers, no ROP, no arb R/W.
+ * Beacon prefix: V950-
+ */
+'use strict';
+var O = document.getElementById('out');
+var SINK = document.getElementById('sink');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V950-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+var PRIMITIVES = [
+  'feGaussianBlur',
+  'feColorMatrix',
+  'feConvolveMatrix',
+  'feDisplacementMap',
+  'feTurbulence',
+  'feComposite',
+  'feBlend',
+  'feComponentTransfer',
+  'feMerge',
+  'feOffset',
+  'feSpecularLighting',
+  'feDiffuseLighting',
+  'feImage',
+  'feFlood',
+  'feTile',
+  'feMorphology',
+  'feDropShadow'
+];
+
+var COLORS = ['#ff0000', '#00ff00', '#0000ff', '#ffffff', '#000000', 'red', 'transparent'];
+
+function rand(n) { return Math.floor(Math.random() * n); }
+function randElem(arr) { return arr[rand(arr.length)]; }
+function randInt(min, max) { return min + rand(max - min + 1); }
+
+function makeFilter(id) {
+  var ns = 'http://www.w3.org/2000/svg';
+  var filter = document.createElementNS(ns, 'filter');
+  filter.setAttribute('id', id);
+  filter.setAttribute('x', '0');
+  filter.setAttribute('y', '0');
+  filter.setAttribute('width', '100%');
+  filter.setAttribute('height', '100%');
+
+  var primitiveCount = randInt(1, 8);
+  var lastResult = 'SourceGraphic';
+
+  for (var i = 0; i < primitiveCount; i++) {
+    var primName = randElem(PRIMITIVES);
+    var prim = document.createElementNS(ns, primName);
+    var resultName = 'r' + i;
+
+    prim.setAttribute('in', lastResult);
+    prim.setAttribute('result', resultName);
+
+    switch (primName) {
+      case 'feGaussianBlur':
+        prim.setAttribute('stdDeviation', randInt(0, 50) + ' ' + randInt(0, 50));
+        break;
+      case 'feColorMatrix':
+        prim.setAttribute('type', randElem(['matrix', 'saturate', 'hueRotate', 'luminanceToAlpha']));
+        if (prim.getAttribute('type') === 'matrix') {
+          var vals = [];
+          for (var k = 0; k < 20; k++) vals.push((Math.random() * 2 - 1).toFixed(2));
+          prim.setAttribute('values', vals.join(' '));
+        } else if (prim.getAttribute('type') === 'saturate') {
+          prim.setAttribute('values', String(Math.random() * 10));
+        } else if (prim.getAttribute('type') === 'hueRotate') {
+          prim.setAttribute('values', String(randInt(0, 360)));
+        }
+        break;
+      case 'feConvolveMatrix':
+        prim.setAttribute('order', randInt(1, 5) + ' ' + randInt(1, 5));
+        var order = prim.getAttribute('order').split(' ').map(Number);
+        var kernel = [];
+        for (var a = 0; a < order[0] * order[1]; a++) kernel.push((Math.random() * 2 - 1).toFixed(2));
+        prim.setAttribute('kernelMatrix', kernel.join(' '));
+        prim.setAttribute('divisor', String(randInt(1, 10)));
+        break;
+      case 'feDisplacementMap':
+        prim.setAttribute('in2', randElem(['SourceGraphic', 'SourceAlpha', lastResult]));
+        prim.setAttribute('scale', String(randInt(0, 100)));
+        prim.setAttribute('xChannelSelector', randElem(['R', 'G', 'B', 'A']));
+        prim.setAttribute('yChannelSelector', randElem(['R', 'G', 'B', 'A']));
+        break;
+      case 'feTurbulence':
+        prim.setAttribute('type', randElem(['fractalNoise', 'turbulence']));
+        prim.setAttribute('baseFrequency', (Math.random()).toFixed(3) + ' ' + (Math.random()).toFixed(3));
+        prim.setAttribute('numOctaves', String(randInt(1, 8)));
+        prim.setAttribute('seed', String(randInt(0, 1000)));
+        break;
+      case 'feComposite':
+        prim.setAttribute('in2', randElem(['SourceGraphic', 'SourceAlpha', lastResult]));
+        prim.setAttribute('operator', randElem(['over', 'in', 'out', 'atop', 'xor', 'arithmetic']));
+        if (prim.getAttribute('operator') === 'arithmetic') {
+          prim.setAttribute('k1', String(Math.random()));
+          prim.setAttribute('k2', String(Math.random()));
+          prim.setAttribute('k3', String(Math.random()));
+          prim.setAttribute('k4', String(Math.random()));
+        }
+        break;
+      case 'feBlend':
+        prim.setAttribute('in2', randElem(['SourceGraphic', 'SourceAlpha', lastResult]));
+        prim.setAttribute('mode', randElem(['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity']));
+        break;
+      case 'feComponentTransfer':
+        for (var c = 0; c < randInt(1, 4); c++) {
+          var func = document.createElementNS(ns, randElem(['feFuncR', 'feFuncG', 'feFuncB', 'feFuncA']));
+          func.setAttribute('type', randElem(['identity', 'table', 'discrete', 'linear', 'gamma']));
+          prim.appendChild(func);
+        }
+        break;
+      case 'feMerge':
+        for (var m = 0; m < randInt(1, 4); m++) {
+          var node = document.createElementNS(ns, 'feMergeNode');
+          node.setAttribute('in', randElem(['SourceGraphic', 'SourceAlpha', lastResult]));
+          prim.appendChild(node);
+        }
+        break;
+      case 'feOffset':
+        prim.setAttribute('dx', String(randInt(-100, 100)));
+        prim.setAttribute('dy', String(randInt(-100, 100)));
+        break;
+      case 'feSpecularLighting':
+      case 'feDiffuseLighting':
+        prim.setAttribute('surfaceScale', String(randInt(1, 10)));
+        prim.setAttribute('diffuseConstant', String(randInt(1, 5)));
+        prim.setAttribute('lighting-color', randElem(COLORS));
+        var light = document.createElementNS(ns, randElem(['feDistantLight', 'fePointLight', 'feSpotLight']));
+        prim.appendChild(light);
+        break;
+      case 'feImage':
+        prim.setAttribute('xlink:href', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+        break;
+      case 'feFlood':
+        prim.setAttribute('flood-color', randElem(COLORS));
+        prim.setAttribute('flood-opacity', String(Math.random()));
+        break;
+      case 'feTile':
+        break;
+      case 'feMorphology':
+        prim.setAttribute('operator', randElem(['erode', 'dilate']));
+        prim.setAttribute('radius', randInt(0, 20) + ' ' + randInt(0, 20));
+        break;
+      case 'feDropShadow':
+        prim.setAttribute('dx', String(randInt(-50, 50)));
+        prim.setAttribute('dy', String(randInt(-50, 50)));
+        prim.setAttribute('stdDeviation', String(randInt(0, 20)));
+        break;
+    }
+
+    filter.appendChild(prim);
+    lastResult = resultName;
+  }
+
+  return filter;
+}
+
+function makeSVG(filterId) {
+  var ns = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', randInt(1, 200));
+  svg.setAttribute('height', randInt(1, 200));
+
+  var defs = document.createElementNS(ns, 'defs');
+  defs.appendChild(makeFilter(filterId));
+  svg.appendChild(defs);
+
+  var rect = document.createElementNS(ns, 'rect');
+  rect.setAttribute('x', '0');
+  rect.setAttribute('y', '0');
+  rect.setAttribute('width', '100%');
+  rect.setAttribute('height', '100%');
+  rect.setAttribute('fill', randElem(COLORS));
+  rect.setAttribute('filter', 'url(#' + filterId + ')');
+  svg.appendChild(rect);
+
+  return svg;
+}
+
+async function runFuzzer() {
+  bks('BOOT', 'svg-filter-fuzzer-v1');
+  var iterations = 0;
+  var maxIterations = 200;
+  var startTime = Date.now();
+
+  while (iterations < maxIterations) {
+    iterations++;
+    var filterId = 'fuzz' + iterations;
+
+    try {
+      SINK.innerHTML = '';
+      var svg = makeSVG(filterId);
+      SINK.appendChild(svg);
+
+      // Force layout / render
+      var w = SINK.offsetWidth;
+      var h = SINK.offsetHeight;
+
+      if (iterations % 10 === 0) {
+        bks('ITER', 'i=' + iterations + ',w=' + w + ',h=' + h);
+      }
+    } catch (e) {
+      bks('ERR', 'iter=' + iterations + ',err=' + e.constructor.name);
+    }
+
+    if (iterations % 20 === 0) {
+      await sleep(50);
+    }
+  }
+
+  bks('DONE', 'iterations=' + iterations + ',time=' + (Date.now() - startTime));
+  say('DONE: ' + iterations + ' iterations');
+}
+
+runFuzzer();
+</script>
+</body>
+</html>

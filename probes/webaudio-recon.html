@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>WebAudio Recon Probe (V800)</title>
+</head>
+<body><pre id="out">WebAudio recon probe running...</pre>
+<script>
+/* V800: WebAudio subsystem recon probe.
+ * Read-only diagnostics: decodeAudioData, AudioBuffer channels,
+ * AudioBufferSourceNode, OfflineAudioContext.
+ * No forged pointers, no ROP, no arbitrary R/W.
+ * Beacon prefix: V800-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bk(tag, body) {
+  var u = '/beacon/V800-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V800-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+/* ---- Test helpers ---- */
+function makeWAVHeader(samples, channels, rate, bits) {
+  var byteRate = rate * channels * bits / 8;
+  var blockAlign = channels * bits / 8;
+  var dataSize = samples * blockAlign;
+  var buf = new ArrayBuffer(44);
+  var u8 = new Uint8Array(buf);
+  var dv = new DataView(buf);
+  function writeStr(offset, str) {
+    for (var i = 0; i < str.length; i++) u8[offset + i] = str.charCodeAt(i);
+  }
+  writeStr(0, 'RIFF');
+  dv.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, channels, true);
+  dv.setUint32(24, rate, true);
+  dv.setUint32(28, byteRate, true);
+  dv.setUint16(32, blockAlign, true);
+  dv.setUint16(34, bits, true);
+  writeStr(36, 'data');
+  dv.setUint32(40, dataSize, true);
+  return buf;
+}
+
+function concatBuffers(a, b) {
+  var c = new Uint8Array(a.byteLength + b.byteLength);
+  c.set(new Uint8Array(a), 0);
+  c.set(new Uint8Array(b), a.byteLength);
+  return c.buffer;
+}
+
+/* ---- Test 1: decodeAudioData with truncated WAV ---- */
+async function testTruncatedWAV() {
+  var r = {};
+  try {
+    var ac = new (window.AudioContext || window.webkitAudioContext)();
+    r.acState = ac.state;
+    var header = makeWAVHeader(100000, 2, 44100, 16); // claims 100k samples
+    // truncate data chunk to zero
+    var truncated = header.slice(0, 44);
+    var p = new Promise(function (resolve) {
+      ac.decodeAudioData(truncated, function (buf) {
+        r.result = 'success';
+        r.channels = buf.numberOfChannels;
+        r.length = buf.length;
+        r.sampleRate = buf.sampleRate;
+        resolve();
+      }, function (e) {
+        r.result = 'error';
+        r.errName = e ? e.name : 'null';
+        r.errMsg = e ? String(e.message || '').slice(0, 80) : '';
+        resolve();
+      });
+    });
+    await p;
+    try { await ac.close(); } catch (e) {}
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 2: decodeAudioData with huge declared size ---- */
+async function testHugeWAV() {
+  var r = {};
+  try {
+    var ac = new (window.AudioContext || window.webkitAudioContext)();
+    var header = makeWAVHeader(0x7FFFFFFF, 2, 44100, 16);
+    var p = new Promise(function (resolve) {
+      ac.decodeAudioData(header, function (buf) {
+        r.result = 'success';
+        r.channels = buf.numberOfChannels;
+        r.length = buf.length;
+        resolve();
+      }, function (e) {
+        r.result = 'error';
+        r.errName = e ? e.name : 'null';
+        resolve();
+      });
+    });
+    await Promise.race([p, new Promise(function (resolve) { setTimeout(function () { r.result = 'timeout'; resolve(); }, 3000); })]);
+    try { await ac.close(); } catch (e) {}
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 3: AudioBuffer channel data detach / reacquire ---- */
+async function testChannelData() {
+  var r = {};
+  try {
+    var ac = new (window.AudioContext || window.webkitAudioContext)();
+    var ab = ac.createBuffer(2, 44100, 44100);
+    var c0 = ab.getChannelData(0);
+    r.c0len = c0.length;
+    c0[0] = 3.14;
+    var c1 = ab.getChannelData(1);
+    c1[0] = 2.71;
+    var c0again = ab.getChannelData(0);
+    r.sameObject = (c0 === c0again) ? 1 : 0;
+    r.c0val = c0again[0];
+    // Try to trigger potential issues by rapidly reallocating buffers
+    for (var i = 0; i < 50; i++) {
+      var tmp = ac.createBuffer(2, 44100, 44100);
+      tmp.getChannelData(0)[0] = i;
+    }
+    r.iterations = 50;
+    try { await ac.close(); } catch (e) {}
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 4: AudioBufferSourceNode start/stop patterns ---- */
+async function testSourceNode() {
+  var r = {};
+  try {
+    var ac = new (window.AudioContext || window.webkitAudioContext)();
+    var ab = ac.createBuffer(1, 44100, 44100);
+    var src = ac.createBufferSource();
+    src.buffer = ab;
+    src.connect(ac.destination);
+    src.start(0);
+    src.stop(0.001);
+    // Try double-start / double-stop
+    try { src.start(0); r.doubleStart = 'ok'; } catch (e) { r.doubleStart = e.constructor.name; }
+    try { src.stop(0.002); r.doubleStop = 'ok'; } catch (e) { r.doubleStop = e.constructor.name; }
+    await sleep(100);
+    try { await ac.close(); } catch (e) {}
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 5: OfflineAudioContext with extreme length ---- */
+async function testOfflineExtreme() {
+  var r = {};
+  try {
+    // 1 second is safe
+    var oc = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(2, 44100, 44100);
+    var buf = await oc.startRendering();
+    r.normalLength = buf.length;
+    r.normalChannels = buf.numberOfChannels;
+
+    // Try very large render length
+    try {
+      var ocBig = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(2, 44100 * 60 * 10, 44100); // 10 minutes
+      r.bigCreated = 1;
+      var bufBig = await ocBig.startRendering();
+      r.bigLength = bufBig.length;
+    } catch (e) {
+      r.bigCreated = 0;
+      r.bigErr = e.constructor.name;
+    }
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 6: decodeAudioData with malformed MP3-ish header ---- */
+async function testMalformedAudio() {
+  var r = {};
+  try {
+    var ac = new (window.AudioContext || window.webkitAudioContext)();
+    // Not a valid audio file, just random-ish bytes
+    var junk = new Uint8Array(4096);
+    for (var i = 0; i < junk.length; i++) junk[i] = (i * 37 + 13) & 0xFF;
+    var p = new Promise(function (resolve) {
+      ac.decodeAudioData(junk.buffer, function (buf) {
+        r.result = 'success';
+        r.channels = buf.numberOfChannels;
+        r.length = buf.length;
+        resolve();
+      }, function (e) {
+        r.result = 'error';
+        r.errName = e ? e.name : 'null';
+        resolve();
+      });
+    });
+    await Promise.race([p, new Promise(function (resolve) { setTimeout(function () { r.result = 'timeout'; resolve(); }, 3000); })]);
+    try { await ac.close(); } catch (e) {}
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Run all tests sequentially ---- */
+async function runAll() {
+  bks('BOOT', 'webaudio-recon-v1');
+  var tests = [
+    { name: 'TRUNCWAV', fn: testTruncatedWAV },
+    { name: 'HUGEWAV', fn: testHugeWAV },
+    { name: 'CHANNELDATA', fn: testChannelData },
+    { name: 'SOURCENODE', fn: testSourceNode },
+    { name: 'OFFLINEEXTREME', fn: testOfflineExtreme },
+    { name: 'MALFORMED', fn: testMalformedAudio }
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    bks(tests[i].name + '-PRE', 'start');
+    try {
+      var result = await tests[i].fn();
+      bks(tests[i].name, summarize(result));
+      say(tests[i].name + ': ' + summarize(result));
+    } catch (e) {
+      bks(tests[i].name + '-FATAL', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+      say(tests[i].name + ' FATAL: ' + e.constructor.name);
+    }
+    await sleep(200);
+  }
+  bks('DONE', 'all-' + tests.length);
+  say('DONE');
+}
+runAll();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Progress Audit
 
-Status of the PS5 14.10 WebKit exploitation research as of October 23, 2026.
+Status of the PS5 14.20 WebKit exploitation research as of November 4, 2026.
 
 ## Timeline
 
@@ -15,6 +15,13 @@ Status of the PS5 14.10 WebKit exploitation research as of October 23, 2026.
 | 17-19 | Oct 20-21 | Same-type reclaim V573 CONFIRMED, full R/W via alias V562/V630 |
 | 20-21 | Oct 21-22 | Crash oracle development, heap topology mapping V650-V655 |
 | 22-23 | Oct 22-23 | Info leak hunting, APNG overread (V674), ASLR defeat work |
+| 24 | Nov 2 | On-device beacons: V650 UAF trigger (bmr=OK, getter=true, inner=OK); V592 butterfly harvest (saves=32, cap=37, buf=14800, lwOff=12848, 4x consistent) |
+| 25 | Nov 3 | V592 control harness: stage bisection shows the pre-read on freed-unreclaimed memory is the crash; same-type reclaim stable (lw=4.5678 x2); direct AB(768) reclaim crashes; `apng` is `unknown-op`; once-guard reset bug fixed; `reclaimread` read-only diagnostic added |
+| 26 | Nov 3 | Session B on-device runs V680-V688: cross-type reclaim all miss, inline/non-Vector first touch crashes, AB(768) confirmed as the slot size class, only `idle`/`gc` survive on an AB-owned slot; V689 canaries deployed |
+| 27 | Nov 4 | Results consolidation: V680-V688 matrix added to FINDINGS, 4 new dead ends in DEAD_ENDS, STRATEGY "do not repeat" list, shared probe index (46 links) covering both sessions |
+| 28 | Nov 4 | V682 text a=704 all variants dead (ctxhit=1); V700 HTMLParser CE double-parent / microtask bypass dead; V182 font parser loca OOB read dead (px=0/diff=0 all offsets) |
+| 29 | Nov 4 | V800 WebAudio recon: AudioContext/OfflineAudioContext unavailable on PS5 14.20; V900 browser capability snapshot: 21 APIs available, 14 unavailable |
+| 30 | Nov 4 | V910 MSE basic recon: all edge cases handled safely; V920 CSSFontFaceSet reference_wrapper diagnostic: classic FontFace.prototype.then trigger does not fire, no crash |
 
 ## Exploit Chain Progress
 
@@ -30,8 +37,10 @@ Status of the PS5 14.10 WebKit exploitation research as of October 23, 2026.
 | Crash oracle | **DONE** | Forge m_stateStack, lineWidth reads 8B at target |
 | Heap topology mapping | **DONE** | V650-V655 binary subdivision, ~187KB resolution |
 | DAZ bypass | **DONE** | BigUint64Array confirmed for raw pointer handling |
-| Info leak / ASLR defeat | **IN PROGRESS** | APNG overread leaks 1651 pointers (V674) |
-| Arbitrary R/W | Designed | lineDash Vector forge, needs info leak |
+| UAF trigger (V650) | **DONE** | bmr=OK, getter=true, inner=OK on PS5 14.20 |
+| Butterfly harvest (V592) | **DONE** | saves=32, cap=37, buf=14800, lwOff=12848 (4x consistent) |
+| Info leak / ASLR defeat | **BLOCKED** | All tested paths dead, including V674 APNG overread (`APNGERR load-fail` on PS5 14.20). README claim of 1651 pointers is not reproducible. |
+| Arbitrary R/W | Designed | lineDash Vector forge, needs info leak (blocked) |
 | Code execution | Not started | vtable hijack or Config overwrite |
 | Kernel exploit | BLOCKED | Needs browser code execution first |
 | Privilege escalation | Not started | |

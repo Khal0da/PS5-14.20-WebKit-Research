@@ -56,7 +56,7 @@ EMBEDDED_ZIP_B64 = ""
 
 DEFAULT_TARGET = "manuals.playstation.net"
 DEFAULT_TTL = 300
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BEACON_LOG = os.path.join(REPO_ROOT, "host-beacons.log")
 
 
@@ -626,13 +626,21 @@ def resolve_file(rel_path, firmware=None, query_exploit=None):
     """
     candidates = [rel_path]
 
-    is_index = not rel_path or rel_path.endswith("/")
+    is_index = (not rel_path or rel_path.endswith("/")
+                or os.path.basename(rel_path) in ("index.html", "index.htm"))
     if is_index:
         preferred = choose_index_page(firmware, query_exploit)
         if preferred:
-            candidates = [preferred, rel_path + "index.html", rel_path + "index.htm"]
+            candidates = [preferred]
         else:
-            candidates = [rel_path + "index.html", rel_path + "index.htm"]
+            candidates = []
+        if not rel_path:
+            candidates += ["index.html", "index.htm"]
+        elif rel_path.endswith("/"):
+            candidates += [rel_path + "index.html", rel_path + "index.htm"]
+        else:
+            if rel_path not in candidates:
+                candidates.append(rel_path)
     elif rel_path == "relapse.html":
         candidates.append("index.html")
 
@@ -935,6 +943,25 @@ class GuideHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _resolve(self):
+        """Resolve the current request to a (kind, full, shown, data, mtime)
+        tuple, mirroring the logic in send_head().  Exposed for tests."""
+        ua = ""
+        try:
+            ua = self.headers.get("User-Agent", "")
+        except Exception:
+            ua = ""
+        firmware = detect_firmware(ua)
+        query_exploit = None
+        if "?" in self.path:
+            try:
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                query_exploit = qs.get("exploit", [None])[0]
+            except Exception:
+                query_exploit = None
+        rel = normalize_request_path(self.path)
+        return resolve_file(rel, firmware, query_exploit)
 
     def send_head(self):
         """Resolve and serve a file with appropriate headers."""

@@ -27,7 +27,7 @@ IsoHeap is OFF on PS5 (`WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc 
 | UAF trigger (bitmaprenderer outer + 2d inner) | V589 | CONFIRMED |
 | Same-type reclaim (500x Canvas2D spray) | V573 | CONFIRMED |
 | Bidirectional R/W via alias (all 12 Canvas2D APIs) | V562, V630 | CONFIRMED |
-| Crash oracle (forge m_stateStack, lineWidth reads 8B) | V650-V655 | CONFIRMED |
+| Crash oracle (forge m_stateStack, lineWidth reads 8B) | V906 (V650 failed: unmapped guesses) | MECHANISM CONFIRMED, no mapped addr |
 | OOB state stack read (save-count mismatch) | -- | Designed, needs device test |
 
 ### Secondary / Blocked leads
@@ -69,7 +69,9 @@ The info leak is the current blocker. We have full R/W of typed Canvas2D state f
 
 **OOB state stack read:** Stale wrapper retains `m_stateStack.m_size = 9` (from 8 saves) while new context has `m_size = 1`. Reading `last()` indexes at `buffer[8]` = 2800 bytes past end of 1-State buffer. Reads adjacent heap as float64. 48-bit x86-64 pointer is exactly representable as IEEE 754 float64.
 
-**APNG overread (V674):** 1651 heap pointers leaked via animated PNG processing overread on device.
+**APNG overread (V674):** DEAD. The `op=apng` probe fails to decode on PS5
+14.20 (`APNGERR load-fail`). The claim of 1651 leaked heap pointers is not
+reproducible on retail hardware.
 
 ### Planned exploitation path (once info leak solved)
 

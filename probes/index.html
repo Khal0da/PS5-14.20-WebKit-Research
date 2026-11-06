@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>PS5 14.20 - Probe Menu</title>
+<style>
+  body { background:#090b10; color:#e6edf3; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; padding:16px; }
+  h1 { color:#58a6ff; font-size:18px; margin-bottom:6px; }
+  p.sub { color:#8b949e; font-size:12px; margin-bottom:18px; }
+  h2 { color:#39c5bb; font-size:14px; margin-top:20px; margin-bottom:8px; }
+  a { color:#3fb950; text-decoration:none; display:block; padding:10px 0; border-bottom:1px solid #21262d; font-size:15px; }
+  a:hover { color:#58a6ff; }
+  .dead { color:#f85149; }
+  .warn { color:#d29922; font-size:12px; margin-bottom:8px; }
+  .note { color:#8b949e; font-size:12px; margin:8px 0; }
+  code { color:#c9d1d9; background:#21262d; padding:2px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<h1>PS5 14.20 - Probe Menu</h1>
+<p class="sub">Tunnel: ps5.mutaqan.com · Firmware 14.20 diagnostics. Append <code>?cb=N</code> to bust cache.</p>
+
+<h2>▶ ACTIVE - run this now</h2>
+<a href="canvas-uaf/v913-tee-nonce.html?op=auto&amp;cb=914">V913 - tee() nonce readback (NEW)</a>
+<p class="note">Fresh <code>crypto.getRandomValues</code> nonce per load (32B + <code>0xA5</code> pad, 64B variant) + incremental <code>+7</code> control. Read both branches, check exact match / <code>sameObject</code> / length. Run <b>twice</b> — nonces must differ, readbacks must match their own run. Prints <b>TEE DONE</b>.</p>
+<a href="canvas-uaf/v912-recon.html?op=auto&amp;cb=913">V912 - pointer-derived numbers recon (FINAL RESULT)</a>
+<p class="note"><b>V912 FINAL (2026-11-06 19:02-19:02 UTC, beacons 10379-10395):</b> 15 families, no crash — <b>no anchor</b>. <code>performance.memory</code>/<code>AudioContext</code>/<code>eventCounts</code> absent; <code>toString</code> shows no <code>0x...</code>; error stack is URL:line:col; typed offsets exact. Constants confirmed (no WASM/SAB/WebGL).</p>
+<a href="canvas-uaf/v911-finetune.html?op=auto&amp;cb=912">V911 - WebCore 768 fine-tune for SUSPECT (FINAL RESULT)</a>
+<p class="note"><b>V911 FINAL (2026-11-06 18:54-18:56 UTC, beacons 10297-10355):</b> 29 cases — 23 MISS, 6 CRASH, <b>0 SUSPECT</b>. New hits at read: <code>blob-8x768</code>, <code>blob-16x768</code>, <code>text-736</code>, <code>urlsp-92</code> (plus controls). Fine-tuning finds more crashes, never a readable value.</p>
+<a href="canvas-uaf/v910-anchor.html?op=auto&amp;cb=911">V910 - mapped-anchor harvest: pointer-containing candidates (FINAL RESULT)</a>
+<p class="note"><b>V910 FINAL (2026-11-06 18:41-18:42 UTC, beacons 10256-10284):</b> 14 cases — 11 MISS, 3 CRASH, <b>0 SUSPECT</b>. JS harvest (10 pointer candidates) all MISS (did not reclaim); controls CRASH. JSC butterflies do not share the 768B WebCore slot.</p>
+<a href="canvas-uaf/v909-geometry.html?op=auto&amp;cb=910">V909 - urlsp/imagedata geometry tuning + matchmedia x3 (FINAL RESULT)</a>
+<p class="note"><b>V909 FINAL (2026-11-06 17:43-17:44 UTC, beacons 10183-10217):</b> 17 cases — 7 MISS, 10 CRASH, <b>0 SUSPECT</b>. <code>urlsp</code> peak only at 96; <code>imagedata</code> 768 family 5x <code>S3-tagged</code> + 1x <code>S2-candidate</code> (<code>96x2</code> spray-phase), controls MISS; <code>matchmedia</code> 3/3 new (6/7 total).</p>
+<a href="canvas-uaf/v908-full52-oob.html?op=auto&amp;cb=909">V908 - Full-52 isolated + matchmedia x3 + OOB matrix (FINAL RESULT)</a>
+<p class="note"><b>V908 FINAL (2026-11-06 16:31-16:45 UTC, beacons 10068-10182):</b> 57 cases — 45 MISS, 12 CRASH, <b>0 SUSPECT</b>. New hits vs V680 sweep: <code>urlsp96</code> + <code>imagedata-16x12</code> crash at read. <code>matchmedia</code> flaky (3/3 crash here vs MISS in V907). Save-count OOB closed (<code>oob-v0</code>/<code>oob-v32</code> MISS). The file now shows a static FINAL table so results persist even if localStorage is cleared.</p>
+<a href="canvas-uaf/v907-cross-isolate.html?op=auto&amp;cb=908">V907 - V680 hit isolation, one case per load (FINAL RESULT)</a>
+<p class="note"><b>V907 FINAL (2026-11-06 16:02 UTC, beacons 10038-10062):</b> 12 cases — 5 MISS, 7 CRASH, <b>0 SUSPECT</b>. <code>same</code> MISS <code>lw=205</code> + <code>abzero</code> CRASH validate the harness. Confirmed at read: <code>style48</code>, <code>strfake8</code>, <code>abfake</code>. Polarity: <code>style48</code> CRASH vs <code>style16</code>/<code>attrs48</code> MISS, <code>text704</code> CRASH vs <code>text1024</code> MISS. <code>matchmedia</code> MISS (V680 hit not reproduced). <code>text704</code>/<code>strfake16</code> CRASH at <code>S2-candidate</code> (spray-phase, not read). <code>strraw8</code> leave-header also CRASH — readable fake is dead. The file now shows a static FINAL table so results persist even if localStorage is cleared.</p>
+<a href="canvas-uaf/v906-slot-steer-oracle.html?op=auto&amp;cb=907">V906 - slot-steer oracle, offset-agnostic (FINAL RESULT)</a>
+<p class="note">V906 decides whether the stale wrapper reads the reclaimed 768B slot at all. Control case <code>same</code> must return 200..207; any <code>HIT</code> = forged pointer dereferenced. After a crash just reopen <code>?op=auto</code>; done at <b>ALL CASES DONE</b>.</p>
+<p class="note"><b>V906 FINAL (2026-11-06 12:08 UTC, beacons 9997-10034):</b> <code>same</code> MISS <code>lw=201</code> (control OK). 15 AB cases all CRASH, 0 HIT, 0 MISS. 14 crashed at <code>S4-tagged</code> (at <code>lineWidth</code> read: AB took slot, pointer rejected); <code>pe_512m</code> crashed at <code>S3-spray200</code> during spray. <code>dbl</code> crash proves pointer deref, not direct double. The file now shows a static FINAL table so results persist even if localStorage is cleared.</p>
+<p class="note">Menu build: 2026-11-06 22:30 UTC · if you do not see V913 above, open <code>index.html?cb=1038</code></p>
+
+<h2>0. Trigger / UAF (start here)</h2>
+<a href="canvas-uaf/v913-tee-nonce.html?op=auto&amp;cb=914">V913 - tee() nonce readback (streams)</a>
+<a href="canvas-uaf/v912-recon.html?op=auto&amp;cb=913">V912 - pointer-derived numbers recon [FINAL: no anchor]</a>
+<a href="canvas-uaf/v911-finetune.html?op=auto&amp;cb=912">V911 - WebCore 768 fine-tune (FINAL: 23 MISS, 6 CRASH, 0 SUSPECT)</a>
+<a href="canvas-uaf/v910-anchor.html?op=auto&amp;cb=911">V910 - mapped-anchor harvest (FINAL: 11 MISS, 3 CRASH, 0 SUSPECT)</a>
+<a href="canvas-uaf/v909-geometry.html?op=auto&amp;cb=910">V909 - urlsp/imagedata geometry tuning + matchmedia x3 (FINAL: 7 MISS, 10 CRASH, 0 SUSPECT)</a>
+<a href="canvas-uaf/v908-full52-oob.html?op=auto&amp;cb=909">V908 - Full-52 isolated + matchmedia x3 + OOB matrix (FINAL: 45 MISS, 12 CRASH, 0 SUSPECT)</a>
+<a href="canvas-uaf/v907-cross-isolate.html?op=auto&amp;cb=908">V907 - V680 hit isolation, one case per load (FINAL: 5 MISS, 7 CRASH, 0 SUSPECT)</a>
+<a href="canvas-uaf/v906-slot-steer-oracle.html?op=auto&amp;cb=907">V906 - slot-steer oracle, offset-agnostic (FINAL: 15/15 CRASH, 0 HIT)</a>
+<a href="canvas-uaf/v905-dirtyrect-arithmetic.html?op=auto&amp;cb=905">V905 - canvas dimension / dirty-rect arithmetic (RESULT: DEAD, all clamped)</a>
+<a href="canvas-uaf/v569.html?m=cal&n768=200&cb=1">V569 - UAF trigger + reclaim (cal mode)</a>
+<a href="canvas-uaf/v569.html?m=scan&n768=200&cb=1">V569 - scan mode (heap topology)</a>
+<a href="canvas-uaf/v573.html?cb=1">V573 - same-type reclaim diagnostic</a>
+<a href="canvas-uaf/v573-reclaim-diagnostic.html?cb=1">V573 - reclaim diagnostic (alt)</a>
+<a href="canvas-uaf/v589.html?cb=1">V589 - BMR trigger validation</a>
+
+<h2>1. Alias R/W</h2>
+<a href="canvas-uaf/v630.html?cb=1">V630 - full 12-API alias diagnostic</a>
+<a href="deployed/fa-v562-caps.html?cb=1">V562 - caps diagnostic (deployed)</a>
+
+<h2>2. Crash oracle / ASLR</h2>
+<a href="canvas-uaf/v913-tee-nonce.html?op=auto&amp;cb=914">V913 - tee() nonce readback</a>
+<a href="canvas-uaf/v912-recon.html?op=auto&amp;cb=913">V912 - pointer-derived numbers recon [FINAL: no anchor]</a>
+<a href="canvas-uaf/v911-finetune.html?op=auto&amp;cb=912">V911 - WebCore 768 fine-tune [FINAL: 23 MISS, 6 CRASH, 0 SUSPECT]</a>
+<a href="canvas-uaf/v910-anchor.html?op=auto&amp;cb=911">V910 - mapped-anchor harvest [FINAL: JSC MISS, 0 SUSPECT]</a>
+<a href="canvas-uaf/v909-geometry.html?op=auto&amp;cb=910">V909 - new-hit geometry tuning [FINAL: 7 MISS, 10 CRASH, 0 SUSPECT]</a>
+<a href="canvas-uaf/v908-full52-oob.html?op=auto&amp;cb=909">V908 - full-52 + matchmedia x3 + OOB [FINAL: exhaustive, 0 SUSPECT, OOB closed]</a>
+<a href="canvas-uaf/v907-cross-isolate.html?op=auto&amp;cb=908">V907 - cross-type hit isolation [FINAL: reclaim real, readable fake DEAD, 0 SUSPECT]</a>
+<a href="canvas-uaf/v906-slot-steer-oracle.html?op=auto&amp;cb=907">V906 - slot-steer oracle, offset-agnostic [FINAL: mechanism confirmed, 0 HIT, needs mapped addr]</a>
+<a href="canvas-uaf/v650.html?cb=1">V650 - crash oracle + binary subdivision (NOT CONFIRMED, 0 HIT)</a>
+<a href="canvas-uaf/v650.html?n768=50&n4k=0&cb=1">V650 - reduced (n768=50, n4k=0) [OOM-safe]</a>
+<a href="canvas-uaf/v650.html?n768=10&n4k=0&cb=1">V650 - minimal (n768=10, n4k=0) [OOM-safe]</a>
+<a href="canvas-uaf/v650.html?n768=5&n4k=0&cb=1">V650 - ultra-minimal (n768=5, n4k=0) [OOM-safe]</a>
+<a href="V650a-forge-test.html?cb=2000">V650a - Forge m_stateStack + read lineWidth test (never returned)</a>
+<a href="canvas-uaf/v674.html?cb=3000">V674 - APNG info-leak (forged read) [DEAD: load-fail]</a>
+<a href="canvas-uaf/v660.html?cb=1">V660 - 640MB heap spray scanner</a>
+
+<h2>3. Recon (JS probes, not standalone HTML)</h2>
+<p class="note">These are .js probes; serve via host or build_standalone. Files in probes/recon/ (p161a, p520, p521, ...).</p>
+
+<h2>3.5 Streams / tee() crash isolation</h2>
+<p class="note">tee() branch CLOSED 2026-11-06 (V904): under-yield only shortens the results vector -> bounds trap (DoS), no OOB read/leak.</p>
+<a href="canvas-uaf/v913-tee-nonce.html?op=auto&amp;cb=914">V913 - tee() nonce readback: fresh nonces, both branches, exactly-equals check</a>
+<a href="streams/v904-shortvector-vs-primitive.html?op=auto&amp;cb=904">V904 - tee() short-vector vs primitive discriminator (RESULT: short-vector confirmed)</a>
+<a href="streams/v903-crash-isolation.html?op=auto&amp;cb=903">V903 - tee() crash isolation (one case per load, last-stage, hang-vs-crash)</a>
+<a href="streams/v902-fakebranch.html?op=auto&amp;cb=902">V902 - tee() iterator injection matrix (fake branch / done-value / protocol)</a>
+<a href="streams/v901-truth.html?op=auto&amp;cb=901">V901 - truth harness (iterator usage / count vs type / env fingerprint)</a>
+
+<h2>4. Tools</h2>
+<a href="../">Repo root (remote loader)</a>
+<a href="https://github.com/pastawithpesto/PS5-14.10-Jailbreak-Research">GitHub repo</a>
+
+<p class="note">Beacons log: <code>host-beacons.log</code> on server. Watch with <code>tail -f</code>.</p>
+</body>
+</html>

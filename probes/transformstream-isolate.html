@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>TransformStream Isolate (V941)</title>
+</head>
+<body><pre id="out">TransformStream isolate running...</pre>
+<script>
+/* V941: Isolate TransformStream behavior.
+ * Beacon prefix: V941-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V941-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+async function run() {
+  bks('BOOT', 'transformstream-isolate');
+  try {
+    bks('CREATE', 'before');
+    var ts = new TransformStream({
+      start: function (controller) {
+        bks('CB-START', 'called');
+      },
+      transform: function (chunk, controller) {
+        bks('CB-TRANSFORM', 'chunk=' + typeof chunk);
+        controller.enqueue(chunk);
+      },
+      flush: function (controller) {
+        bks('CB-FLUSH', 'called');
+      }
+    });
+    bks('CREATE', 'after');
+
+    bks('WRITER-GET', 'before');
+    var writer = ts.writable.getWriter();
+    bks('WRITER-GET', 'after');
+
+    bks('READER-GET', 'before');
+    var reader = ts.readable.getReader();
+    bks('READER-GET', 'after');
+
+    bks('WRITE1', 'before');
+    await writer.write(new Uint8Array([1, 2, 3]));
+    bks('WRITE1', 'after');
+
+    bks('READ1', 'before');
+    var r1 = await reader.read();
+    bks('READ1', 'value=' + (r1.value ? r1.value.length : 'none') + ',done=' + r1.done);
+
+    bks('CLOSE', 'before');
+    await writer.close();
+    bks('CLOSE', 'after');
+
+    bks('READ2', 'before');
+    var r2 = await reader.read();
+    bks('READ2', 'done=' + r2.done);
+
+    bks('DONE', 'clean');
+    say('DONE clean');
+  } catch (e) {
+    bks('ERR', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+    say('ERR: ' + e.constructor.name);
+  }
+}
+run();
+</script>
+</body>
+</html>

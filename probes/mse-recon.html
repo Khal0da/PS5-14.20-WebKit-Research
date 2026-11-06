@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>MSE Recon Probe (V910)</title>
+</head>
+<body><pre id="out">MSE recon probe running...</pre>
+<script>
+/* V910: MediaSource Extensions subsystem recon probe.
+ * Read-only diagnostics: appendBuffer, remove, abort, changeType,
+ * rapid append/remove cycles with malformed/truncated media segments.
+ * No forged pointers, no ROP, no arbitrary R/W.
+ * Beacon prefix: V910-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V910-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+function waitEvent(obj, name) {
+  return new Promise(function (resolve) {
+    var handler = function (e) {
+      obj.removeEventListener(name, handler);
+      resolve(e);
+    };
+    obj.addEventListener(name, handler);
+    setTimeout(function () { obj.removeEventListener(name, handler); resolve(null); }, 3000);
+  });
+}
+
+/* ---- Test 1: Basic MSE availability ---- */
+async function testBasic() {
+  var r = {};
+  try {
+    if (!window.MediaSource) { r.ms = 'undefined'; return r; }
+    var ms = new MediaSource();
+    r.msReadyState = ms.readyState;
+    var objUrl = URL.createObjectURL(ms);
+    r.objUrl = typeof objUrl;
+
+    var video = document.createElement('video');
+    video.src = objUrl;
+    await waitEvent(ms, 'sourceopen');
+    r.opened = ms.readyState;
+
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+    r.sbMode = sb.mode;
+    r.sbUpdating = sb.updating;
+    ms.endOfStream();
+    URL.revokeObjectURL(objUrl);
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 2: appendBuffer with random junk ---- */
+async function testAppendJunk() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+
+    var junk = new Uint8Array(4096);
+    for (var i = 0; i < junk.length; i++) junk[i] = (i * 37 + 13) & 0xFF;
+
+    var p = waitEvent(sb, 'error');
+    try {
+      sb.appendBuffer(junk.buffer);
+      await p;
+      r.result = 'no-throw';
+      r.updating = sb.updating;
+    } catch (e) {
+      r.result = 'throw:' + e.constructor.name;
+    }
+    r.buffered = sb.buffered.length;
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 3: appendBuffer with truncated MP4 box ---- */
+async function testTruncatedMP4() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+
+    // ftyp box with huge declared size but truncated body
+    var box = new Uint8Array(16);
+    box[0] = 0x00; box[1] = 0x00; box[2] = 0x00; box[3] = 0x10;
+    box[4] = 0x66; box[5] = 0x74; box[6] = 0x79; box[7] = 0x70;
+    box[8] = 0x69; box[9] = 0x73; box[10] = 0x6F; box[11] = 0x6D;
+
+    var p = waitEvent(sb, 'error');
+    try {
+      sb.appendBuffer(box.buffer);
+      await p;
+      r.result = 'no-throw';
+    } catch (e) {
+      r.result = 'throw:' + e.constructor.name;
+    }
+    r.updating = sb.updating;
+    r.buffered = sb.buffered.length;
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 4: remove() with invalid ranges ---- */
+async function testRemoveRanges() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+
+    var ranges = [
+      { start: -1, end: 1 },
+      { start: 1, end: 0 },
+      { start: NaN, end: NaN },
+      { start: Infinity, end: Infinity },
+      { start: 0, end: 1e12 }
+    ];
+    for (var i = 0; i < ranges.length; i++) {
+      try {
+        sb.remove(ranges[i].start, ranges[i].end);
+        r['r' + i] = 'ok';
+      } catch (e) {
+        r['r' + i] = e.constructor.name;
+      }
+    }
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 5: abort during append cycle ---- */
+async function testAbortCycle() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+
+    var junk = new Uint8Array(65536);
+    for (var i = 0; i < junk.length; i++) junk[i] = i & 0xFF;
+
+    for (var k = 0; k < 10; k++) {
+      try {
+        sb.appendBuffer(junk.buffer);
+        sb.abort();
+      } catch (e) {
+        r['iter' + k] = e.constructor.name;
+      }
+    }
+    r.finalUpdating = sb.updating;
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 6: changeType patterns ---- */
+async function testChangeType() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+    var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+
+    var types = [
+      'video/mp4; codecs="avc1.64001E"',
+      'audio/mp4; codecs="mp4a.40.2"',
+      'video/webm; codecs="vp9"',
+      'invalid/type'
+    ];
+    for (var i = 0; i < types.length; i++) {
+      try {
+        if (typeof sb.changeType === 'function') {
+          sb.changeType(types[i]);
+          r['t' + i] = 'ok';
+        } else {
+          r['t' + i] = 'no-changeType';
+        }
+      } catch (e) {
+        r['t' + i] = e.constructor.name;
+      }
+    }
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 7: rapid add/remove source buffers ---- */
+async function testAddRemoveBuffers() {
+  var r = {};
+  try {
+    var ms = new MediaSource();
+    var video = document.createElement('video');
+    video.src = URL.createObjectURL(ms);
+    await waitEvent(ms, 'sourceopen');
+
+    for (var i = 0; i < 20; i++) {
+      try {
+        var sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+        ms.removeSourceBuffer(sb);
+      } catch (e) {
+        r['iter' + i] = e.constructor.name;
+      }
+    }
+    r.sourceBuffers = ms.sourceBuffers.length;
+    ms.endOfStream();
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Run all tests sequentially ---- */
+async function runAll() {
+  bks('BOOT', 'mse-recon-v1');
+  var tests = [
+    { name: 'BASIC', fn: testBasic },
+    { name: 'APPENDJUNK', fn: testAppendJunk },
+    { name: 'TRUNCATEDMP4', fn: testTruncatedMP4 },
+    { name: 'REMOVERANGES', fn: testRemoveRanges },
+    { name: 'ABORTCYCLE', fn: testAbortCycle },
+    { name: 'CHANGETYPE', fn: testChangeType },
+    { name: 'ADDREMOVE', fn: testAddRemoveBuffers }
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    bks(tests[i].name + '-PRE', 'start');
+    try {
+      var result = await tests[i].fn();
+      bks(tests[i].name, summarize(result));
+      say(tests[i].name + ': ' + summarize(result));
+    } catch (e) {
+      bks(tests[i].name + '-FATAL', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+      say(tests[i].name + ' FATAL: ' + e.constructor.name);
+    }
+    await sleep(300);
+  }
+  bks('DONE', 'all-' + tests.length);
+  say('DONE');
+}
+runAll();
+</script>
+</body>
+</html>

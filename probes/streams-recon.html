@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Streams API Recon Probe (V940)</title>
+</head>
+<body><pre id="out">Streams API recon probe running...</pre>
+<script>
+/* V940: Streams API subsystem recon probe.
+ * Read-only diagnostics: TransformStream, ReadableStream tee/cancel,
+ * pipeTo/pipeThrough, highWaterMark edge cases, rapid cycles.
+ * No forged pointers, no ROP, no arbitrary R/W.
+ * Beacon prefix: V940-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V940-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function summarize(obj) {
+  try { return JSON.stringify(obj); } catch (e) { return String(obj); }
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+/* ---- Test 1: Basic availability ---- */
+async function testBasic() {
+  var r = {};
+  try {
+    r.rs = typeof ReadableStream;
+    r.ws = typeof WritableStream;
+    r.ts = typeof TransformStream;
+    var rs = new ReadableStream({
+      start: function (controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      }
+    });
+    var reader = rs.getReader();
+    var result = await reader.read();
+    r.readValue = result.value ? result.value.length : 'none';
+    r.readDone = result.done;
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 2: TransformStream re-entrancy ---- */
+async function testTransformReentrancy() {
+  var r = {};
+  try {
+    var ts = new TransformStream({
+      transform: function (chunk, controller) {
+        controller.enqueue(chunk);
+      },
+      flush: function (controller) {
+        controller.enqueue(new Uint8Array([9, 9, 9]));
+      }
+    });
+
+    var writer = ts.writable.getWriter();
+    var reader = ts.readable.getReader();
+
+    await writer.write(new Uint8Array([1, 2, 3]));
+    await writer.close();
+
+    var chunks = [];
+    while (true) {
+      var res = await reader.read();
+      if (res.done) break;
+      chunks.push(res.value.length);
+    }
+    r.chunks = chunks;
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 3: ReadableStream tee + cancel ---- */
+async function testTeeCancel() {
+  var r = {};
+  try {
+    var rs = new ReadableStream({
+      start: function (controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3, 4, 5]));
+        controller.enqueue(new Uint8Array([6, 7, 8, 9, 10]));
+        controller.close();
+      }
+    });
+    var teed = rs.tee();
+    var r1 = teed[0].getReader();
+    var r2 = teed[1].getReader();
+
+    var a = await r1.read();
+    await r1.cancel('done');
+
+    var b = await r2.read();
+    var c = await r2.read();
+    r.branch1 = { value: a.value ? a.value.length : 0, done: a.done };
+    r.branch2First = { value: b.value ? b.value.length : 0, done: b.done };
+    r.branch2Second = { value: c.value ? c.value.length : 0, done: c.done };
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 4: pipeTo with abort ---- */
+async function testPipeAbort() {
+  var r = {};
+  try {
+    var rs = new ReadableStream({
+      start: function (controller) {
+        controller.enqueue(new Uint8Array(1024));
+        controller.enqueue(new Uint8Array(1024));
+      }
+    });
+    var ws = new WritableStream();
+    var abortController = new AbortController();
+    var p = rs.pipeTo(ws, { signal: abortController.signal });
+    abortController.abort();
+    await p;
+    r.piped = 'aborted-ok';
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 5: negative / zero highWaterMark ---- */
+async function testHighWaterMark() {
+  var r = {};
+  var marks = [-1, 0, -1024, NaN, Infinity];
+  for (var i = 0; i < marks.length; i++) {
+    try {
+      var rs = new ReadableStream({}, { highWaterMark: marks[i] });
+      r['m' + marks[i]] = 'created';
+    } catch (e) {
+      r['m' + marks[i]] = e.constructor.name;
+    }
+  }
+  return r;
+}
+
+/* ---- Test 6: rapid enqueue/close/cancel cycles ---- */
+async function testRapidCycles() {
+  var r = {};
+  try {
+    for (var i = 0; i < 50; i++) {
+      var rs = new ReadableStream({
+        start: function (controller) {
+          controller.enqueue(new Uint8Array(64));
+          controller.close();
+        }
+      });
+      var reader = rs.getReader();
+      await reader.read();
+      await reader.cancel();
+    }
+    r.cycles = 50;
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 7: TransformStream with malformed chunks ---- */
+async function testTransformMalformed() {
+  var r = {};
+  try {
+    var ts = new TransformStream({
+      transform: function (chunk, controller) {
+        // Pass through whatever we get
+        controller.enqueue(chunk);
+      }
+    });
+    var writer = ts.writable.getWriter();
+    await writer.write(null);
+    await writer.write(undefined);
+    await writer.write(123);
+    await writer.write('string');
+    await writer.close();
+
+    var reader = ts.readable.getReader();
+    var chunks = [];
+    while (true) {
+      var res = await reader.read();
+      if (res.done) break;
+      chunks.push(typeof res.value);
+    }
+    r.types = chunks;
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Test 8: pipeThrough ---- */
+async function testPipeThrough() {
+  var r = {};
+  try {
+    var rs = new ReadableStream({
+      start: function (controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      }
+    });
+    var ts = new TransformStream();
+    var out = rs.pipeThrough(ts);
+    var reader = out.getReader();
+    var result = await reader.read();
+    r.valueLen = result.value ? result.value.length : 0;
+    r.done = result.done;
+  } catch (e) {
+    r.err = e.constructor.name + ':' + String(e.message || '').slice(0, 80);
+  }
+  return r;
+}
+
+/* ---- Run all tests sequentially ---- */
+async function runAll() {
+  bks('BOOT', 'streams-recon-v1');
+  var tests = [
+    { name: 'BASIC', fn: testBasic },
+    { name: 'TRANSFORM', fn: testTransformReentrancy },
+    { name: 'TEECANCEL', fn: testTeeCancel },
+    { name: 'PIPEABORT', fn: testPipeAbort },
+    { name: 'HIGHWATERMARK', fn: testHighWaterMark },
+    { name: 'RAPIDCYCLES', fn: testRapidCycles },
+    { name: 'MALFORMED', fn: testTransformMalformed },
+    { name: 'PIPTHROUGH', fn: testPipeThrough }
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    bks(tests[i].name + '-PRE', 'start');
+    try {
+      var result = await tests[i].fn();
+      bks(tests[i].name, summarize(result));
+      say(tests[i].name + ': ' + summarize(result));
+    } catch (e) {
+      bks(tests[i].name + '-FATAL', e.constructor.name + ':' + String(e.message || '').slice(0, 80));
+      say(tests[i].name + ' FATAL: ' + e.constructor.name);
+    }
+    await sleep(200);
+  }
+  bks('DONE', 'all-' + tests.length);
+  say('DONE');
+}
+runAll();
+</script>
+</body>
+</html>

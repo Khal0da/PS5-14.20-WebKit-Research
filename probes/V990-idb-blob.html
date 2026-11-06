@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V990 IndexedDB + Blob Streams</title>
+</head>
+<body><pre id="out">V990 IndexedDB + Blob recon running...</pre>
+<script>
+/* V990: IndexedDB + Blob Streams recon probe.
+ * Beacon prefix: V990-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V990-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) + '&t=' + Date.now() + '&s=1';
+  try { new Image().src = u; } catch(e) {}
+}
+
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+async function run() {
+  bks('BOOT', 'idb-blob-v1');
+  
+  // Check IDb availability
+  var hasIDB = typeof indexedDB !== 'undefined';
+  bks('AVAIL', 'indexedDB=' + (hasIDB ? 'Y' : 'N'));
+  
+  if (!hasIDB) {
+    bks('ABORT', 'no-indexedDB');
+    say('IndexedDB not available');
+    return;
+  }
+  
+  try {
+    // Create a test database
+    var dbName = 'testdb_v990_' + Date.now();
+    var storeName = 'blobstore';
+    
+    bks('OPEN-START', 'db=' + dbName);
+    var openPromise = new Promise((resolve, reject) => {
+      var req = indexedDB.open(dbName, 1);
+      req.onerror = () => { bks('OPEN-ERR', req.error?.message); reject(req.error); };
+      req.onsuccess = () => { bks('OPEN-SUCCESS', 'version=' + req.result.version); resolve(req.result); };
+      req.onblocked = () => { bks('OPEN-BLOCKED', 'blocked'); };
+    });
+    
+    var db = await openPromise;
+    bks('DB-OPEN', 'ok');
+    
+    // Create object store
+    bks('CREATE-STORE', 'before');
+    var createPromise = new Promise((resolve, reject) => {
+      var req = db.createObjectStore(storeName, { keyPath: 'id' });
+      req.onsuccess = () => { bks('STORE-CREATED', 'ok'); resolve(); };
+      req.onerror = () => { bks('STORE-ERR', req.error?.message); reject(req.error); };
+    });
+    await createPromise;
+    bks('STORE-READY', 'ok');
+    
+    // Create a Blob
+    bks('BLOB-CREATE', 'before');
+    var marker = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+    for (var i = 0; i < 100; i++) marker.push(0x41);
+    var blob = new Blob([marker], { type: 'application/octet-stream' });
+    bks('BLOB-CREATE', 'after blobCreated');
+    
+    // Put Blob in store
+    bks('PUT-BLOB', 'before');
+    var tx = db.transaction(storeName, 'readwrite');
+    var store = tx.objectStore(storeName);
+    var putReq = store.put({ id: 'marker1', data: blob });
+    
+    await new Promise((resolve, reject) => {
+      putReq.onsuccess = () => { bks('PUT-SUCCESS', 'ok'); resolve(); };
+      putReq.onerror = () => { bks('PUT-ERR', putReq.error?.message); reject(putReq.error); };
+    });
+    
+    await new Promise(r => setTimeout(r, 100));
+    bks('PUT-DONE', 'ok');
+    
+    // Get Blob back
+    bks('GET-BLOB', 'before');
+    var getReq = store.get('marker1');
+    
+    await new Promise((resolve, reject) => {
+      getReq.onsuccess = () => {
+        var result = getReq.result;
+        if (result && result.data) {
+          bks('GET-SUCCESS', 'blobSize=' + result.data.size);
+          // Try to read as ArrayBuffer
+          result.data.arrayBuffer().then(buf => {
+            bks('ARRAYBUFFER', 'size=' + buf.byteLength);
+            var view = new Uint8Array(buf);
+            var hex = '';
+            for (var i = 0; i < Math.min(64, view.length); i++) hex += view[i].toString(16).padStart(2, '0');
+            bks('DATA', hex);
+            bks('DONE', 'complete');
+            say('DONE');
+          }).catch(e => { bks('ABERR', e.message); say('ArrayBuffer err: ' + e.message); });
+        } else {
+          bks('GET-NULL', 'no-result');
+          bks('DONE', 'failed');
+        }
+        resolve();
+      };
+      getReq.onerror = () => { bks('GET-ERR', getReq.error?.message); resolve(); };
+    });
+    
+  } catch (e) {
+    bks('ERROR', e.constructor.name + ':' + String(e.message || '').slice(0, 100));
+    say('ERROR: ' + e.constructor.name + ' ' + e.message);
+  }
+}
+
+run();
+</script>
+</body>
+</html>

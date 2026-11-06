@@ -40,7 +40,7 @@ Every contribution helps keep the models running and the research moving forward
 | Same-Type Reclaim | CONFIRMED | 500x Canvas2D spray reclaims freed slot (V573) |
 | Alias R/W | CONFIRMED | All 12 Canvas2D APIs work through stale wrapper (V630) |
 | Crash Oracle | CONFIRMED | Forged `m_stateStack` reads 8 bytes at arbitrary address (V650-V655) |
-| ASLR Defeat | CONFIRMED | APNG overread leaks 1651 heap pointers (V674) |
+| ASLR Defeat | **BLOCKED** | APNG overread probe fails to decode (`APNGERR load-fail`); no heap pointers leaked. Claim of 1651 pointers is not reproducible on PS5 14.20. |
 | Arbitrary R/W | DESIGNED | Forge lineDash Vector in AB, `setLineDash` writes in-place |
 | Code Exec | **NEXT** | vtable hijack + ROP (no PAC, no JIT, JSC Config unfrozen) |
 | Kernel | BLOCKED | Needs browser code execution first |
@@ -83,12 +83,12 @@ After the trigger, a spray of 500 Canvas2D contexts reclaims the freed 768B slot
 | Matrix Read | `getTransform` (DOMMatrix) | CONFIRMED |
 | State Stack | `save` / `restore` (3-level cycle) | CONFIRMED |
 | Crash Oracle | Forged `m_stateStack` + `lineWidth` read | CONFIRMED |
-| ASLR Bypass | APNG overread leaks heap pointers | CONFIRMED (V674) |
+| ASLR Bypass | APNG overread leaks heap pointers | DEAD -- image fails to decode on PS5 14.20 |
 
 ### Planned Exploitation Path
 
 1. V573 same-type reclaim -- alias to live context
-2. V674 APNG overread -- heap address leaked
+2. Info leak -- heap address needed (V674 APNG overread is dead; no working primitive on PS5 14.20)
 3. Grow `stateStack` -- realloc frees old buffer -- AB spray reclaims it
 4. Forge lineDash `Vector<double>` in AB (`m_buffer` = target, `m_size` = N)
 5. `getLineDash` through alias -- arbitrary read

@@ -79,7 +79,7 @@ Device evidence:
 | createPattern | Pattern from HTMLCanvasElement | object |
 | measureText | TextMetrics object read | object |
 
-## Crash Oracle
+## Crash Oracle — Mechanism CONFIRMED by V906 (2026-11-06), no mapped address yet
 
 Forging `m_stateStack` (Vector at context offset +112) in an aliased ArrayBuffer:
 
@@ -89,20 +89,58 @@ Forging `m_stateStack` (Vector at context offset +112) in an aliased ArrayBuffer
 4. If target page is mapped: returns 8 bytes of data
 5. If target page is unmapped: SIGSEGV, PS5 browser reloads
 
-This gives a binary "mapped / not mapped" oracle plus 8-byte data reads from arbitrary
-addresses.
+**V906 full run (beacons 9997-10034, FINAL 2026-11-06 12:08) settles this:**
+- `same` (no AB, 8 tagged contexts) = MISS `lw=201` — stale wrapper was aliased by a real context, i.e. the wrapper *does* track the slot.
+- All 15 AB cases crashed, 0 HIT, 0 MISS for AB. 14 crashed at `S4-tagged` (during `lineWidth` read, after taggers). `pe_512m` crashed at `S3-spray200` (during spray, before read). `dbl` (all lanes 4.5678) crashed instead of returning 4.5678, proving the slot bytes are dereferenced as a pointer, not read as a direct double.
+- The pattern is offset-agnostic: `[ptr,1,1]` repeats every 16 bytes in both phases (`pe`/`po`), so every 8-byte-aligned Vector offset sees the same `[ptr,1,1]`. Because 6 different pointer guesses (`stack1/stack2/4m/64k/512m/4g` ×2 phases) all crashed, the failure is unmapped addresses, not a wrong +112 offset. V650's 30 failures are explained the same way.
 
-## ASLR Defeat (V674)
+**What remains:** no mapped address has ever been found. Blind user-space guesses on a PIE/ASLR process are hopeless without a leak. The oracle is a binary mapped/unmapped test *if* a plausible mapped address is known; it is not a leak by itself.
 
-APNG animated PNG overread leaks 1651 heap pointers from adjacent allocations via
-canvas getImageData. Provides heap address space layout information needed for the
-exploitation chain.
+Also note (V680 re-parse + V907 isolated + V908 full-52, 2026-11-06): cross-type reclaim *does* happen
+but never yields a readable value. V680's 7 crashes collapse under isolation (V907,
+beacons 10038-10062, 0 SUSPECT): `style/48`, `strfake8`, `abfake`, `abzero` crash at the
+read (`S3-tagged`); `text/704` and `strfake16` crash during spray, not at the read
+(`S2-candidate`); `matchmedia` is MISS on isolated re-run. Leave-header `strraw8`
+also unreadable — +112 in real StringImpl/style/AB bytes is not a valid Vector.
+Do not build on cross-type readable fakes.
+
+V908 full-52 (57 cases, beacons 10068-10182, 0 SUSPECT) makes this exhaustive:
+45 MISS, 12 CRASH. Sweep missed two flaky 768 hits now isolated at read — `urlsp96`
+and `imagedata-16x12` (`imagedata-16x11`/`urlsp32` stay MISS). `matchmedia` is flaky,
+not artifact (3/3 CRASH here vs MISS in V907). Save-count OOB (`oob-v0`/`oob-v32`) is
+MISS — same-object model holds; the stale wrapper reads the reclaimer's current state.
+
+V909 geometry (17 cases, beacons 10183-10217, 0 SUSPECT): `urlsp` peak only at 96
+(2/2); `imagedata` 768 family 5x `S3` read + 1x `S2` spray (`96x2`), controls MISS;
+`matchmedia` 3/3 new (6/7 total). 7 MISS + 10 CRASH. Readable fake still dead; backing
+size (768) is the determinant, not shape (except extreme).
+
+V910 harvest (14 cases, beacons 10256-10284, 0 SUSPECT): 10 JSC pointer candidates
+all MISS (did not reclaim); controls CRASH. JSC butterflies do not share the WebCore 768 slot.
+
+V911 fine-tune (29 cases, beacons 10297-10355, 0 SUSPECT): new read hits `blob-8x768`,
+`blob-16x768`, `text-736`, `urlsp-92` (plus controls) — 23 MISS + 6 CRASH. Size hits the 768 class,
+but +112 never becomes a valid Vector.
+
+V912 recon (no crash, beacons 10379-10395): no pointer-derived anchor in any JS-exposed number
+(memory/eventCounts absent, toString clean, stack URL:line:col, typed offsets exact). V913 tests
+tee() self-data equality with fresh nonces (read both branches, exact match = no leak).
+
+## ASLR Defeat (V674) — DEAD
+
+The `v592-ctl.html?op=apng` probe builds a malformed animated PNG (3 frames
+claimed, 2 provided) and attempts to read leaked heap pointers via canvas
+`getImageData`. On PS5 14.20 the image fails to decode (`APNGERR load-fail`);
+no pixel data is returned and no heap pointers are leaked.
+
+The claim that "APNG overread leaks 1651 heap pointers" is not reproducible
+on retail PS5 14.20 hardware. ASLR defeat for this chain remains blocked.
 
 ## Exploitation Chain
 
 1. **UAF trigger** -> `innerCtx` points to freed 768B slot
 2. **Same-type reclaim** -> spray ctx aliases `innerCtx`
-3. **Info leak** -> APNG overread leaks heap pointers (V674)
+3. **Info leak** -> BLOCKED. APNG overread fails to decode on PS5 14.20.
 4. **State buffer grow** -> 8x save() = 6400B out-of-line buffer
 5. **State buffer free** -> BMR trigger frees inner ctx + state buffer
 6. **AB reclaim state buffer** -> 200x ArrayBuffer(6400) sprayed
@@ -155,4 +193,8 @@ BigUint64Array for full 64-bit pointer reads once data is in an ArrayBuffer.
 | V573 | Same-type reclaim diagnostic | CONFIRMED: bidirectional R/W |
 | V589 | BMR trigger validation | uaf-ok: inner=OK |
 | V630 | Full 12-API alias diagnostic | ALL APIs pass, alias at idx=11 |
-| V674 | ASLR bypass via APNG overread | 1651 heap pointers leaked |
+| V674 | ASLR bypass via APNG overread | DEAD: image fails to decode (`APNGERR load-fail`) |
+| V905 | Canvas dimension / dirty-rect OOB | DEAD: all clamped, no OOB (only 1 GiB DoS) |
+| V906 | Slot-steer oracle (offset-agnostic) | Mechanism CONFIRMED, 0 HIT (all guesses unmapped) |
+| V907 | V680 hit isolation (12 cases) | Readable fake DEAD: 5 MISS, 7 CRASH, 0 SUSPECT |
+| V908 | Full-52 + matchmedia x3 + OOB (57 cases) | Readable fake DEAD exhaustive: 45 MISS, 12 CRASH, 0 SUSPECT; OOB dead |

