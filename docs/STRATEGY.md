@@ -72,10 +72,17 @@ Current candidates:
 - `op=apng`: DEAD, image fails to decode on PS5 14.20.
 
 **Still open, in priority order:**
-1. Mapped-address derivation without guessing (heap-spray-derived): the V906 oracle works but every blind address (V650 30 + V906 12) is unmapped. Need a known-mapped anchor, not more guesses. V910 showed JSC pointer harvest does not reclaim (10/10 MISS). V911 fine-tune found 4 new read hits but 0 SUSPECT — size tuning alone does not fix +112. V912 recon found no pointer-derived anchor in any JS-exposed number (heap sizes/latencies/toString/stacks/typed offsets all clean). V913 tests tee() self-data equality with fresh nonces.
+1. Mapped-address derivation: **IN-BROWSER SURFACE EXHAUSTED (Nov 6).** V906 oracle works but every address tried is unmapped (V650 30 + V906 12). Closed since: cross-type reclaim readable fake (V907+V908, 0 SUSPECT), OOB save-count (V908), JSC pointer harvest (V910), WebCore size fine-tune (V911, 4 new read hits still 0 SUSPECT), JS-exposed number recon (V912, no anchor), tee() with fresh nonces (V913, self-data only). Remaining paths are outside the tunnel-only setup: native crash reports / klog via loader on the PS5's real IP (port 9027), or a second bug that is itself a leak.
 2. Geometry tuning of the two NEW 768 hits — **DONE by V909 (beacons 10183-10217, 7 MISS + 10 CRASH + 0 SUSPECT)**: `urlsp` peak only at 96; `imagedata` 768 family 5x `S3-tagged` read + 1x `S2` spray (`96x2`), controls MISS. Readable fake still dead.
 3. `matchmedia` flaky race — **DONE by V909 (6/7 total)**: V907 1 MISS, V908 3/3 CRASH, V909 r4-r6 3/3 CRASH. Highly reliable, not a sweep artifact.
 4. V689 `scan` / `js` / `lw0` / `restore` / v592 `stage=5` / V682 `text a=704` — **CLOSED**: scan + all canaries OBLOCK on AB-owned slot; stage=5 OOM before POST; text never reclaims the slot. See DEAD_ENDS "Nov 4/5 additions".
+
+**Phase 4 honest status (Nov 6, post-V913):** the canvas UAF chain is capped, browser-side, at
+reliable DoS (urlsp96 / imagedata-768 / matchmedia crash-at-read) + state-field R/W via alias
+(V573/V630) + a mapped/unmapped oracle (V906). No heap pointer has ever been read. The next
+realistic unblocks are (a) loader/klog on the real PS5 IP for native crash reports — resolves
+"what is mapped" empirically, or (b) hunting a second, leak-class WebKit bug. Everything else
+in the current chain is blocked on the same missing anchor.
 
 **Designed but not yet reached:**
 - Forge lineDash Vector in AB for arbitrary R/W

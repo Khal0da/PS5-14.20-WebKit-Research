@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V1010 - ImageBitmap Deep Fuzzer</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>V1010 - ImageBitmap Deep Fuzzer</h1>
+<p>Diagnostic only. Deep combos: transfer → draw → close → clone → reuse, extreme sizes, chained resize, free cycles.</p>
+<pre id="out">starting...</pre>
+<script>
+/* V1010: ImageBitmap deep fuzzer (diagnostic).
+ *
+ * Extends V1001 with composition chains: transferToImageBitmap
+ * → drawImage → close → structuredClone → reuse, plus extreme
+ * sizes, chained resizes, and offscreen realloc cycles.
+ *
+ * Crash oracle: V1010-IT?d=i before, V1010-OK?d=i after.
+ * Beacon prefix: V1010-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ITERATIONS = 300;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V1010-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+var seed = 0x1422;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function spick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+function snum(n) { return Math.floor(srnd() * n); }
+
+var SIZES = [1, 2, 3, 8, 33, 64, 128, 257, 512, 1024, 1e6, 0, -1, 1e9];
+var QUALITIES = ['low', 'medium', 'high', 'pixelated', 'bogus', '', '0', '-1', '2'];
+var PREMULT = ['none', 'premultiply', 'default', 'bogus', ''];
+var COLOR = ['none', 'default', 'bogus', '', null];
+var ORIENT = ['none', 'flipY', 'from-image', 'bogus', ''];
+
+function mkCanvas(w, h) {
+  var c = document.createElement('canvas');
+  c.width = Math.max(0, w); c.height = Math.max(0, h);
+  var g = c.getContext('2d');
+  if (g) {
+    try {
+      g.fillStyle = 'rgba(10,20,30,0.5)';
+      g.fillRect(0, 0, Math.max(0, w), Math.max(0, h));
+      g.drawImage(c, 0, 0);
+    } catch (e) {}
+  }
+  return c;
+}
+
+function mkImageData(w, h) {
+  var w2 = Math.max(1, Math.min(w, 64));
+  var h2 = Math.max(1, Math.min(h, 64));
+  var n = w2 * h2 * 4;
+  var d = new Uint8ClampedArray(n);
+  for (var i = 0; i < n; i++) d[i] = (i * 37) & 0xff;
+  try { return new ImageData(d, w2, h2); } catch (e) { return null; }
+}
+
+function badOpts() {
+  var o = {};
+  if (srnd() < 0.5) o.premultiplyAlpha = spick(PREMULT);
+  if (srnd() < 0.5) o.colorSpaceConversion = spick(COLOR);
+  if (srnd() < 0.5) o.imageOrientation = spick(ORIENT);
+  if (srnd() < 0.7) o.resizeWidth = spick(SIZES);
+  if (srnd() < 0.7) o.resizeHeight = spick(SIZES);
+  if (srnd() < 0.5) o.resizeQuality = spick(QUALITIES);
+  if (srnd() < 0.1) { o.resizeWidth = spick([1e9, -1e9, Infinity, NaN, -0, 0.5]); }
+  if (srnd() < 0.1) { o.resizeHeight = spick([1e9, -1e9, Infinity, NaN, -0, 0.5]); }
+  return o;
+}
+
+var offscreen = null;
+try {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    offscreen = new OffscreenCanvas(16, 16);
+    var og = offscreen.getContext('2d');
+    if (og) { og.fillStyle = '#123456'; og.fillRect(0, 0, 16, 16); }
+  }
+} catch (e) { offscreen = null; }
+
+var done = 0;
+
+function drawSafe(bmp, c) {
+  try { c.getContext('2d').drawImage(bmp, 0, 0); } catch (e) {}
+  try { c.width = c.width; } catch (e) {}
+}
+function cloneSafe(bmp) {
+  try {
+    if (typeof structuredClone === 'function') {
+      var cl = structuredClone(bmp);
+      try { cl.close(); } catch (e) {}
+    }
+  } catch (e) {}
+}
+function postSafe(bmp) {
+  try {
+    var mc = new MessageChannel();
+    mc.port1.onmessage = function () {};
+    mc.port2.postMessage(bmp);
+    mc.port1.close(); mc.port2.close();
+  } catch (e) {}
+}
+
+function iteration(i) {
+  var mode = i % 10;
+  var w = SIZES[snum(SIZES.length)];
+  var h = SIZES[snum(SIZES.length)];
+
+  if (mode === 0) {
+    /* transfer -> draw -> close -> clone -> reuse */
+    if (!offscreen) return;
+    try {
+      var b1 = offscreen.transferToImageBitmap();
+      var c = mkCanvas(8, 8);
+      drawSafe(b1, c);
+      try { b1.close(); } catch (e) {}
+      cloneSafe(b1);
+      postSafe(b1);
+      drawSafe(b1, c);
+      var b2 = offscreen.transferToImageBitmap();
+      drawSafe(b2, c);
+      try { b2.close(); } catch (e) {}
+      cloneSafe(b2);
+    } catch (e) {}
+  } else if (mode === 1) {
+    /* chained resizes: bitmap from canvas with resize, then bitmap from bitmap */
+    var c1 = mkCanvas(4, 4);
+    createImageBitmap(c1, badOpts()).then(function (b1) {
+      try { b1.close(); } catch (e) {}
+    }).catch(function () {});
+    createImageBitmap(c1, badOpts()).then(function (b2) {
+      createImageBitmap(b2, badOpts()).then(function (b3) {
+        try { b3.close(); } catch (e) {}
+        try { b2.close(); } catch (e) {}
+        var c9 = mkCanvas(8, 8);
+        drawSafe(b3, c9);
+        cloneSafe(b3);
+      }).catch(function () {});
+    }).catch(function () {});
+  } else if (mode === 2) {
+    /* free-then-reuse loop: create many, close, free, recreate */
+    var n = 3 + snum(7);
+    var keep = [];
+    var p = Promise.resolve();
+    for (var k = 0; k < n; k++) {
+      (function () {
+        p = p.then(function () {
+          return createImageBitmap(mkCanvas(4, 4), badOpts()).then(function (b) {
+            keep.push(b);
+          }).catch(function () {});
+        });
+      })();
+    }
+    p.then(function () {
+      while (keep.length) {
+        var x = keep.pop();
+        try { x.close(); } catch (e) {}
+      }
+      for (var k2 = 0; k2 < n; k2++) {
+        (function () {
+          createImageBitmap(mkCanvas(4, 4), badOpts()).then(function (b2) {
+            try { b2.close(); } catch (e) {}
+          }).catch(function () {});
+        })();
+      }
+    });
+  } else if (mode === 3) {
+    /* ImageData extreme sizes + close + draw */
+    var id = mkImageData(w, h);
+    if (!id) return;
+    createImageBitmap(id, badOpts()).then(function (b) {
+      var c = mkCanvas(8, 8);
+      drawSafe(b, c);
+      try { b.close(); } catch (e) {}
+      drawSafe(b, c);
+      cloneSafe(b);
+    }).catch(function () {});
+  } else if (mode === 4) {
+    /* canvas self-draw + bitmap + resize loop */
+    var cc = mkCanvas(1, 1);
+    var settings = {};
+    Object.defineProperty(settings, 'alpha', {
+      get: function () {
+        try { cc.getContext('2d').fillRect(0, 0, 1, 1); } catch (e) {}
+        return true;
+      }
+    });
+    try { cc.getContext('bitmaprenderer', settings); } catch (e) {}
+    createImageBitmap(cc, badOpts()).then(function (b) {
+      var c2 = mkCanvas(8, 8);
+      drawSafe(b, c2);
+      try { b.close(); } catch (e) {}
+      createImageBitmap(cc, badOpts()).then(function (b9) {
+        try { b9.close(); } catch (e) {}
+      }).catch(function () {});
+    }).catch(function () {});
+  } else if (mode === 5) {
+    /* OffscreenCanvas realloc cycles */
+    if (!offscreen) return;
+    for (var k3 = 0; k3 < 3; k3++) {
+      try { offscreen.width = spick(SIZES); } catch (e) {}
+      try { offscreen.height = spick(SIZES); } catch (e) {}
+      try {
+        var bb = offscreen.transferToImageBitmap();
+        var cc2 = mkCanvas(4, 4);
+        drawSafe(bb, cc2);
+        try { bb.close(); } catch (e) {}
+      } catch (e) {}
+    }
+  } else if (mode === 6) {
+    /* ImageData -> bitmap -> closed -> blob -> bitmap */
+    var id2 = mkImageData(1, 1);
+    if (!id2) return;
+    createImageBitmap(id2, badOpts()).then(function (b) {
+      try { b.close(); } catch (e) {}
+      try {
+        var mc = new MessageChannel();
+        mc.port1.onmessage = function (ev) {
+          try {
+            var got = ev.data;
+            var cc3 = mkCanvas(4, 4);
+            drawSafe(got, cc3);
+            try { got.close(); } catch (e2) {}
+          } catch (e) {}
+        };
+        mc.port2.postMessage(b);
+        mc.port1.close(); mc.port2.close();
+      } catch (e) {}
+    }).catch(function () {});
+  } else if (mode === 7) {
+    /* resizeWidth / resizeHeight extreme + quality bogus */
+    var c4 = mkCanvas(2, 2);
+    var extreme = { resizeWidth: spick([1e9, -1e9, Infinity, NaN, 0, -0, 0.5]),
+                    resizeHeight: spick([1e9, -1e9, Infinity, NaN, 0, -0, 0.5]),
+                    resizeQuality: spick(QUALITIES) };
+    createImageBitmap(c4, extreme).then(function (b) {
+      try { b.close(); } catch (e) {}
+      try {
+        var p = createImageBitmap(b, extreme);
+        if (p && p.then) p.then(function (b2) { try { b2.close(); } catch (e2) {} }).catch(function () {});
+      } catch (e2) {}
+    }).catch(function () {});
+  } else if (mode === 8) {
+    /* structuredClone after close, before any draw */
+    createImageBitmap(mkCanvas(4, 4), badOpts()).then(function (b) {
+      try { b.close(); } catch (e) {}
+      cloneSafe(b);
+      try {
+        if (typeof structuredClone === 'function') {
+          var cl = structuredClone(b);
+          cloneSafe(cl);
+          try { cl.close(); } catch (e2) {}
+        }
+      } catch (e) {}
+      postSafe(b);
+    }).catch(function () {});
+  } else {
+    /* mix: offscreen + canvas + ImageData in one go */
+    var c5 = mkCanvas(4, 4);
+    var id3 = mkImageData(4, 4);
+    if (!id3) return;
+    createImageBitmap(c5, badOpts()).then(function (b1) {
+      try { b1.close(); } catch (e) {}
+    }).catch(function () {});
+    createImageBitmap(id3, badOpts()).then(function (b2) {
+      var c6 = mkCanvas(4, 4);
+      drawSafe(b2, c6);
+      try { b2.close(); } catch (e) {}
+      cloneSafe(b2);
+    }).catch(function () {});
+    if (offscreen) {
+      try {
+        var b3 = offscreen.transferToImageBitmap();
+        var c7 = mkCanvas(4, 4);
+        drawSafe(b3, c7);
+        try { b3.close(); } catch (e) {}
+      } catch (e) {}
+    }
+  }
+}
+
+function run() {
+  bks('BOOT', 'v1010-deep,it=' + ITERATIONS + ',seed=' + seed);
+
+  if (typeof createImageBitmap !== 'function') {
+    bks('ABORT', 'no-createImageBitmap');
+    return;
+  }
+  bks('CAPS', 'offscreen=' + (offscreen ? 1 : 0) +
+              ',structuredClone=' + (typeof structuredClone === 'function' ? 1 : 0));
+
+  var i = 0;
+  function step() {
+    var end = Math.min(i + 5, ITERATIONS);
+    for (; i < end; i++) {
+      bks('IT', i + ',m' + (i % 10));
+      try {
+        iteration(i);
+      } catch (e) {
+        bks('ITER-ERR', i + ',' + (e && e.name ? e.name : 'E'));
+      }
+      bks('OK', i);
+    }
+    if (i < ITERATIONS) {
+      setTimeout(step, 0);
+    } else {
+      setTimeout(function () {
+        bks('DONE', 'it=' + ITERATIONS);
+        say('DONE: ' + ITERATIONS + ' iterations completed without crash.');
+      }, 400);
+    }
+  }
+  setTimeout(step, 0);
+}
+
+run();
+</script>
+</body>
+</html>

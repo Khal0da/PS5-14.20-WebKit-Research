@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V1002 - SMIL Deep Fuzzer</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>V1002 - SMIL Deep Fuzzer</h1>
+<p>Deep SMIL combinations: compound values/keyTimes/keySplines, complex animateMotion paths, additive/accumulate, multi-value begin/end, clone+mutate mid-animation.</p>
+<pre id="out">starting...</pre>
+<script>
+/* V1002: Deep SMIL fuzzer.
+ *
+ * Modes:
+ *  m0: animateMotion + compound path/values/keyTimes/keySplines + additive/accumulate
+ *  m1: animateTransform + compound values/keyTimes/keySplines + multi-value begin/end
+ *  m2: clone subtree mid-animation + mutate attributes + animateMotion
+ *  m3: animate with compound values/keyTimes/keySplines + calcMode=bogus + additive
+ *  m4: begin accessKey / endElementAt with offsets / beginElement chains
+ *  m5: animateMotion with malformed path + keyPoints + keyRotate
+ *  m6: animate on gradient stop / text length / complex attribute sets
+ *
+ * Crash oracle: V1002-IT?d=i before, V1002-OK?d=i after. Beacon prefix: V1002-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ITERATIONS = 160;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V1002-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+var seed = 0x1426;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function spick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+function snum(n) { return Math.floor(srnd() * n); }
+
+var NS = 'http://www.w3.org/2000/svg';
+var TAGS = ['animate', 'set', 'animateTransform', 'animateMotion', 'animateColor'];
+var TARGETS = ['x', 'y', 'width', 'height', 'r', 'cx', 'cy', 'fill', 'opacity', 'transform',
+               'd', 'points', 'offset', 'stroke-width', 'display', 'gradientTransform'];
+var VALUES = ['0', '1', '-1', '1e308', '1e309', 'NaN', 'Infinity', '', ' ', '0 0 0', '1;2;3',
+              'url(#nope)', 'inherit', 'none', 'M0 0L1 1', 'rotate(1e309)', 'scale(0)', '1e-9999',
+              '-0', '200%', 'rgb(0,0,0)', 'matrix(1,0,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1)'];
+var DURS = ['0s', '-1s', '0.001s', '1s', '1e9s', 'indefinite', 'auto', '', 'NaN'];
+var BEGINS = ['0s', '-1s', 'click', 'indefinite', '0s;1s', '', '1e9s', 'accessKey(a)', '1s;2s;3s'];
+var REPEATS = ['indefinite', '-1', '0', '1', '1e9', 'NaN', ''];
+
+function animEl(doc, kind) {
+  var a = doc.createElementNS(NS, TAGS[kind]);
+  a.setAttribute('attributeName', spick(TARGETS));
+  a.setAttribute('attributeType', spick(['XML', 'CSS', 'auto', 'bogus']));
+  if (kind === 0 || kind === 4) {
+    a.setAttribute('from', spick(VALUES));
+    a.setAttribute('to', spick(VALUES));
+    a.setAttribute('values', spick(VALUES) + ';' + spick(VALUES));
+    a.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    a.setAttribute('keyTimes', spick(['0;1', '0', '1;0', '0;0.5;1', 'x', '']));
+    a.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1;0 0 1 1']));
+  }
+  if (kind === 1) a.setAttribute('to', spick(VALUES));
+  if (kind === 2) {
+    a.setAttribute('type', spick(['translate', 'scale', 'rotate', 'skewX', 'skewY', 'bogus']));
+    a.setAttribute('from', spick(VALUES));
+    a.setAttribute('to', spick(VALUES));
+    a.setAttribute('by', spick(VALUES));
+  }
+  if (kind === 3) {
+    a.setAttribute('path', spick(['M0 0L1 1', 'M0 0', 'M 0 0 L 1e309 1e309', 'x', '']));
+    a.setAttribute('keyPoints', spick(['0;1', 'x', '', '0']));
+    a.setAttribute('rotate', spick(['auto', 'auto-reverse', '0', 'x']));
+  }
+  a.setAttribute('dur', spick(DURS));
+  a.setAttribute('begin', spick(BEGINS));
+  a.setAttribute('end', spick(BEGINS));
+  a.setAttribute('repeatCount', spick(REPEATS));
+  a.setAttribute('repeatDur', spick(DURS));
+  a.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+  a.setAttribute('restart', spick(['always', 'whenNotActive', 'never', 'bogus']));
+  a.setAttribute('min', spick(DURS));
+  a.setAttribute('max', spick(DURS));
+  a.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+  a.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+  return a;
+}
+
+function makeTarget(doc, kind) {
+  var el;
+  if (kind === 0) { el = doc.createElementNS(NS, 'rect'); el.setAttribute('width', '8'); el.setAttribute('height', '8'); }
+  else if (kind === 1) { el = doc.createElementNS(NS, 'circle'); el.setAttribute('r', '4'); }
+  else if (kind === 2) { el = doc.createElementNS(NS, 'path'); el.setAttribute('d', 'M0 0L4 4'); }
+  else if (kind === 3) { el = doc.createElementNS(NS, 'text'); el.textContent = 'x'; }
+  else { el = doc.createElementNS(NS, 'linearGradient'); el.setAttribute('id', 'g' + snum(100000)); }
+  return el;
+}
+
+function iteration(i) {
+  var mode = i % 6;
+  var svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', '32'); svg.setAttribute('height', '32');
+  var target = makeTarget(document, snum(5));
+  var a = animEl(document, snum(TAGS.length));
+
+  if (mode === 0) {
+    /* animateMotion deep */
+    var m = document.createElementNS(NS, 'animateMotion');
+    m.setAttribute('path', spick(['M0 0L1 1', 'M0 0', 'M 0 0 L 1e309 1e309', 'x', '']));
+    m.setAttribute('keyPoints', spick(['0;1', 'x', '', '0']));
+    m.setAttribute('keyTimes', spick(['0;1', 'x', '', '0;1']));
+    m.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1']));
+    m.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    m.setAttribute('rotate', spick(['auto', 'auto-reverse', '0', 'x', '1e9']));
+    m.setAttribute('dur', spick(DURS));
+    m.setAttribute('begin', spick(BEGINS));
+    m.setAttribute('end', spick(BEGINS));
+    m.setAttribute('repeatCount', spick(REPEATS));
+    m.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    m.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+    m.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+    target.appendChild(m);
+  } else if (mode === 1) {
+    /* animateTransform deep */
+    var t = document.createElementNS(NS, 'animateTransform');
+    t.setAttribute('type', spick(['translate', 'scale', 'rotate', 'skewX', 'skewY', 'bogus']));
+    t.setAttribute('from', spick(VALUES));
+    t.setAttribute('to', spick(VALUES));
+    t.setAttribute('by', spick(VALUES));
+    t.setAttribute('values', spick(['0;1', 'x', '', '0;0.5;1']));
+    t.setAttribute('keyTimes', spick(['0;1', 'x', '', '0;0.5;1']));
+    t.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1']));
+    t.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    t.setAttribute('dur', spick(DURS));
+    t.setAttribute('begin', spick(BEGINS));
+    t.setAttribute('end', spick(BEGINS));
+    t.setAttribute('repeatCount', spick(REPEATS));
+    t.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    t.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+    t.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+    target.appendChild(t);
+  } else if (mode === 2) {
+    /* clone mid-animation + mutate */
+    var cl = svg.cloneNode(true);
+    cl.setAttribute('width', '32'); cl.setAttribute('height', '32');
+    document.body.appendChild(cl);
+    target.appendChild(animEl(document, snum(TAGS.length)));
+    cl.remove();
+  } else if (mode === 3) {
+    /* animate deep values + bogus calcMode + additive */
+    var g = document.createElementNS(NS, 'animate');
+    g.setAttribute('attributeName', spick(['x', 'y', 'opacity', 'r', 'font-size', 'stroke-width']));
+    g.setAttribute('from', spick(VALUES));
+    g.setAttribute('to', spick(VALUES));
+    g.setAttribute('values', spick(['0;1', 'x', '', '0;0.5;1']));
+    g.setAttribute('keyTimes', spick(['0;1', 'x', '', '0;0.5;1']));
+    g.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1']));
+    g.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    g.setAttribute('dur', spick(DURS));
+    g.setAttribute('begin', spick(BEGINS));
+    g.setAttribute('end', spick(BEGINS));
+    g.setAttribute('repeatCount', spick(REPEATS));
+    g.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    g.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+    g.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+    target.appendChild(g);
+  } else if (mode === 4) {
+    /* begin/end multi-value + accessKey */
+    var e2 = document.createElementNS(NS, 'animate');
+    e2.setAttribute('attributeName', spick(TARGETS));
+    e2.setAttribute('from', spick(VALUES));
+    e2.setAttribute('to', spick(VALUES));
+    e2.setAttribute('dur', spick(DURS));
+    e2.setAttribute('begin', spick(BEGINS));
+    e2.setAttribute('end', spick(BEGINS));
+    e2.setAttribute('repeatCount', spick(REPEATS));
+    e2.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    try { e2.beginElement(); } catch (e) {}
+    try { e2.endElementAt(0); } catch (e2b) {}
+  } else {
+    /* animate on text length / gradientTransform / complex attrs */
+    var e3 = document.createElementNS(NS, 'animate');
+    e3.setAttribute('attributeName', spick(['textLength', 'gradientTransform', 'markerWidth', 'viewBox', 'patternTransform', 'rotate']));
+    e3.setAttribute('from', spick(VALUES));
+    e3.setAttribute('to', spick(VALUES));
+    e3.setAttribute('values', spick(['0;1', 'x', '', '0;0.5;1']));
+    e3.setAttribute('keyTimes', spick(['0;1', 'x', '', '0;0.5;1']));
+    e3.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1']));
+    e3.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    e3.setAttribute('dur', spick(DURS));
+    e3.setAttribute('begin', spick(BEGINS));
+    e3.setAttribute('end', spick(BEGINS));
+    e3.setAttribute('repeatCount', spick(REPEATS));
+    e3.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+    e3.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+    e3.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+    target.appendChild(e3);
+  }
+
+  svg.appendChild(target);
+  document.body.appendChild(svg);
+  try { svg.setCurrentTime(srnd() * 8); } catch (e) {}
+  try { svg.pauseAnimations(); svg.unpauseAnimations(); } catch (e) {}
+  try { target.appendChild(a); } catch (e) {}
+  try { svg.remove(); } catch (e) {}
+}
+
+function run() {
+  bks('BOOT', 'v1002-deep,it=' + ITERATIONS + ',seed=' + seed);
+
+  if (typeof SVGSVGElement === 'undefined' ||
+      typeof SVGSVGElement.prototype.setCurrentTime !== 'function') {
+    bks('ABORT', 'no-smil-setCurrentTime');
+    return;
+  }
+  bks('SMIL', 'available');
+
+  var i = 0;
+  function step() {
+    var end = Math.min(i + 4, ITERATIONS);
+    for (; i < end; i++) {
+      bks('IT', i + ',m' + (i % 6));
+      try {
+        iteration(i);
+      } catch (e) {
+        bks('ITER-ERR', i + ',' + (e && e.name ? e.name : 'E'));
+      }
+      bks('OK', i);
+    }
+    if (i < ITERATIONS) {
+      setTimeout(step, 0);
+    } else {
+      setTimeout(function () {
+        bks('DONE', 'it=' + ITERATIONS);
+        say('DONE: ' + ITERATIONS + ' iterations completed without crash.');
+      }, 300);
+    }
+  }
+  setTimeout(step, 0);
+}
+
+run();
+</script>
+</body>
+</html>

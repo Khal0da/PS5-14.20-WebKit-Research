@@ -28,7 +28,8 @@ IsoHeap is OFF on PS5 (`WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc 
 | Same-type reclaim (500x Canvas2D spray) | V573 | CONFIRMED |
 | Bidirectional R/W via alias (all 12 Canvas2D APIs) | V562, V630 | CONFIRMED |
 | Crash oracle (forge m_stateStack, lineWidth reads 8B) | V906 (V650 failed: unmapped guesses) | MECHANISM CONFIRMED, no mapped addr |
-| OOB state stack read (save-count mismatch) | -- | Designed, needs device test |
+| OOB state stack read (save-count mismatch) | V908 (`oob-v0`/`oob-v32` MISS) | DEAD |
+| tee() controlled read | V904 (short-vector DoS) + V913 (fresh nonces: self-data only, both branches exact) | DEAD |
 
 ### Secondary / Blocked leads
 
@@ -52,7 +53,7 @@ See [DEAD_ENDS.md](DEAD_ENDS.md) for the full list. Key dead ends:
 
 The info leak is the current blocker. We have full R/W of typed Canvas2D state fields through the V573 alias, but no path to read a raw heap pointer -- all APIs return typed JS values.
 
-### Info leak approaches (10+ exhausted)
+### Info leak approaches (exhausted as of Nov 6)
 
 1. CanvasStyle variant type confusion (chicken-and-egg)
 2. WTF::Vector stale data after restore (m_size gates reads)
@@ -64,24 +65,35 @@ The info leak is the current blocker. We have full R/W of typed Canvas2D state f
 8. DontInitialize AB paths (all return zeros on device)
 9. libpas race CVE-2025-43531 (zero-init blocks data)
 10. Canvas backing store (tryFastCalloc zeros)
+11. Cross-type 768B reclaim readable fake — **DEAD by V907+V908+V909** (129 cases, 0 SUSPECT; new read hits `blob-768`/`text-736`/`urlsp-92` all crash at read)
+12. JSC pointer harvest (arr-obj/map/set backing) — **DEAD by V910** (10/10 MISS, JSC does not share the WebCore 768 class)
+13. JS-exposed pointer-derived numbers — **DEAD by V912** (15 recon families: memory/eventCounts/Audio absent, toString clean, stacks URL:line:col, typed offsets exact)
+14. tee() readback — **DEAD by V904 + V913** (fresh nonces round-trip exactly in both branches; no foreign bytes)
+15. APNG overread — **DEAD by V674** (image fails to decode on 14.20)
 
 ### Current info leak candidate
 
-**OOB state stack read:** Stale wrapper retains `m_stateStack.m_size = 9` (from 8 saves) while new context has `m_size = 1`. Reading `last()` indexes at `buffer[8]` = 2800 bytes past end of 1-State buffer. Reads adjacent heap as float64. 48-bit x86-64 pointer is exactly representable as IEEE 754 float64.
+**None in-browser.** Every JS-reachable surface tested has returned only attacker-controlled or
+typed data. The V906 oracle proves slot bytes are dereferenced as a pointer, but finding a mapped
+address is itself the leak problem. Remaining realistic unblocks:
+- **Native crash reports / klog** via loader on the PS5's real LAN IP (port 9027) — resolves
+  "what is mapped" empirically (faulting addresses, module bases, ASLR layout). Requires network
+  access to the console itself; the tunnel origin (192.168.1.176, Zoraxy) is not the console.
+- **A second, leak-class WebKit bug** (overread reachable from JS: image decoders, font parsing,
+  filters) — new hunt, no guarantee.
 
-**APNG overread (V674):** DEAD. The `op=apng` probe fails to decode on PS5
-14.20 (`APNGERR load-fail`). The claim of 1651 leaked heap pointers is not
-reproducible on retail hardware.
+### Planned exploitation path (blocked at step 1)
 
-### Planned exploitation path (once info leak solved)
-
-1. Leak heap address via OOB state stack read or APNG overread
+1. ~~Leak heap address via OOB state stack read or APNG overread~~ — **both DEAD (V908, V674); no in-browser leak known**
 2. Forge lineDash `Vector<double>` in AB: `m_buffer = target`, `m_capacity = N`, `m_size = N`
 3. `setLineDash([v1,...,vN])` through alias -- in-place memcpy to target = arbitrary write
 4. `getLineDash()` through alias -- reads from `m_buffer` = arbitrary read
 5. Read JSGlobalObject vtable for binary base, find ROP gadgets
 6. Vtable hijack or `startOfStructureHeap` overwrite (JSC Config is unfrozen on PS5)
 7. ROP chain (x86-64 Zen 2, no PAC, no JIT RWX pages)
+
+Steps 2-7 remain designed and valid **if** a mapped anchor ever becomes available
+(native crash reports or a second leak-class bug).
 
 ### PS5 exploitation environment advantages
 

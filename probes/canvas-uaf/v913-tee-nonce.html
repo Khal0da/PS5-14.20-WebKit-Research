@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V913 - tee() nonce readback (self-data vs foreign)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V913 - tee() nonce readback</h1>
+
+<p class="key">
+<b>Goal:</b> settle the <code>tee()</code> read question with <b>fresh nonces per load</b>, not a fixed pattern.
+V904 closed under-yield as short-vector DoS and the V8xx "leak" was the probe's own fixed bytes.
+V827's <code>071421...</code> is the probe's incremental pattern (<code>+7</code> per byte), deterministic
+because the <i>data</i> is deterministic — not because the heap is.
+<b>Idea:</b> enqueue <b>32 random nonce bytes + <code>0xA5</code> padding</b>, <code>tee()</code>, read
+<b>both</b> branches. If readback <code>== nonce</code> exactly (same length, <code>sameObject</code> noted,
+padding intact) and the hex differs next run (fresh nonce), that's a self-data round-trip — <b>no leak</b>.
+Any extra bytes beyond enqueued size, a length mismatch, or pointer-like hex where nonce should be = foreign
+data = controlled read (would be a first). An incremental <code>+7</code> control runs alongside to show why
+fixed patterns look "deterministic".
+</p>
+
+<p>
+Start: just open the page. Runs once, prints <b>TEE DONE</b>.
+Beacons prefix: <code>V913-</code>. Run it <b>twice</b> — nonces must differ between runs, readbacks must match
+their own run's nonce.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function bks(tag, body) {
+  var u = '/beacon/V913-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+function toHex(u8) {
+  if (!u8 || !u8.length) return '';
+  var s = '';
+  for (var i = 0; i < u8.length; i++) s += ('0' + u8[i].toString(16)).slice(-2);
+  return s;
+}
+function mkNonce(n) {
+  var a = new Uint8Array(n);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(a);
+  else for (var i = 0; i < n; i++) a[i] = (Math.random() * 256) & 0xff;
+  return a;
+}
+function eqRange(read, nonce, padByte, padFrom) {
+  if (!read || read.length === 0) return false;
+  for (var i = 0; i < nonce.length; i++) if (read[i] !== nonce[i]) return false;
+  for (var j = padFrom; j < read.length; j++) if (read[j] !== padByte) return false;
+  return true;
+}
+
+async function testNonce(tag, nonceLen, padByte, readBoth) {
+  var nonce = mkNonce(nonceLen);
+  var data = new Uint8Array(nonceLen + 32);
+  data.set(nonce, 0);
+  for (var i = nonceLen; i < data.length; i++) data[i] = padByte;
+  var nonceHex = toHex(nonce);
+  var dataHex = toHex(data);
+  bks(tag + '-START', 'nonce=' + nonceHex + ',data=' + dataHex.slice(0, 128) + ',run=' + RUN);
+
+  var err = 'none', r0Len = 0, r1Len = 0, same0 = false, same1 = false, m0 = false, m1 = false;
+  var h0 = '', h1 = '';
+  try {
+    var src = new ReadableStream({ start: function (c) { c.enqueue(data); c.close(); } });
+    var pair = src.tee();
+    var rd0 = pair[0].getReader();
+    var x0 = await rd0.read();
+    var v0 = x0.value;
+    r0Len = v0 ? v0.length : 0;
+    same0 = (v0 === data);
+    m0 = eqRange(v0, nonce, padByte, nonceLen);
+    h0 = toHex(v0).slice(0, 160);
+    try { await rd0.cancel(); } catch (e) { }
+    if (readBoth) {
+      var rd1 = pair[1].getReader();
+      var x1 = await rd1.read();
+      var v1 = x1.value;
+      r1Len = v1 ? v1.length : 0;
+      same1 = (v1 === data);
+      m1 = eqRange(v1, nonce, padByte, nonceLen);
+      h1 = toHex(v1).slice(0, 160);
+      try { await rd1.cancel(); } catch (e2) { }
+    } else {
+      try { await pair[1].cancel(); } catch (e3) { }
+    }
+  } catch (e) { err = errOf(e); }
+
+  var extra = '';
+  try {
+    if (r0Len !== data.length) extra = ',lenMismatch=' + r0Len + 'vs' + data.length;
+  } catch (e2) { }
+  var body = 'nonce=' + nonceHex + ',r0=' + r0Len + ':m=' + (m0 ? 1 : 0) + ':o=' + (same0 ? 1 : 0) + ':' + h0 +
+             (readBoth ? ',r1=' + r1Len + ':m=' + (m1 ? 1 : 0) + ':o=' + (same1 ? 1 : 0) + ':' + h1 : '') +
+             extra + ',err=' + err;
+  bks(tag, body + ',run=' + RUN);
+  say(tag + ' ' + body);
+  return body;
+}
+
+async function testIncremental() {
+  var data = new Uint8Array(64);
+  for (var i = 0; i < 64; i++) data[i] = (i * 7) & 0xff;
+  var expected = toHex(data);
+  var err = 'none', r0Len = 0, m0 = false, h0 = '';
+  try {
+    var src = new ReadableStream({ start: function (c) { c.enqueue(data); c.close(); } });
+    var pair = src.tee();
+    var v0 = (await pair[0].getReader().read()).value;
+    r0Len = v0 ? v0.length : 0;
+    m0 = toHex(v0).slice(0, expected.length) === expected;
+    h0 = toHex(v0).slice(0, 160);
+    try { await pair[0].cancel(); } catch (e) { }
+    try { await pair[1].cancel(); } catch (e2) { }
+  } catch (e) { err = errOf(e); }
+  var body = 'inc=' + expected.slice(0, 64) + '...,r0=' + r0Len + ':m=' + (m0 ? 1 : 0) + ':' + h0 + ',err=' + err;
+  bks('INC', body + ',run=' + RUN);
+  say('INC ' + body);
+  return body;
+}
+
+async function runTee() {
+  bks('START', 'run=' + RUN + ',ua=' + String(navigator.userAgent).slice(0, 50));
+  say('TEE start ' + RUN);
+  try {
+    await testNonce('NONCE-BOTH', 32, 0xA5, true);
+    await testNonce('NONCE-64', 64, 0xA5, false);
+    await testIncremental();
+  } catch (e) {
+    bks('ERROR', 'harness=' + errOf(e) + ',run=' + RUN);
+    say('ERROR ' + errOf(e));
+  }
+  bks('DONE', 'run=' + RUN);
+  say('TEE DONE.');
+  bks('FINISH', 'run=' + RUN + ',done=1');
+}
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('op=auto') >= 0 || q.indexOf('case=') < 0) {
+    return runTee();
+  }
+  say('ready. use ?op=auto');
+}
+
+try { var _p = main(); if (_p && _p.catch) _p.catch(function (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }); }
+catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

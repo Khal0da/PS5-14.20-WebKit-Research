@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V705 - TEE Unhealthy Under-Yield (expect-2)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>V705 - TEE Unhealthy Under-Yield (expect-2)</h1>
+<p>Diagnostic only. Source enqueues 2 chunks, tee -> tee1/tee2, yield before read, count elements read from tee1 (expect 2).</p>
+<pre id="out">starting...</pre>
+<script>
+/* V705: TEE under-yield with expected-2 element iterator.
+ *
+ * Per round:
+ *   T0PRE  - src + tee created, enqueue 2 chunks
+ *   T1PRE  - enqueued 2 chunks
+ *   T2PRE  - yield done
+ *   T2POST - read from tee1 -> element count (expect 2)
+ *   T3POST - cancel tee
+ *   TDONE  - clean
+ *
+ * Crash oracle: last phase beacon without follow-up = crashing phase.
+ * Beacon prefix: V705-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ROUNDS = 40;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V705-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+var seed = 0x1427;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function snum(n) { return Math.floor(srnd() * n); }
+function pick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+
+var CHUNKS = [64, 128, 256, 1024, 65536, 1000000, 8, 16];
+
+async function roundOnce(r) {
+  var nchunks = 2;
+  var per = CHUNKS[snum(CHUNKS.length)];
+  var datas = [];
+  try {
+    for (var i = 0; i < nchunks; i++) {
+      var ab = new ArrayBuffer(per);
+      var u8 = new Uint8Array(ab);
+      for (var j = 0; j < Math.min(per, 64); j++) u8[j] = (j * 29 + i * 7) & 0xff;
+      datas.push(u8);
+    }
+  } catch (e) { return 'spray-err'; }
+
+  if (typeof ReadableStream === 'undefined') { bks('T0PRE', r + ',phase=noRS'); return 'noRS'; }
+
+  bks('T0PRE', r + ',phase=tee-create');
+  var src = new ReadableStream({
+    start: function (c) {
+      try {
+        for (var k = 0; k < datas.length; k++) c.enqueue(datas[k]);
+        c.close();
+      } catch (e) { return; }
+    },
+    pull: function (c) { return Promise.resolve(); }
+  });
+  var t = src.tee();
+  var tee1 = t[0], tee2 = t[1];
+
+  bks('T1PRE', r + ',phase=enqueued2,' + datas.length);
+
+  await new Promise(function (res) { setTimeout(res, 0); });
+  bks('T2PRE', r + ',phase=yielded');
+
+  var readRes = 'none';
+  var count = 0;
+  var pr = tee1.getReader().read().then(function (res) {
+    if (res.done) { readRes = 'read=done'; }
+    else { readRes = 'read=got1'; count = 1; return tee1.getReader().read(); }
+  }).then(function (res2) {
+    if (!res2.done) { readRes = 'read=got2'; count = 2; }
+    return 'count=' + count;
+  });
+  await pr;
+  bks('T2POST', r + ',phase=tee-read,' + readRes);
+
+  bks('T3POST', r + ',phase=tee-cancel');
+  var pc = tee1.cancel().catch(function (e) { return 'cancel=' + (e && e.name); });
+  await pc;
+  bks('TDONE', r + ',phase=clean');
+  return 'ok';
+}
+
+async function runRounds() {
+  var r = 0;
+  while (r < ROUNDS) {
+    var rr = r;
+    var res = await roundOnce(rr);
+    await new Promise(function (res2) { setTimeout(res2, 0); });
+    r++;
+  }
+}
+
+function run() {
+  bks('BOOT', 'v705-unhealthy,it=' + ROUNDS + ',seed=' + seed);
+  if (typeof ReadableStream === 'undefined') { bks('ABORT', 'no-ReadableStream'); return; }
+  bks('READY', 'streams=ok');
+  runRounds();
+}
+
+run();
+</script>
+</body>
+</html>

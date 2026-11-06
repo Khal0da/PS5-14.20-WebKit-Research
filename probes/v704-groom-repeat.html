@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V704 - TEE Under-Yield Fuzzer (v2)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>V704 - TEE Under-Yield Fuzzer (v2)</h1>
+<p>Diagnostic only. Real tee() usage: src.tee() -> [tee1, tee2], enqueue into src, yield before read from tee, then cancel.</p>
+<pre id="out">starting...</pre>
+<script>
+/* V704 v2: TEE Under-Yield groomed repeat loop.
+ *
+ * Real tee usage:
+ *   var src = new ReadableStream({ start(c){ c.enqueue(data); c.close(); }, pull(c){} });
+ *   var t = src.tee();
+ *   var tee1 = t[0], tee2 = t[1];
+ *   enqueue -> tee1/tee2
+ *   yield (setTimeout) -> read from tee1
+ *   cancel tee1/tee2
+ *
+ * Phases:
+ *   T0PRE  - src + tee created
+ *   T1PRE  - enqueue done
+ *   T2PRE  - yield done
+ *   T2POST - read from tee result
+ *   T3POST - cancel tee result
+ *   TDONE  - clean
+ *
+ * Beacon prefix: V704-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ROUNDS = 40;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V704-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+var seed = 0x1424;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function snum(n) { return Math.floor(srnd() * n); }
+function pick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+
+var ENQ = [0, 1, 2, 8, 64, 256, 1024, 65536, 1000000, 4, 16, 32];
+
+async function roundOnce(r) {
+  var size = ENQ[snum(ENQ.length)];
+  var data;
+  try {
+    if (size > 0) {
+      var ab = new ArrayBuffer(size);
+      var u8 = new Uint8Array(ab);
+      for (var i = 0; i < Math.min(size, 64); i++) u8[i] = (i * 11) & 0xff;
+      data = u8;
+    } else { data = null; }
+  } catch (e) { return 'spray-err'; }
+
+  if (typeof ReadableStream === 'undefined') { bks('T0PRE', r + ',phase=noRS'); return 'noRS'; }
+
+  bks('T0PRE', r + ',phase=tee-create');
+  var src = new ReadableStream({
+    start: function (c) {
+      try {
+        if (data) c.enqueue(data);
+        c.close();
+      } catch (e) { return; }
+    },
+    pull: function (c) { return Promise.resolve(); }
+  });
+  var t = src.tee();
+  var tee1 = t[0], tee2 = t[1];
+
+  bks('T1PRE', r + ',phase=enqueued,size=' + size);
+  await new Promise(function (res) { setTimeout(res, 0); });
+  bks('T2PRE', r + ',phase=yielded');
+
+  var readRes = 'none';
+  var pr = tee1.getReader().read().then(function (res) { readRes = 'read=' + (res.done ? 'done' : (res.value ? res.value.byteLength : '0')); });
+  await pr;
+  bks('T2POST', r + ',phase=tee-read,' + readRes);
+
+  bks('T3POST', r + ',phase=tee-cancel');
+  var pc = tee1.cancel().catch(function (e) { return 'cancel=' + (e && e.name); });
+  await pc;
+  bks('TDONE', r + ',phase=clean');
+  return 'ok';
+}
+
+async function runRounds() {
+  var r = 0;
+  while (r < ROUNDS) {
+    var rr = r;
+    var res = await roundOnce(rr);
+    await new Promise(function (res2) { setTimeout(res2, 0); });
+    r++;
+  }
+}
+
+function run() {
+  bks('BOOT', 'v704-teeunderyieldv2,it=' + ROUNDS + ',seed=' + seed);
+  if (typeof ReadableStream === 'undefined') { bks('ABORT', 'no-ReadableStream'); return; }
+  bks('READY', 'streams=ok');
+  runRounds();
+}
+
+run();
+</script>
+</body>
+</html>

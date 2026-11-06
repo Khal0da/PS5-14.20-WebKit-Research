@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V905 - Canvas dimension / dirty-rect arithmetic (OOB read/write detector)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:16px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V905 - Canvas dimension / dirty-rect arithmetic</h1>
+
+<p class="key">
+<b>Goal:</b> find an OOB read/write in the canvas backing store <b>without needing any address</b>.
+No UAF, no heap grooming, no pointer knowledge: only integer/dimension arithmetic on
+<code>canvas.width/height</code>, <code>createImageData</code>, <code>getImageData</code>,
+<code>putImageData</code> dirty rects, and <code>drawImage</code> source rects.
+</p>
+
+<p>
+<b>One case per page load.</b> Last stage goes to <code>localStorage</code> before each step, so a
+crash is reported on the next load as <code>CRASH last=&lt;case&gt;:&lt;stage&gt;</code>.
+<br>Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=dirty_neg</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Three independent detectors</h2>
+<pre>
+1) CRASH    : last stage stored before each risky call
+2) PIXELS   : canvas is pre-filled with a deterministic pattern pat(x,y,c).
+              After the op every byte must be either the pattern OR the known mark
+              value (0xAA). A third value = data that is not ours = OOB read leak.
+3) CANARY   : 8 x Uint32Array(2048) filled 0xDEADBEEF, checked after the op.
+              Any change = OOB write into live heap.
+</pre>
+
+<h2>Cases</h2>
+<pre>
+ctl           64x64 pattern round-trip                      n must be 0 (control)
+canary_selftest deliberate canary corruption                detector must report BAD
+dim_8192      canvas 8192x8192                              size accepted?
+dim_16384     canvas 16384x16384                            size accepted?
+dim_65535     canvas 65535x65535 (area > 2^32)              clamped / OOM?
+imgdata_1g    createImageData(0x40000000, 1)   = 4 GB       must throw IndexSizeError
+imgdata_ovf   createImageData(0x10000, 0x10000) = 2^34 B    must throw
+imgdata_max   createImageData(0xFFFF, 0xFFFF)               must throw
+get_neg       getImageData(-1,-1,100,100)                   clamp + len check
+get_huge      getImageData(0,0,0x7fffffff,0x7fffffff)       must throw
+get_off       getImageData(1000,1000,10,10)                 must throw
+dirty_neg     putImageData(img,0,0, -1,-1, 1e9,1e9)         dirty rect clamp
+dirty_huge    putImageData(img,0,0, 0,0, 1e9,1e9)           dirty rect clamp
+dirty_xy      putImageData(img,0x7fffffff,0x7fffffff,0,0,1,1) dst int overflow
+dirty_off     putImageData(img,1000,1000,0,0,8,8)           fully outside
+put_out       putImageData(img,1000,1000)                   fully outside (3-arg)
+draw_oob      drawImage src rect (-32,-32,128,128)          samples outside source
+draw_oob2     drawImage src rect (32,32,128,128)            samples past right/bottom
+draw_frac     drawImage fractional dest + smoothing         canary + crash only
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var CAN = null;
+
+function lsGet(k) { try { return window.localStorage.getItem('v905_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v905_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v905_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V905-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexBytes(d, from, n) {
+  var s = '', i;
+  for (i = from; i < from + n && i < d.length; i++) s += ('0' + d[i].toString(16)).slice(-2);
+  return s;
+}
+function stLast(id, stage, extra) { try { lsSet('last', id + ':' + stage + (extra ? ':' + extra : '')); } catch (e) {} }
+
+/* deterministic pixel pattern; alpha is always 255 so getImageData round-trips exactly */
+function pat(x, y, c) {
+  if (c === 3) return 255;
+  return (x * 7 + y * 13 + c * 29 + 11) & 0xff;
+}
+function mkPat(ctx, w, h) {
+  var id = ctx.createImageData(w, h), d = id.data, x, y, c, o;
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      o = (y * w + x) * 4;
+      for (c = 0; c < 4; c++) d[o + c] = pat(x, y, c);
+    }
+  }
+  return id;
+}
+function mkMark(ctx, w, h) {
+  var id = ctx.createImageData(w, h), d = id.data, i;
+  for (i = 0; i < d.length; i += 4) { d[i] = 0xAA; d[i + 1] = 0xAA; d[i + 2] = 0xAA; d[i + 3] = 255; }
+  return id;
+}
+function isMark(v, c) { return v === (c === 3 ? 255 : 0xAA); }
+
+/* any byte that is neither the pattern nor the mark = data that did not come from us */
+function classify(d, w, h, allowMark) {
+  if (d.length !== w * h * 4) return 'LEN=' + d.length + '!=' + (w * h * 4);
+  var n = 0, first = -1, sample = '', i, px, x, y, c, v;
+  for (i = 0; i < d.length; i++) {
+    px = i >> 2; x = px % w; y = (px / w) | 0; c = i & 3;
+    v = d[i];
+    if (v === pat(x, y, c)) continue;
+    if (allowMark && isMark(v, c)) continue;
+    if (first < 0) { first = i; sample = hexBytes(d, i, 16); }
+    n++;
+  }
+  return 'n=' + n + (first >= 0 ? ',first=' + first + ',hex=' + sample : '');
+}
+function classifyDraw(d, w, h, offX, offY, SW, SH) {
+  if (d.length !== w * h * 4) return 'LEN=' + d.length + '!=' + (w * h * 4);
+  var n = 0, first = -1, sample = '', x, y, c, o, sx, sy, inside, exp;
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      o = (y * w + x) * 4;
+      sx = x + offX; sy = y + offY;
+      inside = (sx >= 0 && sx < SW && sy >= 0 && sy < SH);
+      for (c = 0; c < 4; c++) {
+        exp = inside ? pat(sx, sy, c) : 0;
+        if (d[o + c] !== exp) {
+          if (first < 0) { first = o + c; sample = hexBytes(d, o, 16); }
+          n++;
+        }
+      }
+    }
+  }
+  return 'n=' + n + (first >= 0 ? ',first=' + first + ',hex=' + sample : '');
+}
+/* getImageData round-trip: inside the canvas the pattern must come back, outside must be
+   transparent black (0,0,0,0) per spec. Anything else = data that is not ours. */
+function classifyGet(d, rw, rh, sx, sy, CW, CH) {
+  if (d.length !== rw * rh * 4) return 'LEN=' + d.length + '!=' + (rw * rh * 4);
+  var n = 0, first = -1, sample = '', x, y, c, o, cx, cy, inC, exp;
+  for (y = 0; y < rh; y++) {
+    for (x = 0; x < rw; x++) {
+      o = (y * rw + x) * 4;
+      cx = sx + x; cy = sy + y;
+      inC = (cx >= 0 && cx < CW && cy >= 0 && cy < CH);
+      for (c = 0; c < 4; c++) {
+        exp = inC ? pat(cx, cy, c) : 0;
+        if (d[o + c] !== exp) {
+          if (first < 0) { first = o + c; sample = hexBytes(d, o, 16); }
+          n++;
+        }
+      }
+    }
+  }
+  return 'n=' + n + (first >= 0 ? ',first=' + first + ',hex=' + sample : '');
+}
+
+function alphaAnom(d) {
+  var n = 0, first = -1;
+  for (var i = 3; i < d.length; i += 4) { if (d[i] !== 255) { if (first < 0) first = i; n++; } }
+  return 'aBad=' + n + (first >= 0 ? ',aFirst=' + first : '');
+}
+function canaryInit() {
+  CAN = [];
+  for (var k = 0; k < 8; k++) {
+    var a = new Uint32Array(2048);
+    for (var i = 0; i < a.length; i++) a[i] = 0xDEADBEEF;
+    CAN.push(a);
+  }
+}
+function canaryCheck() {
+  if (!CAN) return 'canary=none';
+  var bad = 0, idx = -1, k, i;
+  for (k = 0; k < CAN.length; k++) {
+    for (i = 0; i < CAN[k].length; i++) {
+      if (CAN[k][i] !== 0xDEADBEEF) { if (idx < 0) idx = k * 2048 + i; bad++; }
+    }
+  }
+  return 'canary=' + (bad ? ('BAD' + bad + '@' + idx) : 'ok');
+}
+
+function mkCtx(w, h, fill) {
+  var c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  var x = c.getContext('2d');
+  if (fill && x) x.putImageData(mkPat(x, w, h), 0, 0);
+  return { c: c, ctx: x };
+}
+
+/* ---------- cases ---------- */
+function caseDim(id, W, H) {
+  var c = document.createElement('canvas');
+  stLast(id, 'S1-set-w');
+  c.width = W;
+  stLast(id, 'S2-set-h');
+  c.height = H;
+  var w = c.width, h = c.height;
+  stLast(id, 'S3-getctx');
+  var e = 'none', x = null;
+  try { x = c.getContext('2d'); } catch (er) { e = errOf(er); }
+  var out = 'req=' + W + 'x' + H + ',got=' + w + 'x' + h + ',area=' + (w * h) + ',ctx=' + !!x + ',err=' + e;
+  if (x) {
+    stLast(id, 'S4-read');
+    try {
+      var p = x.getImageData(0, 0, 4, 4).data;
+      out += ',p4len=' + p.length + ',p4hex=' + hexBytes(p, 0, 16);
+    } catch (er2) { out += ',readErr=' + errOf(er2); }
+  }
+  return { tag: 'OK', detail: out };
+}
+
+function caseCreate(id, W, H) {
+  var t = mkCtx(64, 64, false), e = 'none', im = null;
+  stLast(id, 'S1-createImageData');
+  try { im = t.ctx.createImageData(W, H); } catch (er) { e = errOf(er); }
+  var out = 'req=' + W + 'x' + H + ',exp=' + (W * H * 4) + ',err=' + e;
+  if (im) {
+    out += ',w=' + im.width + ',h=' + im.height + ',len=' + im.data.length +
+           ',lenMatch=' + (im.data.length === W * H * 4);
+  }
+  return { tag: (e === 'none') ? 'OK' : 'THROW', detail: out };
+}
+
+function caseGet(id, sx, sy, sw, sh) {
+  var t = mkCtx(64, 64, true), e = 'none', im = null;
+  stLast(id, 'S1-getImageData');
+  try { im = t.ctx.getImageData(sx, sy, sw, sh); } catch (er) { e = errOf(er); }
+  var out = 'args=' + sx + ',' + sy + ',' + sw + ',' + sh + ',err=' + e;
+  if (im) {
+    out += ',w=' + im.width + ',h=' + im.height + ',len=' + im.data.length +
+           ',lenMatch=' + (im.data.length === im.width * im.height * 4) +
+           ',' + classifyGet(im.data, im.width, im.height, sx, sy, 64, 64);
+  }
+  return { tag: (e === 'none') ? 'OK' : 'THROW', detail: out };
+}
+
+function caseDirty(id, args, allowMark) {
+  canaryInit();
+  var t = mkCtx(64, 64, true), img = mkMark(t.ctx, 8, 8), e = 'none';
+  stLast(id, 'S1-putImageData');
+  try { t.ctx.putImageData.apply(t.ctx, [img].concat(args)); } catch (er) { e = errOf(er); }
+  stLast(id, 'S2-scan');
+  var out = 'args=' + args.join(',') + ',err=' + e;
+  try { out += ',' + classify(t.ctx.getImageData(0, 0, 64, 64).data, 64, 64, allowMark); }
+  catch (er2) { out += ',scanErr=' + errOf(er2); }
+  out += ',' + canaryCheck();
+  return { tag: (e === 'none') ? 'OK' : 'THROW', detail: out };
+}
+
+function caseDraw(id, sx, sy, sw, sh, dx, dy, dw, dh, smooth) {
+  canaryInit();
+  var src = mkCtx(64, 64, true);
+  var dst = mkCtx(64, 64, false);
+  var e = 'none';
+  dst.ctx.imageSmoothingEnabled = smooth;
+  stLast(id, 'S1-drawImage');
+  try { dst.ctx.drawImage(src.c, sx, sy, sw, sh, dx, dy, dw, dh); } catch (er) { e = errOf(er); }
+  stLast(id, 'S2-scan');
+  var out = 'src=' + [sx, sy, sw, sh].join(',') + ',dst=' + [dx, dy, dw, dh].join(',') + ',err=' + e;
+  try {
+    var d = dst.ctx.getImageData(0, 0, 64, 64).data;
+    out += ',' + (smooth ? 'px=skip(frac)' : classifyDraw(d, 64, 64, sx - dx, sy - dy, 64, 64));
+  } catch (er2) { out += ',scanErr=' + errOf(er2); }
+  out += ',' + canaryCheck();
+  return { tag: (e === 'none') ? 'OK' : 'THROW', detail: out };
+}
+
+function runMainCase(id) {
+  if (id === 'canary_selftest') {
+    canaryInit();
+    CAN[2][100] = 0x12345678;
+    return { tag: 'OK', detail: canaryCheck() };
+  }
+  if (id === 'ctl') {
+    canaryInit();
+    var t = mkCtx(64, 64, true);
+    var d = t.ctx.getImageData(0, 0, 64, 64).data;
+    return { tag: 'OK', detail: 'w=' + t.c.width + ',h=' + t.c.height + ',' + classify(d, 64, 64, false) + ',' + canaryCheck() };
+  }
+  if (id === 'dim_8192') return caseDim(id, 8192, 8192);
+  if (id === 'dim_16384') return caseDim(id, 16384, 16384);
+  if (id === 'dim_65535') return caseDim(id, 65535, 65535);
+  if (id === 'imgdata_1g') return caseCreate(id, 0x40000000, 1);
+  if (id === 'imgdata_ovf') return caseCreate(id, 0x10000, 0x10000);
+  if (id === 'imgdata_max') return caseCreate(id, 0xFFFF, 0xFFFF);
+  if (id === 'get_neg') return caseGet(id, -1, -1, 100, 100);
+  if (id === 'get_huge') return caseGet(id, 0, 0, 0x7fffffff, 0x7fffffff);
+  if (id === 'get_off') return caseGet(id, 1000, 1000, 10, 10);
+  if (id === 'dirty_neg') return caseDirty(id, [0, 0, -1, -1, 1e9, 1e9], true);
+  if (id === 'dirty_huge') return caseDirty(id, [0, 0, 0, 0, 1e9, 1e9], true);
+  if (id === 'dirty_xy') return caseDirty(id, [0x7fffffff, 0x7fffffff, 0, 0, 1, 1], true);
+  if (id === 'dirty_off') return caseDirty(id, [1000, 1000, 0, 0, 8, 8], true);
+  if (id === 'put_out') return caseDirty(id, [1000, 1000], false);
+  if (id === 'draw_oob') return caseDraw(id, -32, -32, 128, 128, 0, 0, 128, 128, false);
+  if (id === 'draw_oob2') return caseDraw(id, 32, 32, 128, 128, 0, 0, 128, 128, false);
+  if (id === 'draw_frac') return caseDraw(id, 0.5, 0.5, 63.5, 63.5, 0.25, 0.25, 63.5, 63.5, true);
+  return { tag: 'SKIP', detail: 'unknown-case' };
+}
+
+/* ---------- runner ---------- */
+var SEQUENCE = [
+  'ctl', 'canary_selftest',
+  'dim_8192', 'dim_16384', 'dim_65535',
+  'imgdata_1g', 'imgdata_ovf', 'imgdata_max',
+  'get_neg', 'get_huge', 'get_off',
+  'dirty_neg', 'dirty_huge', 'dirty_xy', 'dirty_off', 'put_out',
+  'draw_oob', 'draw_oob2', 'draw_frac'
+];
+
+var EXPECT = {
+  ctl: 'OK n=0', canary_selftest: 'OK canary=BAD1',
+  dim_8192: 'report', dim_16384: 'report', dim_65535: 'report',
+  imgdata_1g: 'THROW', imgdata_ovf: 'THROW', imgdata_max: 'THROW',
+  get_neg: 'OK n=0 (clamped px + transparent)', get_huge: 'THROW', get_off: 'THROW',
+  dirty_neg: 'OK n=0(only mark)', dirty_huge: 'OK n=0(only mark)',
+  dirty_xy: 'OK/THROW n=0', dirty_off: 'OK n=0', put_out: 'OK n=0',
+  draw_oob: 'OK n=0', draw_oob2: 'OK n=0', draw_frac: 'OK'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>actual</th><th>last stage / detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SKIP' ? 'skip' : 'ok');
+    var det = p[2] || '';
+    var alarm = /n=[1-9]|aBad=[1-9]|BAD[1-9]|LEN=|lenMatch=false/.test(det);
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+  say('--- recorded so far ---');
+  say(r);
+}
+
+async function runCase(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runMainCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  var tag = r.tag, detail = r.detail || '';
+  appendRes(id + '|' + tag + '|' + detail);
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + tag + ',detail=' + detail.slice(0, 400));
+  say(id + ' -> ' + tag + ' ' + detail);
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runCase(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 460));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runCase(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 600);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

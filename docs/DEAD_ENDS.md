@@ -500,10 +500,13 @@ The only new finding is the 1 GiB canvas DoS.
   `performance.memory`/`AudioContext`/`eventCounts` absent; `toString` shows no `0x...`; error stack is URL:line:col;
   typed offsets exact; randoms are fresh per load. Constants confirmed (no WASM/SAB/WebGL/Offscreen/IDB).
   Next: tee nonce readback (V913, fresh nonces vs foreign data).
-- **tee() nonce readback** (2026-11-06): **V913** (`probes/canvas-uaf/v913-tee-nonce.html`,
-  fresh `crypto.getRandomValues` nonce per run + incremental `+7` control, read both branches, exact-equality check).
-  Open until beacons are read. Tests whether `tee()` readback is ever anything other than the enqueued self-data.
-  V904 already closed under-yield as short-vector DoS; this run verifies self-data equality across two sessions.
+- **tee() nonce readback** (2026-11-06): **RESOLVED (self-data only, tee closed).** **V913** (`probes/canvas-uaf/v913-tee-nonce.html`,
+  2026-11-06 19:11, beacons 10396-10403, no crash): fresh `crypto.getRandomValues` nonce per case + `0xA5` pad.
+  `NONCE-BOTH`: nonce `820bf1ed...` -> r0 `64:m=1:o=1`, r1 `64:m=1:o=1` (both branches return exactly the enqueued
+  bytes, same object, exact length). `NONCE-64`: nonce `02d78b43...` (different) -> r0 `96:m=1:o=1` exact.
+  `INC` (+7 control) `m=1`. Two independent nonces inside one run both round-tripped exactly: the V827 fixed hex
+  was self-data, not heap determinism. **No foreign bytes, no length mismatch, no pointer-like hex — tee() gives
+  no controlled read.** Combined with V904 (under-yield = short-vector DoS), the tee() branch is closed.
 
 ### Nov 4 additions (V689 canaries + scan) - DEAD
 - **V689 `lw0` / `restore` / `save` / `bg` / `attr` / `canvas`:** all OBLOCK on

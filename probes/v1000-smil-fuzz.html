@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V1000 - SVG SMIL Lifecycle Fuzzer</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:16px; margin:0 0 6px; }
+  p { color:#8b949e; font-size:12px; margin:4px 0 12px; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  .run { color:#3fb950; }
+</style>
+</head>
+<body>
+<h1>V1000 - SVG SMIL Lifecycle Fuzzer</h1>
+<p>Diagnostic only. Fuzzes SMIL animation element lifecycle. One beacon per iteration so a crash pinpoints the exact case.</p>
+<pre id="out">starting...</pre>
+<script>
+/* V1000: SVG SMIL lifecycle fuzzer (diagnostic, read-only).
+ *
+ * Why: SVG filters were fuzzed (V950) but SMIL was never touched.
+ * SMIL has a long history of use-after-free bugs in WebKit
+ * (timeline, begin/end event handling, target removal).
+ *
+ * Crash oracle: every iteration sends V1000-IT?d=i before doing work
+ * and V1000-OK?d=i after. If the renderer dies, the last IT without
+ * a matching OK identifies the crashing case.
+ *
+ * Beacon prefix: V1000-
+ */
+'use strict';
+
+var O = document.getElementById('out');
+var ITERATIONS = 240;
+
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V1000-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+          '&t=' + Date.now() + '&s=1';
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', u, false);
+    x.send(null);
+  } catch (e) {
+    try { new Image().src = u; } catch (e2) {}
+  }
+}
+
+function rnd(n) { return Math.floor(Math.random() * n); }
+function pick(a) { return a[rnd(a.length)]; }
+
+/* Deterministic PRNG so a crashing iteration can be reproduced. */
+var seed = 0x1420;
+function srnd() {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+function spick(a) { return a[Math.floor(srnd() * a.length) % a.length]; }
+function snum(n) { return Math.floor(srnd() * n); }
+
+var NS = 'http://www.w3.org/2000/svg';
+
+var TARGETS = [
+  'x', 'y', 'width', 'height', 'rx', 'ry', 'cx', 'cy', 'r',
+  'fill', 'stroke', 'opacity', 'stroke-width', 'stroke-dasharray',
+  'transform', 'd', 'points', 'offset', 'font-size', 'visibility',
+  'display', 'gradientTransform', 'patternTransform', 'viewBox',
+  'markerWidth', 'refX', 'textLength', 'rotate', 'pathLength'
+];
+
+var VALUES = [
+  '0', '1', '-1', '1e308', '-1e308', '1e309', 'NaN', 'Infinity', '-Infinity',
+  '', ' ', '\t', '0 0 0', '0,0 1,1', '1;2;3', 'calc(1px)', 'url(#nope)',
+  'inherit', 'currentColor', 'none', 'auto', '0.0000001', '99999999999999999999',
+  'M0 0L1 1', 'M 0 0 L 1e309 1e309', 'rotate(1e309)', 'scale(0)',
+  'translate(NaN,NaN)', 'matrix(1,0,0,1,0,0)', '1e-9999', '-0',
+  'rgb(0,0,0)', 'hsl(0,0%,0%)', 'http://x/y#z', '0%', '100%', '200%', '-50%'
+];
+
+var DURS = ['0s', '-1s', '0.001s', '1s', '1e9s', 'indefinite', 'auto', '1ms', 'NaN', ''];
+var BEGINS = ['0s', '-1s', 'click', 'indefinite', '0s;1s', 'accessKey(a)', '', '1e9s'];
+var REPEATS = ['indefinite', '-1', '0', '1', '1e9', 'NaN', '2.5', ''];
+
+var TAG_NAMES = ['animate', 'set', 'animateTransform', 'animateMotion', 'animateColor'];
+
+function makeTarget(doc, kind) {
+  var el;
+  if (kind === 0) {
+    el = doc.createElementNS(NS, 'rect');
+    el.setAttribute('x', '1'); el.setAttribute('y', '1');
+    el.setAttribute('width', '10'); el.setAttribute('height', '10');
+  } else if (kind === 1) {
+    el = doc.createElementNS(NS, 'circle');
+    el.setAttribute('cx', '5'); el.setAttribute('cy', '5'); el.setAttribute('r', '4');
+  } else if (kind === 2) {
+    el = doc.createElementNS(NS, 'path');
+    el.setAttribute('d', 'M0 0L4 4');
+  } else if (kind === 3) {
+    el = doc.createElementNS(NS, 'text');
+    el.textContent = 'x';
+  } else {
+    el = doc.createElementNS(NS, 'linearGradient');
+    el.setAttribute('id', 'g' + snum(100000));
+  }
+  return el;
+}
+
+function makeAnim(doc, target, animKind) {
+  var a = doc.createElementNS(NS, TAG_NAMES[animKind]);
+  var attr = spick(TARGETS);
+  a.setAttribute('attributeName', attr);
+  a.setAttribute('attributeType', spick(['XML', 'CSS', 'auto', 'bogus']));
+  if (animKind === 0 || animKind === 4) {
+    a.setAttribute('from', spick(VALUES));
+    a.setAttribute('to', spick(VALUES));
+    a.setAttribute('values', spick(VALUES) + ';' + spick(VALUES));
+    a.setAttribute('calcMode', spick(['linear', 'discrete', 'paced', 'spline', 'bogus']));
+    a.setAttribute('keyTimes', spick(['0;1', '0', '1;0', '0;0.5;1', 'x', '']));
+    a.setAttribute('keySplines', spick(['0 0 1 1', 'x', '', '0 0 1 1;0 0 1 1']));
+  }
+  if (animKind === 1) {
+    a.setAttribute('to', spick(VALUES));
+  }
+  if (animKind === 2) {
+    a.setAttribute('type', spick(['translate', 'scale', 'rotate', 'skewX', 'skewY', 'bogus']));
+    a.setAttribute('from', spick(VALUES));
+    a.setAttribute('to', spick(VALUES));
+    a.setAttribute('by', spick(VALUES));
+  }
+  if (animKind === 3) {
+    a.setAttribute('path', spick(['M0 0L1 1', 'M0 0', 'M 0 0 L 1e309 1e309', 'x', '']));
+    a.setAttribute('keyPoints', spick(['0;1', 'x', '', '0']));
+    a.setAttribute('rotate', spick(['auto', 'auto-reverse', '0', 'x']));
+  }
+  a.setAttribute('dur', spick(DURS));
+  a.setAttribute('begin', spick(BEGINS));
+  a.setAttribute('end', spick(BEGINS));
+  a.setAttribute('repeatCount', spick(REPEATS));
+  a.setAttribute('repeatDur', spick(DURS));
+  a.setAttribute('fill', spick(['freeze', 'remove', 'bogus']));
+  a.setAttribute('restart', spick(['always', 'whenNotActive', 'never', 'bogus']));
+  a.setAttribute('min', spick(DURS));
+  a.setAttribute('max', spick(DURS));
+  a.setAttribute('additive', spick(['replace', 'sum', 'bogus']));
+  a.setAttribute('accumulate', spick(['none', 'sum', 'bogus']));
+  return a;
+}
+
+var live = [];  /* keep a few roots alive across iterations */
+
+function iteration(i) {
+  var mode = i % 6;
+  var doc = document;
+
+  var svg = doc.createElementNS(NS, 'svg');
+  svg.setAttribute('width', '48');
+  svg.setAttribute('height', '48');
+  svg.setAttribute('viewBox', spick(['0 0 48 48', 'x', '', '0 0 0 0']));
+
+  var defs = doc.createElementNS(NS, 'defs');
+  svg.appendChild(defs);
+
+  var target = makeTarget(doc, snum(5));
+  var animKind = snum(TAG_NAMES.length);
+  var anim = makeAnim(doc, target, animKind);
+
+  if (mode === 0) {
+    /* Plain attach + timeline scrub */
+    target.appendChild(anim);
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    try { svg.pauseAnimations(); } catch (e) {}
+    try { svg.setCurrentTime(srnd() * 10); } catch (e) {}
+    try { svg.unpauseAnimations(); } catch (e) {}
+  } else if (mode === 1) {
+    /* Target removed while animating, then reinserted */
+    target.appendChild(anim);
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    svg.removeChild(target);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    svg.appendChild(target);
+  } else if (mode === 2) {
+    /* Animation element removed and re-parented mid-flight */
+    target.appendChild(anim);
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    target.removeChild(anim);
+    try { anim.beginElement(); } catch (e) {}
+    try { anim.endElement(); } catch (e) {}
+    var holder = doc.createElementNS(NS, 'g');
+    holder.appendChild(anim);
+    svg.appendChild(holder);
+  } else if (mode === 3) {
+    /* Clone subtree, mutate attributes during animation */
+    target.appendChild(anim);
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    var clone = svg.cloneNode(true);
+    try { clone.setCurrentTime(srnd() * 5); } catch (e) {}
+    anim.setAttribute('dur', spick(DURS));
+    anim.setAttribute('begin', spick(BEGINS));
+    anim.setAttribute('repeatCount', spick(REPEATS));
+    try { anim.beginElement(); } catch (e) {}
+    doc.body.appendChild(clone);
+    live.push(clone);
+  } else if (mode === 4) {
+    /* Many animations on one target, then bulk removal */
+    var n = 2 + snum(6);
+    for (var k = 0; k < n; k++) {
+      target.appendChild(makeAnim(doc, target, snum(TAG_NAMES.length)));
+    }
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    while (target.firstChild) target.removeChild(target.firstChild);
+  } else {
+    /* Animate a gradient / defs child, plus xlink references */
+    var grad = doc.createElementNS(NS, 'linearGradient');
+    grad.setAttribute('id', 'g' + snum(100000));
+    var stop = doc.createElementNS(NS, 'stop');
+    stop.setAttribute('offset', '0');
+    grad.appendChild(stop);
+    defs.appendChild(grad);
+    var a2 = makeAnim(doc, stop, snum(TAG_NAMES.length));
+    stop.appendChild(a2);
+    target.setAttribute('fill', 'url(#g' + snum(100000) + ')');
+    svg.appendChild(target);
+    doc.body.appendChild(svg);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+    defs.removeChild(grad);
+    try { svg.setCurrentTime(srnd() * 5); } catch (e) {}
+  }
+
+  /* Common post-ops */
+  try { svg.pauseAnimations(); } catch (e) {}
+  try { svg.setCurrentTime(srnd() * 20 - 5); } catch (e) {}
+  try { svg.unpauseAnimations(); } catch (e) {}
+  try { anim.beginElement(); } catch (e) {}
+  try { anim.endElementAt(0); } catch (e) {}
+
+  /* Drop the root. Keep only the last few clones alive. */
+  try { if (svg.parentNode) svg.parentNode.removeChild(svg); } catch (e) {}
+  while (live.length > 3) {
+    var old = live.shift();
+    try { if (old.parentNode) old.parentNode.removeChild(old); } catch (e) {}
+  }
+}
+
+function chunk(start, end) {
+  for (var i = start; i < end; i++) {
+    bks('IT', i + ',m' + (i % 6));
+    try {
+      iteration(i);
+    } catch (e) {
+      bks('ITER-ERR', i + ',' + (e && e.name ? e.name : 'E'));
+    }
+    bks('OK', i);
+  }
+}
+
+function run() {
+  bks('BOOT', 'v1000-smil,it=' + ITERATIONS + ',seed=' + seed);
+
+  if (typeof document.createElementNS !== 'function') {
+    bks('ABORT', 'no-createElementNS');
+    return;
+  }
+  if (typeof SVGSVGElement === 'undefined' ||
+      typeof SVGSVGElement.prototype.setCurrentTime !== 'function') {
+    bks('ABORT', 'no-smil-setCurrentTime');
+    return;
+  }
+  bks('SMIL', 'available');
+
+  var i = 0;
+  function step() {
+    var end = Math.min(i + 6, ITERATIONS);
+    chunk(i, end);
+    i = end;
+    if (i < ITERATIONS) {
+      setTimeout(step, 0);
+    } else {
+      bks('DONE', 'it=' + ITERATIONS);
+      say('DONE: ' + ITERATIONS + ' iterations completed without crash.');
+    }
+  }
+  setTimeout(step, 0);
+}
+
+run();
+</script>
+</body>
+</html>

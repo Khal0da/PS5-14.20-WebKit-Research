@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V912 - Pointer-derived numbers recon (no UAF)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V912 - Pointer-derived numbers recon</h1>
+
+<p class="key">
+<b>Goal:</b> find <b>one mapped address</b> without the canvas slot deref. V906 proved the stale wrapper
+derefs slot bytes as a pointer, but every blind address is unmapped and every natural candidate (V907-V911,
+129 cases) crashes instead of returning a readable value.
+<b>Idea:</b> enumerate JS numbers that are <i>derived from heap pointers or heap state</i> (heap sizes,
+allocation timing, object string forms, error stacks, layout rects, event counts, ...) and beacon them
+in one load. If any value shows a heap-range address pattern (large <code>0x...</code> hex, or a double
+whose bits look like a 0x0000.../0x7fff... pointer), that's the anchor — without forging a slot.
+No UAF trigger, no spray: pure recon, should not crash.
+Any <code>SUSPECT</code>-like hex here is a leak of <i>which</i> API leaks, not a slot read.
+</p>
+
+<p>
+Start: just open the page. It runs once on load and prints <b>RECON DONE</b>.
+Beacons prefix: <code>V912-</code>. Check <code>host-beacons.log</code> afterwards.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function bks(tag, body) {
+  var u = '/beacon/V912-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+function hexOfNum(x) {
+  try {
+    var f = new Float64Array(1), u = new Uint32Array(f.buffer);
+    f[0] = Number(x);
+    return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8);
+  } catch (e) { return '?'; }
+}
+function tru(v) { try { return v ? '1' : '0'; } catch (e) { return '?'; } }
+function typ(v) { try { return typeof v; } catch (e) { return '?'; } }
+
+/* one recon family = one beacon. Each field isolated so one throw does not kill the rest. */
+function family(tag, fields) {
+  var parts = [];
+  for (var i = 0; i < fields.length; i++) {
+    var k = fields[i][0], fn = fields[i][1];
+    try {
+      var v = fn();
+      var s = String(v == null ? 'null' : v).replace(/,/g, '_').slice(0, 90);
+      parts.push(k + '=' + s);
+    } catch (e) {
+      parts.push(k + '=ERR:' + errOf(e).slice(0, 40));
+    }
+  }
+  var body = parts.join(',');
+  bks(tag, body);
+  say(tag + ' ' + body);
+  return body;
+}
+
+async function runRecon() {
+  bks('START', 'run=' + RUN);
+  say('RECON start ' + RUN);
+
+  family('PERF', [
+    ['now', function () { return performance.now(); }],
+    ['timeOrigin', function () { return performance.timeOrigin; }],
+    ['navType', function () { var n = performance.getEntriesByType('navigation')[0]; return n ? n.type + ':' + n.redirectCount : 'none'; }],
+    ['resCount', function () { return performance.getEntriesByType('resource').length; }],
+    ['jsLimit', function () { return (performance.memory && performance.memory.jsHeapSizeLimit) || 'none'; }],
+    ['jsUsed', function () { return (performance.memory && performance.memory.usedJSHeapSize) || 'none'; }],
+    ['jsTotal', function () { return (performance.memory && performance.memory.totalJSHeapSize) || 'none'; }],
+    ['eventClick', function () { try { return performance.eventCounts.get('click') || 0; } catch (e) { return 'na'; } }],
+    ['eventKeydown', function () { try { return performance.eventCounts.get('keydown') || 0; } catch (e) { return 'na'; } }],
+    ['userNav', function () { try { return performance.getEntriesByType('navigation')[0].type || 'na'; } catch (e) { return 'na'; } }]
+  ]);
+
+  family('NAV', [
+    ['ua', function () { return navigator.userAgent.slice(0, 70); }],
+    ['platform', function () { return navigator.platform; }],
+    ['vendor', function () { return navigator.vendor; }],
+    ['lang', function () { return navigator.language; }],
+    ['cores', function () { return navigator.hardwareConcurrency; }],
+    ['mem', function () { return navigator.deviceMemory; }],
+    ['touch', function () { return navigator.maxTouchPoints; }],
+    ['pdf', function () { return navigator.pdfViewerEnabled; }],
+    ['webdriver', function () { return navigator.webdriver; }],
+    ['online', function () { return navigator.onLine; }],
+    ['cookie', function () { return navigator.cookieEnabled; }]
+  ]);
+
+  family('SCREEN', [
+    ['size', function () { return screen.width + 'x' + screen.height; }],
+    ['avail', function () { return screen.availWidth + 'x' + screen.availHeight; }],
+    ['depth', function () { return screen.colorDepth + '-' + screen.pixelDepth; }],
+    ['dpr', function () { return window.devicePixelRatio; }],
+    ['inner', function () { return window.innerWidth + 'x' + window.innerHeight; }],
+    ['outer', function () { return window.outerWidth + 'x' + window.outerHeight; }],
+    ['sx', function () { return window.screenX + ',' + window.screenY; }],
+    ['orient', function () { try { return screen.orientation ? screen.orientation.type : 'na'; } catch (e) { return 'na'; } }]
+  ]);
+
+  family('AUDIO', [
+    ['acType', function () { return window.AudioContext || window.webkitAudioContext ? 'present' : 'absent'; }],
+    ['sampleRate', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.sampleRate; }],
+    ['currentTime', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.currentTime; }],
+    ['baseLatency', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.baseLatency; }],
+    ['outputLatency', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.outputLatency; }],
+    ['state', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.state; }],
+    ['destChannels', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.destination.channelCount; }],
+    ['abuf', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); var b = c.createBuffer(1, 48000, 48000); return b.length + ':' + b.sampleRate + ':' + b.duration + ':' + b.numberOfChannels; }],
+    ['abChannels', function () { var AC = window.AudioContext || window.webkitAudioContext; var c = new AC(); return c.createBuffer(2, 1024, 48000).numberOfChannels; }]
+  ]);
+
+  family('CANVAS', [
+    ['imgData', function () {
+      var c = document.createElement('canvas'); c.width = 1; c.height = 1;
+      var x = c.getContext('2d'); var d = x.getImageData(0, 0, 1, 1).data;
+      return Array.prototype.slice.call(d).join('.');
+    }],
+    ['textW', function () {
+      var c = document.createElement('canvas'); c.width = 1; c.height = 1;
+      var x = c.getContext('2d'); x.font = '10px sans-serif';
+      var m = x.measureText('hello world');
+      return m.width + ':' + m.actualBoundingBoxLeft + ':' + m.actualBoundingBoxRight + ':' + m.actualBoundingBoxAscent + ':' + m.actualBoundingBoxDescent;
+    }],
+    ['dataURL', function () {
+      var c = document.createElement('canvas'); c.width = 1; c.height = 1;
+      var x = c.getContext('2d'); x.fillStyle = '#ff0000'; x.fillRect(0, 0, 1, 1);
+      return c.toDataURL().slice(0, 80);
+    }],
+    ['ctxAttrs', function () {
+      var c = document.createElement('canvas'); c.width = 1; c.height = 1;
+      var x = c.getContext('2d', { alpha: true });
+      var a = x.getContextAttributes();
+      return a.alpha + ':' + a.desynchronized + ':' + a.antialias + ':' + a.depth + ':' + a.stencil + ':' + a.failIfMajorPerformanceCaveat;
+    }]
+  ]);
+
+  family('RECT', [
+    ['div0', function () {
+      var d = document.createElement('div'); d.textContent = 'hello'; document.body.appendChild(d);
+      var r = d.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join('.');
+    }],
+    ['div1', function () {
+      var d = document.createElement('div'); d.textContent = 'world world world'; document.body.appendChild(d);
+      var r = d.getBoundingClientRect(); return [r.x, r.y, r.width, r.height, r.top, r.left, r.bottom, r.right].join('.');
+    }],
+    ['range', function () {
+      var d = document.createElement('div'); d.textContent = 'abcdef'; document.body.appendChild(d);
+      var r = document.createRange(); r.selectNodeContents(d); var b = r.getBoundingClientRect();
+      return [b.x, b.y, b.width, b.height].join('.');
+    }],
+    ['canvasRect', function () {
+      var c = document.createElement('canvas'); c.width = 10; c.height = 10; document.body.appendChild(c);
+      var r = c.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join('.');
+    }],
+    ['compareDoc', function () {
+      var a = document.createElement('div'), b = document.createElement('div');
+      document.body.appendChild(a); document.body.appendChild(b);
+      return a.compareDocumentPosition(b) + ':' + b.compareDocumentPosition(a);
+    }]
+  ]);
+
+  family('ERROR', [
+    ['stack', function () { return String(new Error('x').stack || '').slice(0, 120); }],
+    ['message', function () { return String(new Error('hello-123').message).slice(0, 40); }],
+    ['name', function () { return String(new Error('y').name).slice(0, 20); }],
+    ['throwMsg', function () { try { throw new TypeError('zzz'); } catch (e) { return String(e.message).slice(0, 30); } }],
+    ['rangeMsg', function () { try { var a = new Array(2); a.length = 4294967296; } catch (e) { return String(e.message).slice(0, 40); } }]
+  ]);
+
+  family('TOSTRING', [
+    ['window', function () { return String(window); }],
+    ['document', function () { return String(document); }],
+    ['navigator', function () { return String(navigator); }],
+    ['canvas', function () { return String(document.createElement('canvas')); }],
+    ['ctx', function () { var c = document.createElement('canvas'); return String(c.getContext('2d')); }],
+    ['imgData', function () { var c = document.createElement('canvas'); var x = c.getContext('2d'); return String(x.createImageData(1, 1)); }],
+    ['path2d', function () { try { return String(new Path2D()); } catch (e) { return 'na'; } }],
+    ['headers', function () { try { return String(new Headers()); } catch (e) { return 'na'; } }],
+    ['formdata', function () { try { return String(new FormData()); } catch (e) { return 'na'; } }],
+    ['blob', function () { try { return String(new Blob(['hi'])); } catch (e) { return 'na'; } }],
+    ['urlsp', function () { try { return String(new URLSearchParams('a=1')); } catch (e) { return 'na'; } }],
+    ['map', function () { return String(new Map()); }],
+    ['set', function () { return String(new Set()); }],
+    ['promise', function () { return String(Promise.resolve()); }],
+    ['arraybuf', function () { return String(new ArrayBuffer(8)); }],
+    ['uint8', function () { return String(new Uint8Array(4)); }],
+    ['audio', function () { try { var AC = window.AudioContext || window.webkitAudioContext; return AC ? String(new AC()) : 'absent'; } catch (e) { return 'na'; } }]
+  ]);
+
+  family('COUNTS', [
+    ['history', function () { return history.length; }],
+    ['local', function () { try { return localStorage.length; } catch (e) { return 'na'; } }],
+    ['session', function () { try { return sessionStorage.length; } catch (e) { return 'na'; } }],
+    ['images', function () { return document.images.length; }],
+    ['links', function () { return document.links.length; }],
+    ['scripts', function () { return document.scripts.length; }],
+    ['sheets', function () { return document.styleSheets.length; }],
+    ['forms', function () { return document.forms.length; }],
+    ['embeds', function () { return document.embeds.length; }],
+    ['anchors', function () { return document.anchors.length; }],
+    ['fonts', function () { try { return document.fonts.size; } catch (e) { return 'na'; } }],
+    ['plugins', function () { try { return navigator.plugins.length; } catch (e) { return 'na'; } }],
+    ['mimes', function () { try { return navigator.mimeTypes.length; } catch (e) { return 'na'; } }],
+    ['location', function () { return location.href.slice(0, 60); }],
+    ['cookie', function () { try { return document.cookie.slice(0, 40); } catch (e) { return 'na'; } }]
+  ]);
+
+  family('CRYPTO', [
+    ['getRand', function () { var a = new Uint32Array(4); crypto.getRandomValues(a); return Array.prototype.slice.call(a).join('.') + ':' + hexOfNum(a[0] % 1000); }],
+    ['uuid', function () { try { return crypto.randomUUID(); } catch (e) { return 'na'; } }],
+    ['subtle', function () { return crypto.subtle ? 'present' : 'absent'; }],
+    ['getRand8', function () { var a = new Uint8Array(8); crypto.getRandomValues(a); return Array.prototype.slice.call(a).join('.'); }]
+  ]);
+
+  family('STREAM', [
+    ['rsType', function () { return typ(window.ReadableStream); }],
+    ['wsType', function () { return typ(window.WritableStream); }],
+    ['tsType', function () { return typ(window.TransformStream); }],
+    ['rsLocked', function () { try { var s = new ReadableStream({}); return tru(s.locked); } catch (e) { return 'na:' + errOf(e).slice(0, 30); } }],
+    ['rsDesired', function () { try { var s = new ReadableStream({}); var r = s.getReader(); var d = r.desiredSize; r.releaseLock(); return d; } catch (e) { return 'na'; } }],
+    ['wsLocked', function () { try { var s = new WritableStream({}); return tru(s.locked); } catch (e) { return 'na'; } }],
+    ['blobUrl', function () { try { var b = new Blob(['hi']); var u = URL.createObjectURL(b); return u.slice(0, 60); } catch (e) { return 'na'; } }],
+    ['blobSize', function () { try { return new Blob(['hello world']).size; } catch (e) { return 'na'; } }]
+  ]);
+
+  family('TYPED', [
+    ['abByteLength', function () { return new ArrayBuffer(768).byteLength; }],
+    ['u8Offset', function () { var ab = new ArrayBuffer(768); var v = new Uint8Array(ab, 64, 32); return v.byteOffset + ':' + v.byteLength; }],
+    ['u32Offset', function () { var ab = new ArrayBuffer(768); var v = new Uint32Array(ab, 128, 16); return v.byteOffset + ':' + v.byteLength; }],
+    ['f64Offset', function () { var ab = new ArrayBuffer(768); var v = new Float64Array(ab, 256, 8); return v.byteOffset + ':' + v.byteLength; }],
+    ['maxLen', function () { try { return new ArrayBuffer(8, { maxByteLength: 16 }).maxByteLength; } catch (e) { return 'na'; } }],
+    ['detach', function () { var ab = new ArrayBuffer(8); try { ab.transfer(); } catch (e) { return 'na'; } return ab.byteLength; }],
+    ['resizable', function () { try { var ab = new ArrayBuffer(8, { maxByteLength: 16 }); return tru(ab.resizable); } catch (e) { return 'na'; } }],
+    ['bigint', function () { try { return BigInt.asUintN(64, 123n).toString(16); } catch (e) { return 'na'; } }],
+    ['symbol', function () { var s = Symbol('x'); return s.description; }]
+  ]);
+
+  family('API', [
+    ['wasm', function () { return typ(window.WebAssembly); }],
+    ['sab', function () { return typ(window.SharedArrayBuffer); }],
+    ['worker', function () { return typ(window.Worker); }],
+    ['websocket', function () { return typ(window.WebSocket); }],
+    ['offscreen', function () { return typ(window.OffscreenCanvas); }],
+    ['webgl1', function () { try { var c = document.createElement('canvas'); return tru(!!(c.getContext('webgl') || c.getContext('experimental-webgl'))); } catch (e) { return 'na'; } }],
+    ['webgl2', function () { try { return tru(!!document.createElement('canvas').getContext('webgl2')); } catch (e) { return 'na'; } }],
+    ['rtc', function () { return typ(window.RTCPeerConnection); }],
+    ['media', function () { return typ(navigator.mediaDevices); }],
+    ['gamepad', function () { return typ(navigator.getGamepads); }],
+    ['battery', function () { return typ(navigator.getBattery); }],
+    ['bluetooth', function () { return typ(navigator.bluetooth); }],
+    ['usb', function () { return typ(navigator.usb); }],
+    ['hid', function () { return typ(navigator.hid); }],
+    ['serial', function () { return typ(navigator.serial); }],
+    ['midi', function () { return typ(navigator.requestMIDIAccess); }],
+    ['clipboard', function () { return typ(navigator.clipboard); }],
+    ['xr', function () { return typ(navigator.xr); }],
+    ['gpu', function () { return typ(navigator.gpu); }],
+    ['indexedDB', function () { return typ(window.indexedDB); }],
+    ['serviceWorker', function () { return typ(navigator.serviceWorker); }],
+    ['weakref', function () { return typ(window.WeakRef); }],
+    ['finreg', function () { return typ(window.FinalizationRegistry); }],
+    ['proxy', function () { return typ(window.Proxy); }],
+    ['bigintT', function () { return typ(window.BigInt); }],
+    ['intl', function () { return typ(window.Intl); }]
+  ]);
+
+  /* timing: allocation cost per 1000 objects / ABs (malloc behaviour, not a pointer). */
+  family('TIMING', [
+    ['obj1000', function () { var t0 = performance.now(); var k = []; for (var i = 0; i < 1000; i++) k.push({ v: i }); var t1 = performance.now(); return (t1 - t0).toFixed(3) + ':' + k.length; }],
+    ['ab1000', function () { var t0 = performance.now(); var k = []; for (var i = 0; i < 1000; i++) k.push(new ArrayBuffer(768)); var t1 = performance.now(); return (t1 - t0).toFixed(3) + ':' + k.length; }],
+    ['str1000', function () { var t0 = performance.now(); var k = []; for (var i = 0; i < 1000; i++) k.push('S' + i); var t1 = performance.now(); return (t1 - t0).toFixed(3) + ':' + k.length; }],
+    ['map1000', function () { var t0 = performance.now(); var m = new Map(); for (var i = 0; i < 1000; i++) m.set({}, {}); var t1 = performance.now(); return (t1 - t0).toFixed(3) + ':' + m.size; }],
+    ['nowRes', function () { var a = performance.now(), b = performance.now(), c = performance.now(); return (b - a).toFixed(4) + ':' + (c - b).toFixed(4); }]
+  ]);
+
+  bks('DONE', 'run=' + RUN);
+  say('RECON DONE.');
+  bks('FINISH', 'run=' + RUN + ',done=1');
+}
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('op=auto') >= 0 || q.indexOf('case=') < 0) {
+    return runRecon();
+  }
+  say('ready. use ?op=auto');
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

