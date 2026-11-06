@@ -1,186 +1,74 @@
-# PS5 14.10 WebKit Exploitation Research
+# PS5 14.20 WebKit Research - Field Notes
 
-WebKit memory safety research targeting PlayStation 5 firmware 14.10 via CVE-2026-43720 (Canvas `getContext()` reentrant UAF). All data from probes running on retail hardware through the built-in browser.
+Public research journal for a WebKit attack-surface study on PlayStation 5 firmware 14.20. This repository contains diagnostics, probes and documentation only. It does not contain a working exploit chain, shellcode, kernel payloads, or anything that grants code execution.
 
-> **Disclaimer:** Authorized security research on personally owned hardware. For educational and research purposes only.
+What this is
+A structured, reproducible record of what does and does not work in the PS5 14.20 browser engine, so that other researchers do not repeat the same dead ends.
 
-## Support This Research
+Every claim below was checked on retail hardware with a beacon-based probe. Beacons are sent before and after each step, so if the renderer dies, the last unmatched START identifies the exact crashing case.
 
-This project runs on AI compute -- multiple frontier models working in parallel around the clock. If this research is useful to you, please consider supporting it:
+Confirmed on 14.20
+Item	Status	Notes
+Canvas 2D / bitmaprenderer re-entrancy	Confirmed	Inner 2d context is created from a property getter during the outer bitmaprenderer call
+Same-type reclaim	Confirmed	Fresh 2d contexts land in the freed slot
+Alias read through the stale wrapper	Confirmed (partial)	4 of 5 state fields match the reclaim tag
+SVG SMIL element lifecycle	Stable	240-iteration lifecycle fuzz, no crash
+SVG filter primitives	Stable	200-iteration fuzz, no crash
+ImageBitmap lifecycle	Stable	create / close / transfer ordering fuzz
+MediaSource / SourceBuffer basics	Stable	Invalid input rejected cleanly
+ReadableStream / WritableStream / tee	Stable	Basic flows work
+Bottom line: there is a real UAF trigger, but no info leak, no arbitrary read/write, and no code execution.
 
-| Method | Link |
-|--------|------|
-| PayPal | [paypal.me/arnoldzap](https://paypal.me/arnoldzap) |
-| BTC | `bc1qw2lpq8p0cspdk9dlddv6y0wswh6z6svtjjkn73` |
-| SOL | `BftaLxgQvgn9WN1YXTJePeUPWzJK5whMnFRVQ8EdLzvv` |
+Not available on 14.20
+AudioContext, OfflineAudioContext, WebGL / WebGL2, RTCPeerConnection, ServiceWorker, IndexedDB, Gamepad, Notification / Permissions, SharedArrayBuffer, Resizable ArrayBuffer, WebAssembly.
 
-Every contribution helps keep the models running and the research moving forward.
+Documented dead ends
+See docs/DEAD_ENDS.md. Highlights:
 
-## Target
+APNG overread info leak - claimed elsewhere to leak 1,651 pointers. On 14.20 the malformed image fails to decode (load-fail). No pixel data, no pointers. Not reproducible.
+WebAudio - API not exposed.
+TransformStream - writer.write() hangs the renderer.
+Font loca OOB - FreeType validates offsets.
+Custom element double-parent - parser validation holds.
+CSSFontFaceSet reference wrapper - classic thenable trigger does not fire.
+V650 forged m_stateStack read - page hangs on the read.
+Repository layout
+README.md                     this file
+CHANGELOG.md                  chronological log
+FINAL_REPORT.md               consolidated report
+docs/
+  FINDINGS.md                 on-device results
+  DEAD_ENDS.md                every dead end, with evidence
+  STRATEGY.md                 research strategy
+  RESEARCH_MAP.md             surface map
+  PROGRESS_AUDIT.md           session audit
+  PS5_1420_BROWSER_CAPABILITIES.md
+  PUBLICATION.md              what is included / excluded and why
+  bugs/canvas-getcontext-uaf.md
+probes/
+  index.html                  probe menu
+  v2000-all-in-one.html       runs every safe test in one page
+  v1000-smil-fuzz.html        SVG SMIL lifecycle fuzzer
+  v1001-imagebitmap-fuzz.html ImageBitmap lifecycle fuzzer
+  feature-detect.html         capability snapshot
+Running the probes
+The probes are static HTML/JS. Serve the probes/ directory over HTTP and open probes/index.html on the target browser.
 
-| Property | Value |
-|----------|-------|
-| Platform | PlayStation 5 |
-| Firmware | 14.10 |
-| OS | Prospero (FreeBSD r230171) |
-| CPU | AMD Zen 2, 16KB pages |
-| Browser | Safari 17.0 / AppleWebKit 605.1.15 |
-| Source tree | **WebKit-1400** (primary) |
-| JIT | Disabled (LLInt only) |
+They post progress to /beacon/<TAG>?... on the same origin. If you serve them without a beacon endpoint, the requests 404 and the probes still run; read the on-page table for results.
 
-**Available:** Workers, WebSocket, fetch, SubtleCrypto, Canvas 2D, ReadableStream, ResizableArrayBuffer, WeakRef, FinalizationRegistry, Proxy, BigInt, structuredClone, MediaSource, TransformStream, FontFace, Atomics, MessageChannel
+v2000-all-in-one.html runs 23 tests sequentially and prints a result row for each. If the page crashes, the last START without an OK/ERR is the culprit.
 
-**Not available:** WebAssembly, SharedArrayBuffer, WebGL, WebAudio, IndexedDB, ServiceWorker, ReadableStream BYOB, WebRTC, WebGPU, OffscreenCanvas, Clipboard API
+Excluded from the battery on purpose: TransformStream.writer.write() and the forged m_stateStack read. Both hang the renderer, and a JavaScript timeout cannot recover from that.
 
-## Exploit Chain -- CVE-2026-43720
+Method notes
+No forged pointers, no ROP, no arbitrary read/write in this repository.
+Probes are read-only with respect to system state; they exercise DOM and graphics APIs and observe behaviour.
+Deterministic PRNG seeds are recorded so any crashing iteration can be reproduced.
+Results are captured from beacons, not from memory of a session.
+Status
+Exploit chain status: blocked at info leak / ASLR defeat.
 
-| Stage | Status | Description |
-|-------|--------|-------------|
-| UAF Trigger | CONFIRMED | `bitmaprenderer` outer + `Object.defineProperty` getter + `2d` inner frees 768B context |
-| Same-Type Reclaim | CONFIRMED | 500x Canvas2D spray reclaims freed slot (V573) |
-| Alias R/W | CONFIRMED | All 12 Canvas2D APIs work through stale wrapper (V630) |
-| Crash Oracle | CONFIRMED | Forged `m_stateStack` reads 8 bytes at arbitrary address (V650-V655) |
-| ASLR Defeat | **BLOCKED** | APNG overread probe fails to decode (`APNGERR load-fail`); no heap pointers leaked. Claim of 1651 pointers is not reproducible on PS5 14.20. |
-| Arbitrary R/W | DESIGNED | Forge lineDash Vector in AB, `setLineDash` writes in-place |
-| Code Exec | **NEXT** | vtable hijack + ROP (no PAC, no JIT, JSC Config unfrozen) |
-| Kernel | BLOCKED | Needs browser code execution first |
+The trigger is real. The missing piece is a memory disclosure primitive. Until one is found, nothing here is a jailbreak.
 
-### The Bug
-
-`HTMLCanvasElement::getContext()` reads dictionary options via JS getters BEFORE setting the new context. A re-entrant getter creates a 2d context; the outer call then replaces it with `bitmaprenderer`, freeing the 2d context while its JS wrapper survives.
-
-```javascript
-var innerCtx;
-var canvas = document.createElement('canvas');
-var opts = {};
-Object.defineProperty(opts, 'alpha', {
-  get: function() {
-    innerCtx = canvas.getContext('2d');
-    return true;
-  }
-});
-canvas.getContext('bitmaprenderer', opts);
-// innerCtx is now a dangling reference to freed 768-byte memory
-```
-
-After the trigger, a spray of 500 Canvas2D contexts reclaims the freed 768B slot. `innerCtx` and the reclaiming spray context become aliases to the same live C++ `CanvasRenderingContext2D` object.
-
-### Key Properties
-
-- **IsoHeap OFF** -- `WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc on PS5 (`BPLATFORM(PLAYSTATION)`)
-- **Gigacage DISABLED** -- ArrayBuffer backing stores share the same heap as JSC/WebCore objects
-- **JSC Config unfrozen** -- `startOfStructureHeap` remains writable post-init (instant type confusion with arb write)
-- **DAZ ON** -- MXCSR denormals-are-zero active; pointer values (IEEE754 denormals) must be read via BigUint64Array, not float64
-- **Freed blocks stay mapped** -- libpas uses out-of-band bitmap tracking; no in-band freelist pointers
-
-### Confirmed Primitives
-
-| Primitive | Method | Status |
-|-----------|--------|--------|
-| Float64 R/W | `lineWidth`, `miterLimit`, `globalAlpha` | CONFIRMED |
-| Color R/W | `fillStyle`, `strokeStyle` | CONFIRMED |
-| Array R/W | `setLineDash` / `getLineDash` (500 doubles) | CONFIRMED |
-| Matrix Read | `getTransform` (DOMMatrix) | CONFIRMED |
-| State Stack | `save` / `restore` (3-level cycle) | CONFIRMED |
-| Crash Oracle | Forged `m_stateStack` + `lineWidth` read | CONFIRMED |
-| ASLR Bypass | APNG overread leaks heap pointers | DEAD -- image fails to decode on PS5 14.20 |
-
-### Planned Exploitation Path
-
-1. V573 same-type reclaim -- alias to live context
-2. Info leak -- heap address needed (V674 APNG overread is dead; no working primitive on PS5 14.20)
-3. Grow `stateStack` -- realloc frees old buffer -- AB spray reclaims it
-4. Forge lineDash `Vector<double>` in AB (`m_buffer` = target, `m_size` = N)
-5. `getLineDash` through alias -- arbitrary read
-6. `setLineDash` through alias -- arbitrary write (copy-assign writes in-place when capacity >= N)
-7. Overwrite vtable or `startOfStructureHeap` (writable -- JSC Config unfrozen)
-8. ROP chain -- kernel syscall
-
-## Repository Structure
-
-```
-probes/                  -- All HTML/JS probes deployed to PS5 browser
-  canvas-uaf/            -- CVE-2026-43720 exploitation probes (V569-V674+)
-  deployed/              -- Archived fa-v* HTML wrappers served to the PS5
-  legacy/                -- Older probe JS scripts (p60-p527)
-  metadata-overflow/     -- MetadataTable overflow probes (DEAD)
-  recon/                 -- Device fingerprinting (V399, V520, V521)
-  escalation/            -- Exploit chain HTML pages
-  streams/               -- Streams/tee type-confusion probes
-  candidates/            -- Candidate exploit livetest pages
-  press/                 -- Iterative "press" probe series
-  misc/                  -- Diagnostic and one-off probes
-  relapse-test/          -- Prior exploit CVE validation
-  sweep-survival/        -- Heap sweep survival tests
-  1410-guide/            -- AB reclaim guide probes
-  shared/                -- Shared probe resources
-docs/                    -- Technical documentation
-  analysis/              -- Source-level analysis (struct layouts, heap model)
-  bugs/                  -- Individual bug writeups (8 bugs)
-  reports/               -- Status reports, learning notes, dispatch guides
-  scratch/               -- Working notes and scratch analysis
-  CONFIRMED_VULNS.md     -- All confirmed vulnerabilities with device evidence
-  DEAD_ENDS.md           -- 49 exhausted attack vectors
-  EXPLOITATION_ENVIRONMENT.md -- PS5-specific allocator and runtime properties
-  PLATFORM_PLAYSTATION.md -- All PLATFORM(PLAYSTATION) code guards
-  WK1400_SOURCE_AUDIT.md -- 15-subsystem source audit results
-  KERNEL_AUDIT.md        -- FreeBSD kernel exploit candidates
-tools/                   -- Beacon server, probe deployment, build utilities
-  remote-loader/         -- HTTP server for PS5 browser
-  runtime-derive/        -- Runtime offset derivation tooling
-  beacon-parser/         -- Beacon log parser
-assets/                  -- Static assets used by probes
-  fonts/                 -- Test font files (TTF, WOFF, OTF, SVG)
-results/                 -- Beacon logs and probe results
-audits/                  -- Source audit reports
-installer/               -- PS5 installer/payload framework
-offsets/                 -- Kernel offset tables per firmware version
-payloads/                -- Post-exploitation payload scripts
-shared/                  -- Shared ELF/binary payloads
-src/                     -- Exploit framework source (loader, ROP, net)
-archive/                 -- Old backups and duplicate files
-  index-backups/         -- Historical index.html versions
-  bak/                   -- Miscellaneous .bak files
-```
-
-## Source Audit
-
-15+ WebKit subsystems audited against the WK-1400 source tree. 39 CVEs from WSA-2026-0003 and WSA-2026-0004 individually triaged -- all dead on PS5 (JIT-dependent, WASM-dependent, or API-absent). 22 `PLATFORM(PLAYSTATION)` code guards analyzed -- all logging-only, no safety checks weakened. 49 attack vectors documented as dead ends. **Only CVE-2026-43720 is live.**
-
-## Dead Ends
-
-49 vectors investigated and dead-ended across JSC engine, Streams API, RAB, DOM/rendering, CVE audit, kernel syscalls, and Canvas UAF info leak paths. Full documentation in [`docs/DEAD_ENDS.md`](docs/DEAD_ENDS.md). Key dead-ends: MetadataTable overflow (OOM at 3.7GB AST), CSSFontFace UAF (DoS-only, sole 192B occupant), all 2023-2024 WebKit CVEs (JIT-dependent), butterfly UAF (conservative GC pins cells), UMTX (SHM stubbed on 14.10).
-
-## Usage
-
-1. Clone the repo
-2. Set up a DNS redirect pointing a domain to your host machine (`[HOST_IP]`)
-3. Run `python3 tools/remote-loader/host.py` on the host
-4. Open the URL on the PS5 browser
-5. Watch the beacon log for results
-
-Probes report back via image beacon requests. Each probe is a self-contained HTML file in `probes/` that can be served directly.
-
-## Models Used
-
-This research was built with multiple LLMs working together.
-
-| Model | Role |
-|-------|------|
-| Claude Opus 4.6 | Primary workhorse -- probes, source analysis, struct layouts, heap modeling, coordination |
-| GPT-6.1-Sol | Codex dispatches, verification passes, structure recommendations |
-| GPT-6.1-Astra | Flagship analysis |
-| DeepSeek v4.1-Flash | Scene sweep, gap analysis, gadget hunting |
-| DeepSeek v4-Pro | Deep analysis tasks |
-| GLM 5.3 Flash | Router analysis, verification, cross audit |
-| Kimi K3 | Escape sequence analysis, exploit page construction |
-| Qwen 3.8 | Architecture ladder synthesis, verification |
-| Mimo | Analysis support |
-
-## Contact
-
-**X: [@Arn0Stride7](https://x.com/Arn0Stride7)**
-
-## License
-
-MIT
+License
+MIT. See LICENSE.
