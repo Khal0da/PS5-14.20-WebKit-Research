@@ -113,6 +113,17 @@ PS5 uses FreeBSD jails for process sandboxing. Candidates:
 - **Sony syscalls:** sys_532 (OOB, verified 13.60), sys_558 (unchecked index), sys_536 (negative count). Need 14.10 validation.
 - **SCM_RIGHTS fd passing:** Potential sandbox boundary crossing via Unix domain sockets.
 
+## Stage 1 alternative: non-WebKit console surfaces
+
+**Network bridge established 2026-11-06** (see [NETWORK_ACCESS.md](NETWORK_ACCESS.md)):
+both networks are bridged via Tailscale; the console's real IP (192.168.0.102) is
+reachable from the dev PC. Port scan: only **9295 (Remote Play RTSP)** is open.
+The Remote Play daemon parses arbitrary requests pre-auth (`RP-Version: 1.0`,
+reason `0x80108bff` = unregistered). This is Sony `remote_play` code — a
+browser-independent Stage-1 surface. Unexplored; chiaki documents the protocol.
+Loader ports (9020-9027) are closed and cannot open until Stage 2 completes
+(the loader itself needs WebKit ARW+ROP).
+
 ## Stage 4: Kernel Read/Write
 
 Not started. Requires sandbox escape from Stage 3. See [KERNEL_AUDIT.md](KERNEL_AUDIT.md).

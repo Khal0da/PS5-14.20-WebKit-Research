@@ -500,6 +500,89 @@ The only new finding is the 1 GiB canvas DoS.
   `performance.memory`/`AudioContext`/`eventCounts` absent; `toString` shows no `0x...`; error stack is URL:line:col;
   typed offsets exact; randoms are fresh per load. Constants confirmed (no WASM/SAB/WebGL/Offscreen/IDB).
   Next: tee nonce readback (V913, fresh nonces vs foreign data).
+- **Page sweep engine (2026-11-07): **V920** (probes/canvas-uaf/v920-pagesweep.html).
+  The full exploitation of BOTH forge dimensions: m_buffer (64-bit base) AND m_size (32-bit index,
+  x400 multiplier, JS-rewritable between reads). Engine: random 0x4000-aligned candidates in the
+  libWebKit range [0x800000000, 0x900000000); each candidate probes its page at 400B steps
+  (41 probes = the page content); mapped = 40 bytes leaked per probe and the sweep continues to
+  the next page; unmapped = crash = the region boundary. Resumes across reloads automatically
+  (memory-paced: 60 probes/load, reused views, 4s delays; zone override ?zone=0x...).
+  The first V920-HIT beacon = the first leaked memory bytes on 14.20 - the wall breaks.
+  Open until the sweep completes (100 candidates) or a hit pins a module base
+  (ELF 0x464C457F backward sweep in the follow-up).
+- **m_size address sweep (2026-11-07): **V919 RUN 1 - mechanism works, range wrong (2026-11-06
+  23:32-23:33 UTC, beacons 11012-11062).** forge-ctl CRASH at k=1 = the forge+deref mechanism
+  VALIDATED. All 20 random 0x4000-aligned candidates in [0x800000000, 0x900000000) crashed at k=1
+  (base-unmapped) - 20/20 miss. Either 14.20 module density in that range is very low, or (more
+  likely) 14.20 loader moved the modules out of the 7.00-13.60 range. same-none MISS + controls
+  CRASH (harness valid). NOTE: 21 back-to-back crash-reloads in ~90s triggered the PS5 system
+  "not enough free memory" dialog - fixed: views reused (no per-probe allocations), probes/load
+  100->60, sweep reload delay 700ms->4000ms. **Assessment: without ONE known-mapped anchor, a
+  crash-oracle search over a 48-bit ASLR space is computationally infeasible (sparse mappings,
+  1 candidate per crash-reload). The browser-only path has hit a hard computational wall.**
+  Remaining realistic unblocks: (a) RTSP post-auth research (needs PSN registration), (b) new
+  WebKit info-disclosure bug (WK-1400 source audit), (c) scene intel - a single 14.x
+  WebContent address from anyone with klog access immediately unblocks the sweep.
+  (probes/canvas-uaf/v919-msize-sweep.html).
+  The missing dimension from the review: V906 fixed m_size=1 (one address per load), but the read is
+  *(m_buffer + (m_size-1)*400 + 48) with BOTH m_buffer and m_size in our AB - m_size is a 32-bit index
+  (x400 multiplier) JS-rewritable between reads. From any base, m_size covers base..base+1.7TB in
+  400B steps; a mapped probe leaks 8 bytes (x5 offsets) and the sweep CONTINUES in the same load;
+  an unmapped probe crashes (= the region boundary - the crash itself maps memory). Target:
+  libWebKit base range [0x800000000, 0x900000000) 0x4000-aligned (site.js). 24 cases: forge-ctl +
+  20 random candidates + controls; sweeps resume across loads (100 probes/load, 1500/case cap).
+  Open until beacons are read. A hit pins a module base (ELF 0x464C457F) and unblocks the whole chain.
+- **V917+V918: the official PS5 WebKit chain on 14.20 - BOTH bugs PATCHED (2026-11-07).**
+  **V917** (probes/canvas-uaf/v917-replacestate.html, beacons 10585+): establishPrimitive()
+  (the FW 7.00-13.60 ARW chain, inlined) fails at its FIRST step on 14.20: every attempt =
+  setup failed: Error: Scope not leaked. - the super+Proxy scope leak returns undefined
+  (= spec behavior = the JSC bug is fixed in 14.20 WebKit).
+  **V918** (probes/canvas-uaf/v918-clone-probe.html, beacons 11001+): (a) the ROOT bug -
+  history.state returning the corrupted internal clone graph (len 0x50001, index-2 desync) -
+  is ALSO dead on 14.20: the exact 13.60 storeHistoryGraph() returns a CLEAN clone
+  (len=65536, idx1eq2=SAME, idxLast=-64000 as a plain number). (b) 9 scope-leak variants
+  (target trap / fixed obj / Reflect / super-set / plain proxy / computed key / call-this /
+  proto swap): all spec-compliant, no internal object leaked. Also verified from Windows
+  (identical results) - the probe itself is sound.
+  **Verdict: the official chain requires two WebKit bugs; BOTH are patched in 14.20 WebKit
+  (WK-1400). The chain is definitively dead on 14.10/14.20.**
+  **Surviving intelligence:** PS5 libWebKit base lives in [0x800000000, 0x900000000),
+  0x4000-aligned (site.js validation across FW 7.00-13.60) - feeds the V919 m_size sweep.
+- **Dual-UAF + stale-read + dash-forge** (2026-11-07): **RESOLVED - all four surfaces DEAD.**
+  **V916** (probes/canvas-uaf/v916-dual-uaf.html, 2026-11-06 22:32-22:33 UTC, beacons 10551-10583):
+  16 cases = 15 CRASH + 1 MISS + 0 SUSPECT.
+  (1) **Stale-read DEAD (wall real):** single-ctl CRASH at S4-read-w1, dual-zero CRASH at S4-read-w1 -
+  reading an unreclaimed freed context crashes, period. The 11-07 re-interpretation of V683
+  (blaming uncontrolled reclaim) was WRONG; the wall is structural (vtable/wrapper gate). The
+  freed-memory read channel does not open.
+  (2) **Dual-UAF structurally impossible (as designed):** the second getter's getContext('2d')
+  returns the EXISTING context (w2 = null in every DONE detail; dual-t12 lw1=205 with no lw2) -
+  a canvas holds one 2d context, so no second 768B slot ever frees. Two slots would need two
+  canvases = two triggers (the known heap-corruption hazard).
+  (3) dash-forge / dash-zero: never reached - blocked by the W1 unreclaimed crash (no-alias path).
+  (4) fill-* reads: blocked by the same W1 crash (fill-alias/fill-freed/fill-pattern all CRASH at
+  S4-read-w1; fill-pdrop CRASHED at S1-trigger - pattern creation inside the getter is unstable).
+  mmcl eq24/mix24/12/32: 4/4 CRASH at S4-read - the matchMedia clause family reproduces 8/8 across
+  V914+V916 regardless of clause shape/count; crash family confirmed, still no read.
+  Controls imagedata-16x12 + abzero CRASH (harness valid).
+  **Verdict: in-browser research is now COMPLETELY exhausted.** 191 cases across V907-V916 +
+  recon + tee, 0 SUSPECT. The canvas UAF is capped browser-side at: reliable DoS (5 crash-at-read
+  families), state-field R/W via alias (V573/V630), and the mapped/unmapped oracle (V906).
+- **Class census: pointer-at-+112 candidates** (2026-11-07): **RESOLVED (0 SUSPECT, allocator-math candidates dead).**
+  **V914** (probes/canvas-uaf/v914-classcensus.html, 2026-11-06 21:11-21:15 UTC, beacons 10404-10543):
+  46 cases = 40 MISS, 6 CRASH, 0 SUSPECT.
+  - rules 64-100 (7 cases): ALL MISS - the Vector<RefPtr<CSSRule>> capacity math did not land; CSSRuleList
+    allocations never took the 768B slot.
+  - toklist 86-98 (4): ALL MISS - SpaceSplitStringData exact-size math also wrong (header size or allocator path differs).
+  - mmcl 16/20/24/28: **4/4 CRASH at S3-tagged - NEW reliable crash-at-read family** (matchMedia with
+    clause-chained queries; corroborates matchmedia flaky hits in V908/V909 - the media-query parse path
+    allocates in the 768B class). +112 in that allocation is not a readable pointer.
+  - 18 rich events + 10 misc constructibles: ALL MISS (sizes outside the class).
+  - Controls: same-none MISS (lw=213), imagedata-16x12 + abzero CRASH (harness valid).
+  Verdict: 175 total cases across V907-V914 + recon + tee, all 0 SUSPECT. Even structure allocations that
+  land in the class carry no readable pointer at +112. **In-browser leak hunt formally exhausted.**
+  The chain is capped browser-side at: reliable DoS (urlsp96/imagedata-768/blob-768/text-736/mmcl crash-at-read)
+  + state-field R/W via alias (V573/V630) + mapped/unmapped oracle (V906).
 - **tee() nonce readback** (2026-11-06): **RESOLVED (self-data only, tee closed).** **V913** (`probes/canvas-uaf/v913-tee-nonce.html`,
   2026-11-06 19:11, beacons 10396-10403, no crash): fresh `crypto.getRandomValues` nonce per case + `0xA5` pad.
   `NONCE-BOTH`: nonce `820bf1ed...` -> r0 `64:m=1:o=1`, r1 `64:m=1:o=1` (both branches return exactly the enqueued

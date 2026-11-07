@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V935B</title></head>
+<body><pre id="out">V935B — capability/primitive sweep (safe inventory, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V935B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function cap(name, fn){
+  try{ bk('C-PRE',name); var r=fn(); bk('C-OK',name+'|'+String(r).slice(0,420)); say('C-OK '+name+' '+r); }
+  catch(e){ bk('C-ERR',name+'|'+e.name+':'+String(e.message).slice(0,160)); say('C-ERR '+name+' '+e.message); }
+}
+
+bk('BOOT','ua='+navigator.userAgent.slice(0,80));
+
+cap('OffscreenCanvas', function(){ return 'has='+('OffscreenCanvas' in window)+(typeof OffscreenCanvas!=='undefined'?(',ctor=1'):',ctor=0'); });
+cap('OffscreenCanvas.getContext', function(){
+  if(typeof OffscreenCanvas==='undefined') return 'no';
+  var oc=new OffscreenCanvas(16,16); var c=oc.getContext('2d');
+  return '2d='+(c?'ok':'null')+',w='+oc.width;
+});
+cap('createImageBitmap', function(){ return 'has='+('createImageBitmap' in window); });
+(function(){
+  var name='createImageBitmap(canvas)';
+  try{
+    bk('C-PRE',name);
+    if(!('createImageBitmap' in window)){ bk('C-OK',name+'|no'); say('C-OK '+name+' no'); return; }
+    var c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').fillRect(0,0,8,8);
+    createImageBitmap(c).then(function(b){
+      var r='w='+b.width+',h='+b.height+',close='+('close' in b);
+      bk('C-OK',name+'|'+r); say('C-OK '+name+' '+r);
+      try{ if(b.close) b.close(); }catch(e){}
+    }).catch(function(e){ bk('C-ERR',name+'|'+e.name+':'+String(e.message).slice(0,120)); });
+  }catch(e){ bk('C-ERR',name+'|'+e.name+':'+String(e.message).slice(0,120)); }
+})();
+cap('Worker', function(){ return 'has='+('Worker' in window); });
+cap('SharedArrayBuffer', function(){ return 'has='+('SharedArrayBuffer' in window)+',crossOriginIsolated='+('crossOriginIsolated' in window?window.crossOriginIsolated:'na'); });
+cap('WebGL', function(){
+  var c=document.createElement('canvas');
+  var g=c.getContext('webgl')||c.getContext('experimental-webgl');
+  return 'webgl='+(g?'ok':'null');
+});
+cap('WebGL2', function(){
+  var c=document.createElement('canvas'); var g=c.getContext('webgl2');
+  return 'webgl2='+(g?'ok':'null');
+});
+cap('WebGPU', function(){ return 'has='+('gpu' in navigator); });
+cap('Wasm', function(){ return 'has='+('WebAssembly' in window); });
+cap('Atomics', function(){ return 'has='+('Atomics' in window); });
+cap('MessageChannel', function(){ return 'has='+('MessageChannel' in window); });
+cap('FinalizationRegistry', function(){ return 'has='+('FinalizationRegistry' in window); });
+cap('WeakRef', function(){ return 'has='+('WeakRef' in window); });
+cap('ArrayBuffer.transfer', function(){ return 'has='+('transfer' in ArrayBuffer.prototype); });
+cap('structuredClone', function(){ return 'has='+('structuredClone' in window); });
+cap('performance.now', function(){ return 'has='+('performance' in window && 'now' in performance)+',t='+performance.now().toFixed(2); });
+
+/* async results */
+setTimeout(function(){
+  bk('ASYNC-NOTE','createImageBitmap result sent via C-OK if resolved');
+  bk('DONE','complete');
+  say('\nV935B complete (async may have reported).');
+}, 1500);
+</script>
+</body></html>

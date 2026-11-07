@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V941B</title></head>
+<body><pre id="out">V941B — APNG row y=0 dump (boundary anomaly, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V941B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,600))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function px(d,w,x,y){ var i=(y*w+x)*4; return d[i]+':'+d[i+1]+':'+d[i+2]+':'+d[i+3]; }
+function loadImg(src){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+Math.random(); }); }
+async function dump(name,src){
+  bk('T-PRE',name);
+  try{
+    var im=await loadImg(src); var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,64,64).data;
+    var row=[]; for(var x=0;x<=22;x++) row.push(x+'='+px(d,64,x,0));
+    var row1=[]; for(var x=0;x<=22;x++) row1.push(x+'='+px(d,64,x,1));
+    bk('Y0',name+'|'+row.join('|'));
+    bk('Y1',name+'|'+row1.join('|'));
+    say(name+' Y0: '+row.join(' '));
+    say(name+' Y1: '+row1.join(' '));
+  }catch(e){ bk('T-ERR',name+'|'+String(e&&e.message||e).slice(0,120)); }
+}
+(async function(){
+  bk('BOOT','row-dump');
+  await dump('off0','v940b_off0.apng');
+  await dump('off2','v940b_off2.apng');
+  bk('DONE','complete');
+  say('\nV941B complete.');
+})();
+</script>
+</body></html>

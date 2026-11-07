@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V969B</title></head>
+<body><pre id="out">V969B — structuredClone/transferables + Intl edges (B, cheap closeout)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V969B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+
+bk('BOOT','V969B structuredClone/transfer + Intl edges; run='+RUN);
+
+// A: structuredClone basics / edges
+(function(){
+  bk('A-PRE','structuredClone edges');
+  if(typeof structuredClone!=='function'){ bk('A-SKIP','no-structuredClone'); return; }
+  function sc(name,val,transfer){
+    try{
+      var r=transfer?structuredClone(val,{transfer:transfer}):structuredClone(val);
+      bk('A-'+name,'ok|'+(r&&r.constructor?r.constructor.name:typeof r));
+    }catch(e){ bk('A-'+name,'ex:'+String(e&&e.name)); }
+  }
+  sc('obj',{a:1,b:[2,3],c:{d:'x'}});
+  sc('ab',new ArrayBuffer(64));
+  sc('u8',new Uint8Array([1,2,3,4,255]));
+  sc('dv',new DataView(new ArrayBuffer(16)));
+  try{ var c=document.createElement('canvas'); c.width=8;c.height=8; var id=c.getContext('2d').getImageData(0,0,8,8); sc('id',id); }catch(e){ bk('A-id','ex:'+e.name); }
+  try{ var ab=new ArrayBuffer(32); new Uint8Array(ab)[0]=7; var r=structuredClone(ab,{transfer:[ab]}); bk('A-ab-xfer','ok|detached='+ (ab.byteLength===0?'1':'0')+'|rlen='+r.byteLength); }catch(e){ bk('A-ab-xfer','ex:'+String(e&&e.name)); }
+  try{ var ab2=new ArrayBuffer(16); var ab3=new ArrayBuffer(16); var r=structuredClone([ab2,ab3],{transfer:[ab2,ab3]}); bk('A-multi-xfer','ok|d='+(ab2.byteLength===0&&ab3.byteLength===0?'1':'0')); }catch(e){ bk('A-multi-xfer','ex:'+String(e&&e.name)); }
+  // cycle (should throw DataCloneError)
+  try{ var o={}; o.self=o; structuredClone(o); bk('A-cycle','ok(unexpected)'); }catch(e){ bk('A-cycle','ex:'+String(e&&e.name)); }
+  // deep-ish nesting (bounded)
+  try{ var r={v:0}; for(var i=0;i<200;i++) r={n:r,v:i}; var c2=structuredClone(r); bk('A-deep','ok'); }catch(e){ bk('A-deep','ex:'+String(e&&e.name)); }
+})();
+
+// B: ImageBitmap transfer via structuredClone/createImageBitmap
+(async function(){
+  bk('B-PRE','ImageBitmap clone/transfer');
+  if(typeof createImageBitmap!=='function'){ bk('B-SKIP','no-cib'); return; }
+  try{
+    var c=document.createElement('canvas'); c.width=16;c.height=16; c.getContext('2d').fillRect(0,0,16,16);
+    var bmp=await createImageBitmap(c);
+    try{
+      if(typeof structuredClone==='function'){
+        var bmp2=structuredClone(bmp,{transfer:[bmp]});
+        bk('B-xfer','ok|'+bmp2.width+'x'+bmp2.height+'|detachedH='+bmp.height);
+        if(bmp2.close) bmp2.close();
+      } else bk('B-xfer','skip-no-sc');
+    }catch(e){ bk('B-xfer','ex:'+String(e&&e.name)); try{if(bmp.close)bmp.close()}catch(e2){} }
+    var bmp3=await createImageBitmap(c);
+    try{ var bmp4=structuredClone(bmp3); bk('B-clone','ok|'+bmp4.width+'x'+bmp4.height); if(bmp3.close)bmp3.close(); if(bmp4.close)bmp4.close(); }catch(e){ bk('B-clone','ex:'+String(e&&e.name)); try{if(bmp3.close)bmp3.close()}catch(e2){} }
+  }catch(e){ bk('B-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('B-DONE','');
+})();
+
+// C: Intl edges (Segmenter/Collator/DisplayNames) — bounded
+(function(){
+  bk('C-PRE','Intl edges');
+  try{
+    if(typeof Intl!=='undefined' && Intl.Segmenter){
+      try{ var s=new Intl.Segmenter('en',{granularity:'grapheme'}); var n=0; for(var it=s.segment('a\u0301e\u0301')[Symbol.iterator](),r=it.next();!r.done;r=it.next()) n++; bk('C-seg-gr','ok|'+n);}catch(e){ bk('C-seg-gr','ex:'+e.name); }
+      try{ var s2=new Intl.Segmenter('ja',{granularity:'word'}); var m=0; for(var it2=s2.segment('東京タワーへ')[Symbol.iterator](),r2=it2.next();!r2.done;r2=it2.next()) m++; bk('C-seg-ja','ok|'+m);}catch(e){ bk('C-seg-ja','ex:'+e.name); }
+      try{ var big=('abc '.repeat(500)); var s3=new Intl.Segmenter('en',{granularity:'word'}); var k=0; for(var it3=s3.segment(big)[Symbol.iterator](),r3=it3.next();!r3.done;r3=it3.next()) k++; bk('C-seg-big','ok|'+k);}catch(e){ bk('C-seg-big','ex:'+e.name); }
+      try{ new Intl.Segmenter('xx-INVALID',{granularity:'word'}); bk('C-seg-loc','ok'); }catch(e){ bk('C-seg-loc','ex:'+e.name); }
+    } else bk('C-seg','na');
+    if(typeof Intl!=='undefined' && Intl.Collator){
+      try{ bk('C-coll','ok|'+new Intl.Collator('en',{sensitivity:'base',numeric:true}).compare('a2','a10')); }catch(e){ bk('C-coll','ex:'+e.name); }
+      try{ bk('C-coll-loc','ok|'+new Intl.Collator(['xx','en']).compare('a','b')); }catch(e){ bk('C-coll-loc','ex:'+e.name); }
+    } else bk('C-coll','na');
+    if(typeof Intl!=='undefined' && Intl.DisplayNames){
+      try{ bk('C-dn-lang',String(new Intl.DisplayNames(['en'],{type:'language'}).of('ja'))); }catch(e){ bk('C-dn-lang','ex:'+e.name); }
+      try{ bk('C-dn-bad',String(new Intl.DisplayNames(['en'],{type:'region'}).of('ZZ'))); }catch(e){ bk('C-dn-bad','ex:'+e.name); }
+    } else bk('C-dn','na');
+  }catch(e){ bk('C-EX',String(e&&e.name)+':'+String(e).slice(0,120)); }
+  bk('C-DONE','');
+})();
+
+setTimeout(function(){ bk('DONE','V969B closeout complete'); say('done run='+RUN); }, 1500);
+</script>
+</body></html>

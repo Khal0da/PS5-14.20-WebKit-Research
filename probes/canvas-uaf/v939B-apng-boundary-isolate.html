@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V939B</title></head>
+<body><pre id="out">V939B — APNG 321753 boundary isolate (edge variance, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V939B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function px(d,w,x,y){ var i=(y*w+x)*4; return d[i]+':'+d[i+1]+':'+d[i+2]+':'+d[i+3]; }
+function loadImg(src, n){
+  return new Promise(function(res,rej){
+    var im=new Image();
+    im.onload=function(){ res(im); };
+    im.onerror=function(e){ rej(new Error('load-fail:'+src)); };
+    im.src=src+'?cb='+Date.now()+'_'+n;
+  });
+}
+var GRID=[
+  [14,0],[15,0],[16,0],[17,0],[18,0],[19,0],[20,0],
+  [14,15],[15,15],[16,15],[17,15],[18,15],
+  [0,14],[0,15],[0,16],[0,17],
+  [16,16],[32,32]
+];
+function key(pts){ return pts.map(function(p){return p[0]+','+p[1];}).join(';'); }
+bk('BOOT','grid='+GRID.length+',iters=6');
+
+async function runOne(name, src, iters){
+  var sets=[];
+  for(var n=0;n<iters;n++){
+    try{
+      var im=await loadImg(src,n);
+      var c=document.createElement('canvas'); c.width=64; c.height=64;
+      var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64);
+      ctx.drawImage(im,0,0);
+      var d=ctx.getImageData(0,0,64,64).data;
+      var row=[]; for(var i=0;i<GRID.length;i++){ var p=GRID[i]; row.push(px(d,64,p[0],p[1])); }
+      sets.push(row);
+    }catch(e){ bk('T-ERR',name+'#'+n+'|'+String(e&&e.message||e).slice(0,120)); sets.push(null); }
+  }
+  // analyze
+  var vary=[], stable=[];
+  for(var i=0;i<GRID.length;i++){
+    var vals={}, all=[];
+    for(var n=0;n<sets.length;n++){ if(!sets[n]) continue; var v=sets[n][i]; vals[v]=1; all.push(v); }
+    var uniq=Object.keys(vals);
+    var p=GRID[i];
+    if(uniq.length>1) vary.push(p[0]+','+p[1]+'=>'+uniq.join('/') );
+    else if(uniq.length===1) stable.push(p[0]+','+p[1]+'='+uniq[0]);
+  }
+  var r='varyN='+vary.length+'|vary='+vary.slice(0,12).join(' ; ')+'|stableSample='+stable.slice(0,6).join(' ; ');
+  bk('T-OK',name+'|'+r);
+  say('T-OK '+name+'\n '+r);
+  // also emit first/last full row for the key edge point (17,0) is index 3
+  var edge=[];
+  for(var n=0;n<sets.length;n++){ edge.push(sets[n]?sets[n][3]:'ERR'); }
+  bk('EDGE',name+'|(17,0)='+edge.join(','));
+  say(' EDGE (17,0)='+edge.join(','));
+}
+
+(async function(){
+  await runOne('control','v938b_control.apng',6);
+  await runOne('trigger','v938b_trigger.apng',6);
+  bk('DONE','complete|note=localized-variance-near-frame-edge');
+  say('\nV939B complete.');
+})();
+</script>
+</body></html>

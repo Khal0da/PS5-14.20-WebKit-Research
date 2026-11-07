@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V942B</title></head>
+<body><pre id="out">V942B — APNG OOB bytes characterize (variability/raw, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V942B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,600))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function pxh(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+async function run(name,src,rows,xs,iters){
+  for(var it=0;it<iters;it++){
+    bk('T-PRE',name+'#'+it);
+    try{
+      var im=await loadImg(src,it); var c=document.createElement('canvas'); c.width=64; c.height=64;
+      var ctx=c.getContext('2d'); ctx.clearRect(0,0,64,64); ctx.drawImage(im,0,0);
+      var d=ctx.getImageData(0,0,64,64).data;
+      for(var ri=0;ri<rows.length;ri++){
+        var y=rows[ri], parts=[];
+        for(var xi=0;xi<xs.length;xi++){ var x=xs[xi]; parts.push(x+'='+pxh(d,64,x,y)); }
+        bk('R',name+'#'+it+'|y'+y+'|'+parts.join(' '));
+      }
+    }catch(e){ bk('T-ERR',name+'#'+it+'|'+String(e&&e.message||e).slice(0,120)); }
+  }
+  bk('T-OK',name+'|done');
+}
+(async function(){
+  var xs=[]; for(var x=14;x<=26;x++) xs.push(x);
+  var rows=[0,1,2,15,16];
+  bk('BOOT','xs=14..26,rows=0,1,2,15,16,iters=4');
+  await run('off0','v940b_off0.apng',rows,xs,4);
+  await run('off2','v940b_off2.apng',rows,xs,4);
+  bk('DONE','complete|note=look-for-varying-bytes/patterns-across-iters');
+  say('\nV942B complete.');
+})();
+</script>
+</body></html>

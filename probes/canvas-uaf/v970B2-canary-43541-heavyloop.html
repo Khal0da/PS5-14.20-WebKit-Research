@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V970B2</title></head>
+<body><pre id="out">V970B2 — canary 43541 heavier loop (RAB+DV+resize, beaconed) (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V970B2-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); return false; };
+
+bk('BOOT','V970B2 heavier loop (mechanism-inspired, RAB+DataView+resize+offset+byteLength, 200k, beacon/50k); run='+RUN);
+(function(){
+  bk('A-PRE','RAB gate');
+  try{
+    var ab0=new ArrayBuffer(16,{maxByteLength:64});
+    ab0.resize(32);
+    bk('A-OK','bl='+ab0.byteLength+'|resizable='+ab0.resizable);
+  }catch(e){ bk('A-EX',String(e&&e.name)+':'+String(e).slice(0,140)); bk('DONE','RAB unavailable; STOP'); return; }
+  bk('B-PRE','loop start 200000');
+  try{
+    var ab=new ArrayBuffer(1024,{maxByteLength:4096});
+    var dv=new DataView(ab);
+    bk('S0','created bl='+ab.byteLength);
+    for(var i=0;i<200000;i++){
+      if((i%1000)===0){
+        var nsz=512 + (i % 2048);
+        if(nsz>4096) nsz=4096;
+        try{ ab.resize(nsz); }catch(e){}
+      }
+      var bl=ab.byteLength;
+      if(bl>=4){
+        var off=(i*7) % (bl-3);
+        try{ dv.getUint32(off,true); }catch(e){}
+      }
+      void dv.byteLength; void ab.byteLength;
+      if(i===50000) bk('S1','i=50000|bl='+ab.byteLength);
+      if(i===100000) bk('S2','i=100000|bl='+ab.byteLength);
+      if(i===150000) bk('S3','i=150000|bl='+ab.byteLength);
+    }
+    bk('DONE','no-crash|final_bl='+ab.byteLength);
+  }catch(e){ bk('EX',String(e&&e.name)+':'+String(e).slice(0,180)); bk('DONE','ex-path'); }
+})();
+say('done run='+RUN);
+</script>
+</body></html>

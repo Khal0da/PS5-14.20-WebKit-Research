@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V968B</title></head>
+<body><pre id="out">V968B — createImageBitmap crop/resize edge combos (B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+var RUN='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{new Image().src='/beacon/V968B-'+tag+'?d='+encodeURIComponent(String(body==null?'':body).slice(0,700))+'&run='+encodeURIComponent(RUN)+'&t='+Date.now()+'&s=1';}catch(e){}}
+window.onerror=function(msg,src,line){ bk('ERR','onerror:'+String(msg)+'@'+line); };
+function mkCanvas(w,h){
+  var c=document.createElement('canvas'); c.width=w; c.height=h;
+  var ctx=c.getContext('2d');
+  for(var y=0;y<h;y+=4){ for(var x=0;x<w;x+=4){ ctx.fillStyle='rgb('+((x*17)&255)+','+((y*31)&255)+',128)'; ctx.fillRect(x,y,4,4); } }
+  return c;
+}
+async function runCase(name, src, sx,sy,sw,sh, opt){
+  bk('C-PRE',name);
+  try{
+    var p;
+    if(opt && (sx!==undefined)){
+      p=createImageBitmap(src,sx,sy,sw,sh,opt);
+    } else if(sx!==undefined){
+      p=createImageBitmap(src,sx,sy,sw,sh);
+    } else if(opt){
+      p=createImageBitmap(src,opt);
+    } else {
+      p=createImageBitmap(src);
+    }
+    var bmp=await p;
+    bk('C-OK',name+'|'+bmp.width+'x'+bmp.height);
+    if(bmp.close) try{bmp.close()}catch(e){}
+  }catch(e){ bk('C-EX',name+'|'+String(e&&e.name)+':'+String(e).slice(0,120)); }
+}
+(async function(){
+  bk('BOOT','createImageBitmap crop/resize edge combos; run='+RUN);
+  if(typeof createImageBitmap!=='function'){ bk('SKIP','no-createImageBitmap'); bk('DONE','skip'); return; }
+  var c16=mkCanvas(16,16), c64=mkCanvas(64,64);
+  var id16=c16.getContext('2d').getImageData(0,0,16,16);
+  // 1) crop rect edges (spec: throws on zero/neg sw,sh in some impls; OOB behavior varies)
+  await runCase('crop-in', c16, 2,2,8,8, null);
+  await runCase('crop-oob-wh', c16, 8,8,16,16, null);     // extends past source
+  await runCase('crop-neg-xy', c16, -4,-4,8,8, null);     // negative origin
+  await runCase('crop-neg-oob', c16, -4,-4,24,24, null);  // spans beyond
+  await runCase('crop-maxedge', c16, 15,15,1,1, null);
+  await runCase('crop-at-boundary', c16, 16,16,1,1, null); // at boundary
+  await runCase('crop-sw0', c16, 0,0,0,8, null);
+  await runCase('crop-sh0', c16, 0,0,8,0, null);
+  await runCase('crop-neg-sw', c16, 4,4,-2,8, null);
+  // 2) same from ImageData
+  await runCase('id-in', id16, 1,1,4,4, null);
+  await runCase('id-oob', id16, 10,10,16,16, null);
+  await runCase('id-neg', id16, -2,-2,6,6, null);
+  // 3) crop + resize combos
+  await runCase('cr-resize', c64, 8,8,32,32, {resizeWidth:7,resizeHeight:13,resizeQuality:'pixelated'});
+  await runCase('cr-oob-resize', c64, 40,40,64,64, {resizeWidth:11,resizeHeight:11,resizeQuality:'low'});
+  await runCase('cr-neg-resize', c64, -8,-8,40,40, {resizeWidth:9,resizeHeight:9,resizeQuality:'high'});
+  await runCase('resize-1x2048', c16, 0,0,16,16, {resizeWidth:1,resizeHeight:2048,resizeQuality:'pixelated'});
+  await runCase('resize-2048x1', c16, 0,0,16,16, {resizeWidth:2048,resizeHeight:1,resizeQuality:'low'});
+  await runCase('resize-same', c16, 0,0,16,16, {resizeWidth:16,resizeHeight:16,resizeQuality:'high'});
+  // 4) resizeWidth/Height edge values (guarded)
+  try{ bk('R0-PRE','resize 0'); var b=await createImageBitmap(c16,{resizeWidth:0,resizeHeight:8}); bk('R0-OK',''+b.width+'x'+b.height); if(b.close)b.close(); }catch(e){ bk('R0-EX',String(e&&e.name)); }
+  try{ bk('R1-PRE','resize 1x1 from crop'); var b=await createImageBitmap(c64,10,10,20,20,{resizeWidth:1,resizeHeight:1}); bk('R1-OK',''+b.width+'x'+b.height); if(b.close)b.close(); }catch(e){ bk('R1-EX',String(e&&e.name)); }
+  // 5) from bitmap
+  try{
+    bk('BMP-PRE','from bitmap');
+    var srcBmp=await createImageBitmap(c64);
+    await runCase('bmp-crop-oob', srcBmp, 50,50,40,40, null);
+    await runCase('bmp-neg-resize', srcBmp, -5,-5,30,30, {resizeWidth:5,resizeHeight:5,resizeQuality:'pixelated'});
+    if(srcBmp.close) srcBmp.close();
+  }catch(e){ bk('BMP-EX',String(e&&e.name)+':'+String(e).slice(0,100)); }
+  bk('DONE','createImageBitmap edge combos complete; EX=spec/impl throw, crash=signal');
+  say('done run='+RUN);
+})();
+</script>
+</body></html>

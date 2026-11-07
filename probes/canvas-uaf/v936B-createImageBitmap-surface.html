@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V936B</title></head>
+<body><pre id="out">V936B — createImageBitmap/ImageBitmap surface sweep (safe, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V936B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,500))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function ok(name,r){ bk('T-OK',name+'|'+String(r).slice(0,420)); say('T-OK '+name+' '+r); }
+function err(name,e){ bk('T-ERR',name+'|'+e.name+':'+String(e.message).slice(0,160)); say('T-ERR '+name+' '+e.message); }
+function ibm(name, src, a1, a2, a3, a4, a5){
+  bk('T-PRE',name);
+  try{
+    var p;
+    if(a4!==undefined) p = (a5!==undefined) ? createImageBitmap(src,a1,a2,a3,a4,a5) : createImageBitmap(src,a1,a2,a3,a4);
+    else if(a1!==undefined) p = createImageBitmap(src,a1);
+    else p = createImageBitmap(src);
+    return p.then(function(b){
+      var r='w='+b.width+',h='+b.height+',close='+('close' in b);
+      ok(name,r); try{ if(b.close) b.close(); }catch(e){}
+    }).catch(function(e){ err(name,e); });
+  }catch(e){ err(name,e); return Promise.resolve(); }
+}
+
+bk('BOOT','has='+('createImageBitmap' in window));
+
+(function run(){
+  var chain = Promise.resolve();
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    var ctx=c.getContext('2d'); ctx.fillStyle='#112233'; ctx.fillRect(0,0,16,16);
+    return ibm('from-canvas', c);
+  });
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    var ctx=c.getContext('2d'); ctx.fillStyle='#445566'; ctx.fillRect(0,0,16,16);
+    var id=ctx.getImageData(0,0,16,16);
+    return ibm('from-ImageData', id);
+  });
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    c.getContext('2d').fillRect(0,0,16,16);
+    return ibm('crop-rect', c, {resizeWidth:8, resizeHeight:8, resizeQuality:'pixelated'});
+  });
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    c.getContext('2d').fillRect(0,0,16,16);
+    try{ return ibm('sx-sy-sw-sh', c, 2,2,8,8); }catch(e){ err('sx-sy-sw-sh',e); return Promise.resolve(); }
+  }).catch(function(e){ bk('T-ERR','sx-sy-sw-sh|'+e.name+':'+String(e.message).slice(0,120)); });
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    c.getContext('2d').fillRect(0,0,16,16);
+    return ibm('premultiply+colorspace', c, {premultiplyAlpha:'none', colorSpaceConversion:'none'});
+  });
+
+  chain = chain.then(function(){
+    var c=document.createElement('canvas'); c.width=16; c.height=16;
+    c.getContext('2d').fillRect(0,0,16,16);
+    return createImageBitmap(c).then(function(b){
+      bk('T-PRE','drawImage(ImageBitmap)');
+      var c2=document.createElement('canvas'); c2.width=16; c2.height=16;
+      var x=c2.getContext('2d'); x.drawImage(b,0,0);
+      var d=x.getImageData(4,4,1,1).data;
+      ok('drawImage(ImageBitmap)','px='+[d[0],d[1],d[2],d[3]].join(':'));
+      try{ b.close(); }catch(e){}
+    }).catch(function(e){ err('drawImage(ImageBitmap)',e); });
+  });
+
+  chain.then(function(){ bk('SWEEP-DONE','complete|note=no-ptr-leak-surface'); bk('DONE','complete'); say('\nV936B complete.'); })
+       .catch(function(e){ bk('FATAL',e.name+':'+String(e.message).slice(0,160)); bk('DONE','complete'); });
+})();
+</script>
+</body></html>

