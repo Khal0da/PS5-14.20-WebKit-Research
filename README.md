@@ -1,37 +1,40 @@
 # PS5 14.20 WebKit Research - Field Notes
 
-Public research journal for a WebKit attack-surface study on PlayStation 5 firmware 14.20. This repository contains diagnostics, probes and documentation only. It does not contain a working exploit chain, shellcode, kernel payloads, or anything that grants code execution.
+Public research journal for a WebKit attack-surface study on PlayStation 5 firmware 14.20 (`PlayStation 5/14.20`, `AppleWebKit/605.1.15`). This repository contains diagnostics, probes and documentation only. It does **not** contain a working exploit chain, shellcode, kernel payloads, or anything that grants code execution.
 
-What this is
-A structured, reproducible record of what does and does not work in the PS5 14.20 browser engine, so that other researchers do not repeat the same dead ends.
+**Status (checkpoint):** exploit chain **blocked at Stage 2 — ASLR / pointer-anchor info leak**. UAF/alias and crash signals exist; **no reliable pointer/ASLR anchor, no arbitrary R/W by address, no code execution, no kernel**.
 
-Every claim below was checked on retail hardware with a beacon-based probe. Beacons are sent before and after each step, so if the renderer dies, the last unmatched START identifies the exact crashing case.
+## What this is
+A structured, reproducible record of what does and does not work in the PS5 14.20 browser engine, so other researchers do not repeat dead ends and can help unblock Stage 2.
 
-Confirmed on 14.20
-Item	Status	Notes
-Canvas 2D / bitmaprenderer re-entrancy	Confirmed	Inner 2d context is created from a property getter during the outer bitmaprenderer call
-Same-type reclaim	Confirmed	Fresh 2d contexts land in the freed slot
-Alias read through the stale wrapper	Confirmed (partial)	4 of 5 state fields match the reclaim tag
-SVG SMIL element lifecycle	Stable	240-iteration lifecycle fuzz, no crash
-SVG filter primitives	Stable	200-iteration fuzz, no crash
-ImageBitmap lifecycle	Stable	create / close / transfer ordering fuzz
-MediaSource / SourceBuffer basics	Stable	Invalid input rejected cleanly
-ReadableStream / WritableStream / tee	Stable	Basic flows work
-Bottom line: there is a real UAF trigger, but no info leak, no arbitrary read/write, and no code execution.
+Claims are checked on retail hardware with **step-beaconed probes** (`/beacon/<TAG>`). Beacons are sent before/after steps, so if the renderer dies the last unmatched step identifies the crashing case.
 
-Not available on 14.20
-AudioContext, OfflineAudioContext, WebGL / WebGL2, RTCPeerConnection, ServiceWorker, IndexedDB, Gamepad, Notification / Permissions, SharedArrayBuffer, Resizable ArrayBuffer, WebAssembly.
+## Confirmed / observed on 14.20
+| Item | Status | Notes |
+|---|---|---|
+| Canvas 2D / bitmaprenderer re-entrancy UAF | Confirmed | Inner 2d context via property getter during outer bitmaprenderer call; same-type reclaim + alias (typed state R/W). **Pointer not readable via Canvas APIs** (no raw leak). |
+| APNG Bug 321753-class OOB disclosure | **JS-readable disclosure (live/variable), not controllable** | OOB memory fragments readable (e.g. `aeae…` poison + variable slots such as `7f3bbd80`/`87870020`/`…ee3f`). Controllability rechecks (groom/spray incl. typed `Uint32Array/Float64Array` markers, **V971B `markerHits=0`, no `mark=1`**) **negative** ⇒ **no proven pointer/ASLR anchor**. Not equivalent to the “1651 pointers” claim. |
+| RAB (Resizable ArrayBuffer) | **Available** | `ArrayBuffer(maxByteLength)`/`resize` works (V970B). CVE-2025-43541/301257-inspired bounded/heavier RAB+DataView+resize canaries (V970B/V970B2) reached `DONE` with **no crash/signal** on tested patterns (not proof of absence; 2.42.x backport unknown). |
+| Streams tee under-yield (V702/V703, older runs) | Crash/DoS signal | Under-yield ⇒ WebProcess crash at/inside tee; over-yield survives (discriminator suggests not an ASSERT abort). **No demonstrated leak/alias verdict, no primitive.** V704 v2 groom-repeat stable/clean. |
+| Alias-state/save-restore oracles (V957B–V966B) | Stable/negative | No corruption/inconsistency/leak via tested save/restore/state paths. |
+| Surface/edge probes (V967B–V969B) | Negative | `performance.now` ~1ms coarse, `Error.stack` no `0x`; `createImageBitmap`/`structuredClone`/Intl edges guarded/no crash; BYOB path unusable as tested. |
 
-Documented dead ends
-See docs/DEAD_ENDS.md. Highlights:
+## Not available / limited on 14.20 (as tested)
+`WebAssembly`, `SharedArrayBuffer` (`crossOriginIsolated=false`), `WebGL`/`WebGL2`, `OffscreenCanvas`, WebCodecs, `AudioContext`/`OfflineAudioContext`/`AudioWorklet`, WebGPU. **Available:** `Atomics`, `ImageBitmap`/`createImageBitmap`, `ReadableStream` (BYOB unusable as tested), `structuredClone`, `Intl.*` (Segmenter/Collator/DisplayNames), **Resizable ArrayBuffer**.
 
-APNG overread info leak - claimed elsewhere to leak 1,651 pointers. On 14.20 the malformed image fails to decode (load-fail). No pixel data, no pointers. Not reproducible.
-WebAudio - API not exposed.
-TransformStream - writer.write() hangs the renderer.
-Font loca OOB - FreeType validates offsets.
-Custom element double-parent - parser validation holds.
-CSSFontFaceSet reference wrapper - classic thenable trigger does not fire.
-V650 forged m_stateStack read - page hangs on the read.
+## Open problem — Stage 2: ASLR / pointer anchor (help wanted)
+**Goal:** a reliable, verifiable pointer/info leak (ASLR anchor) on 14.20 WebKit, convertible toward arb R/W.  
+**What we have:** typed-state alias R/W (pointer unreadable) + live but **uncontrollable** APNG OOB disclosure + DoS/crash signals. **What we lack:** a controllable/readable pointer or address anchor.
+
+**Highest-value help:**
+1. **14.20 dump + JSC/WebCore diff/backport analysis** (what’s patched vs 2.42.x/2.50.x, offsets/IsoHeap/structures) to target a real primitive.
+2. A **verified 14.20-compatible trigger/PoC/CVE/commit details** for an **available** surface (Canvas/RAB/TypedArray, `ImageBitmap`/`createImageBitmap`, `structuredClone`, Intl, JSC/DFG) — **no** WASM/SAB/WebGL/WebCodecs/OffscreenCanvas. Share code/details → we run **(a) repro/signal (step-beaconed)** then **(b) attempt primitive conversion** if a signal appears.
+3. Independent verification/re-analysis of the APNG 321753 disclosure (can any variable slot be made to carry a stable/controllable value or pointer on 14.20?) — our spray tests (incl. V971B) were negative.
+
+**Key artifacts:** `docs/reports/v925-v928B-session-findings.md` (B-session V925–V971B log summary), `docs/STRATEGY.md`, `docs/RESEARCH_MAP.md`, `docs/DEAD_ENDS.md`, `docs/NETWORK_ACCESS.md`, probes under `probes/canvas-uaf/` and `probes/streams/`.
+
+## Documented dead ends
+See `docs/DEAD_ENDS.md` (treat as evolving; cross-check with latest reports). Highlights relevant to 14.20: APNG 321753-class = disclosure seen but **uncontrollable/no pointer** (V971B etc.); RAB present but 43541 canary patterns **no signal** (tested set) — **not proof of absence**; many surfaces unavailable (WASM/SAB/WebGL/WebCodecs/Audio). Prior “V674 APNG load-fail / 1651 pointers” claims are not reproduced as stated here — distinguish probe/firmware/path specifics.
 Repository layout
 README.md                     this file
 CHANGELOG.md                  chronological log
