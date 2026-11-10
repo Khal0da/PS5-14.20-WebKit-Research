@@ -8,7 +8,7 @@ Real memory safety bugs confirmed on device. Each hit a secondary wall that prev
 
 ## 1. CVE-2026-43720  - Canvas getContext() Reentrant UAF
 
-**Status:** CONFIRMED on device  - IsoHeap OFF on PS5, same-type reclaim + R/W WORKING
+**Status:** CONFIRMED on device  - IsoHeap OFF on PS5; UAF+reclaim-consistent aliasing with **typed Canvas2D state-field R/W** through the stale wrapper. **Not arbitrary memory R/W; no raw pointer read.** See `docs/CANVAS_UAF_REOPEN_REVIEW_14.20.md`.
 
 **Bug:** `HTMLCanvasElement::getContext()` checks `m_context` at line 226, then calls `convert<IDLDictionary>()` at line 268 for settings. Dictionary conversion invokes JS property getters. A getter re-enters `getContext('2d')` on the same canvas  - inner call creates context, outer call overwrites `m_context` via `unique_ptr` assignment, freeing the inner context while its JS wrapper survives.
 
@@ -27,7 +27,10 @@ var outerCtx = canvas.getContext('bitmaprenderer', settings);
 The bitmaprenderer outer avoids same-size-class reuse (80B vs 768B) that kills the Proxy+2d trigger.
 
 **Device evidence:**
-- V460/V461: Re-entry confirmed, same-type R/W confirmed
+
+> **Review note (2026-11-10):** the entries below are historical campaign notes. Only V923G/V925 (plus session-reported V926B) have extract-backed 14.20 evidence in this repo; V460/V461/V548–V550/V562/V573/V630 extracts are **not present** and are **not re-verified** here. “R/W” in these notes means **typed Canvas2D state-field access**, not arbitrary memory access. See `docs/CANVAS_UAF_REOPEN_REVIEW_14.20.md` §3.
+
+- V460/V461: Re-entry confirmed, same-type state-field R/W confirmed
 - V527/V527b (cobra PR#13): AB reclaim of 768B slot, lineWidth=9999.99 readback
 - V548-V550: Alias CONFIRMED, full state R/W via aliased pair
 - V562: ALL 12 Canvas2D APIs work through alias  - clean complete run
@@ -48,16 +51,15 @@ The bitmaprenderer outer avoids same-size-class reuse (80B vs 768B) that kills t
 **IsoHeap is OFF on PS5.** `WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc on FreeBSD/PlayStation. Gigacage also disabled  - AB backing stores share the same heap as JSC/WebCore objects. Confirmed by Synacktiv writeup + BPlatform.h:341 `BPLATFORM(PLAYSTATION)`.
 
 **Confirmed primitives:**
-1. Same-type Canvas2D reclaim: 500x canvas spray reclaims freed 768B slot
-2. Bidirectional R/W: lineWidth, miterLimit, globalAlpha, fillStyle, getTransform, getLineDash all work through stale wrapper
-3. State buffer reclaim: 8 saves → 6400B out-of-line buffer, AB spray can reclaim
+1. Same-type Canvas2D reclaim: 500x canvas spray reclaims the freed 768B slot (behavioral alias, V925)
+2. Typed state-field R/W: `lineWidth`, `miterLimit`, `globalAlpha`, `fillStyle`, `getTransform`, `getLineDash` work through the stale wrapper — **typed values only, not byte-granular/arbitrary memory**
+3. State buffer reclaim: 8 saves → 6400B out-of-line buffer, AB spray can reclaim — **not demonstrated as a readable primitive**
 
-**Info leak candidate (OOB state stack read):**
-Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + same-type reclaim, new ctx has 0 saves (`m_size=1`). Stale wrapper reads `m_stateStack.last()` using stale `m_size=9` → `buffer[8]` = offset 3200 = 2800 bytes past end of 1-State buffer. Reads adjacent heap allocations as float64. 48-bit x86-64 pointer is exactly representable as float64. libpas uses out-of-band bitmap tracking  - freed chunks retain all stale data, not zeroed.
+**Info leak candidate (OOB state stack read)  - CORRECTED 2026-11-10: NOT a live candidate.** The “stale `m_size=9`” premise is invalid: `m_size` lives inside the freed `CanvasRenderingContext2D`, so either the reclaimer overwrites it (same-object behavior) or the destructor already ran. In the heap-backed case `~Vector` calls `resetBufferAndCapacity()` and sets `m_buffer=nullptr`, so `state()` faults at `nullptr+(size-1)*400+48` (V627). In the inline `Vector<State,1>` case the buffer pointer survives, but the first touch of the dangling wrapper still faults (V683/V684/V685/V916). V908 `oob-v0`/`oob-v32` both **MISS** (stale wrapper reads the reclaimer’s current state); forged `size/cap=9` with a null buffer (`oob-ab9`) **CRASHES** with no leak. The only genuine pointer-mediated read is `*(m_buffer + (m_size-1)*400 + 48)` (V906/V919/V920), and it requires a **known mapped address** to forge `m_buffer`/`m_size` — which is exactly the missing leak.
 
-**Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values  - no path found to read a raw heap pointer. 10 dedicated info leak paths exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Freed memory reads crash (destructor nulls m_stateStack.m_buffer). AB reclaim zeros data. DontInitialize AB paths return zeros on device. Community help wanted on the info leak primitive.
+**Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values  - no path found to read a raw heap pointer. 10 dedicated info leak paths exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Freed memory reads crash (destructor nulls `m_stateStack.m_buffer`). AB reclaim zeros data. DontInitialize AB paths return zeros on device. APNG 321753-class OOB gives variable live bytes but no controllability/stable pointer (V944B/V945B/V950B/V953B/V963B/V971B). Community help wanted on the info leak primitive.
 
-**Exploitation chain once info leak is solved:** fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.
+**Exploitation chain once info leak is solved:** fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel. *(Aspirational: both the mapped anchor and a surviving controlled write are still missing.)*
 
 **Fix:** Commit 2693828e8d73 (2026-06-29): re-checks `m_context` after dictionary conversion. Not present in WK-1400.
 
@@ -83,6 +85,28 @@ Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + sam
 `setStatus(Success)` unconditionally calls `m_timeoutTimer.stop()`, which calls `setNextFireTime()` at Timer.cpp:469: `RELEASE_ASSERT(canCurrentThreadAccessThreadLocalData(m_thread))`. AB spray puts garbage at offset 176 → Thread check fails → crash. Same-type groom works but 1-byte `m_status=3` write is harmless (no secondary corruption). CSSFontFace is the **sole occupant** of the 192-byte size class.
 
 **Unblock condition:** Leak of `Thread::current()` address to craft valid Timer at offset 176. Or find a `setStatus()` code path that avoids Timer access (none exists for Success/Failure triggers).
+
+**14.20 live re-confirmation (V974B v2, 2026-11-10 ~00:01 UTC server):** p458 recipe reproduced exactly on 14.20 —
+eager `face.loaded` + `face.load()` (CSS-connected `src:local('Arial')`) → `.then` getter fires **during
+iterateClients with status=loading** (TRIG 9/9 runs incl. control) → getter does
+`rule.style.setProperty('font-weight','bold')` + forced layout (**adopt frees the old CSSFontFace**) + zeroed
+`ArrayBuffer(192)` wave ×48 → **CRASH 3/3 in-window** (between WAVE beacon and promise settle = the post-free
+`m_status=Success(3)` write + `m_timeoutTimer.stop()` on AB-zeroed reclaim ⇒ `m_thread=null` → RELEASE_ASSERT,
+matching this section's Timer chain), while **`arm=0` control (same trigger/Success load, no free/spray) survived
+6/6**. Beacons: `results`/server `host-beacons.log` seq ~300-380 (2026-11-10). Readback (WB/HIT at +0x58/+0x68)
+blocked by the Timer crash — process dies before JS can scan. **Wall confirmed live on 14.20; same unblock
+conditions apply** (valid Thread* at +176, or a free-path whose post-free writes skip Timer).
+
+**14.20 tail-survival pivot (V975/V976, 2026-11-10 17:24–17:36 UTC):** instead of skipping the unskippable
+`setStatus` tail (the only unprotected thenable host), V975 reclaimed the freed 192B block with **live CSSFontFaces**
+(`new FontFace` inside the getter, via=js) so the tail ran on a valid object (`m_thread` intact ⇒ `m_timeoutTimer.stop()`
+passed) — **face armed: STATUS-HIT ×4/5 with 4 survivals** (1/64 sprayed never-pumped face became `loaded` each hit);
+control arm=0 6/6 survived. **AB-deferred (no reclaim during tail): CRASH 3/3 before scan** (freed-but-intact tail
+fatal). V976 characterization (6/7 HIT, hit slots vary 3/55/62/45/13/55): JS-observable corruption limited to `status`
+(`loaded` vs `unloaded`); all other JS-exposed FontFace properties identical to baseline — **no JS-readable pointer
+leak** (+0x58/+0x68 not surfaced by FontFace API; AB readback path fatal). Result: **repeatable, narrow status-flip
+UAF writeback primitive with survival on 14.20**; info-leak/arb-RW from this path remains blocked by lack of a
+JS-readable corruption channel on the reclaimed live face. via=style comparison pending.
 
 ---
 
@@ -167,7 +191,7 @@ Clipboard API is absent on PS5 14.10 (`navigator.clipboard` undefined despite `i
 
 | Vuln | Bug Class | Wall | Status |
 |------|-----------|------|--------|
-| CVE-2026-43720 Canvas | UAF | ~~IsoHeap~~ OFF | **R/W CONFIRMED**, info leak candidate found |
+| CVE-2026-43720 Canvas | UAF | ~~IsoHeap~~ OFF | **Typed state-field R/W via alias**; no arbitrary R/W; **no pointer leak** |
 | CVE-2026-43715 CSSFontFace | UAF write | Timer RELEASE_ASSERT | DoS-only, sole 192B occupant |
 | tee() type confusion | Type confusion | JS builtin dispatch | Contained |
 | Private-name inversion | Slot injection | JS builtin dispatch | Contained |
@@ -175,4 +199,4 @@ Clipboard API is absent on PS5 14.10 (`navigator.clipboard` undefined despite `i
 | HTMLParser CE | Double-parent | Post-construction validation | Microtask bypass untested |
 | CVE-2026-43727 Clipboard | Iterator UAF | Missing API | Dead (no Clipboard API) |
 
-**CVE-2026-43720 is the primary exploitation vector.** IsoHeap is OFF on PS5  - same-type reclaim gives full R/W. The OOB state stack read via save-count mismatch is a strong info leak candidate. Once a heap address is confirmed, the chain is: fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.
+**CVE-2026-43720 is the primary exploitation vector.** IsoHeap is OFF on PS5  - same-type reclaim gives **typed Canvas2D state-field R/W** through the stale wrapper, not arbitrary memory R/W. The OOB state-stack read via save-count mismatch was **refuted** by V683/V908 (see #1). A real pointer leak remains missing; without a mapped anchor the forged `m_stateStack` read is only a crash oracle. Chain once a leak exists: fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.

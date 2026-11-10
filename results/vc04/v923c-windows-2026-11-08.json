@@ -1,0 +1,789 @@
+{
+  "beacon_file": "results\\beacon-logs\\p0-2026-11-08\\v923c-beacons.txt",
+  "probe": "(all)",
+  "n_events": 80,
+  "windows": [
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:08:45",
+      "iso_pre": null,
+      "body_pre": "stage=bp-nospray,abs=0,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:08:47",
+      "iso_next": null,
+      "body_next": "pending=bp-nospray:BP:beginPath,try=1,load=2",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:08:48",
+      "iso_pre": null,
+      "body_pre": "stage=bp-nospray,abs=0,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:08:50",
+      "iso_next": null,
+      "body_next": "pending=bp-nospray:BP:beginPath,try=2,load=3",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:08:53",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab50,abs=50,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:08:55",
+      "iso_next": null,
+      "body_next": "pending=bp-ab50:BP:beginPath,try=1,load=5",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:08:55",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab50,abs=50,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:08:57",
+      "iso_next": null,
+      "body_next": "pending=bp-ab50:BP:beginPath,try=2,load=6",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:00",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab100,abs=100,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:02",
+      "iso_next": null,
+      "body_next": "pending=bp-ab100:BP:beginPath,try=1,load=8",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:03",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab100,abs=100,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:14",
+      "iso_next": null,
+      "body_next": "pending=bp-ab100:BP:beginPath,try=2,load=9",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:17",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab200,abs=200,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:19",
+      "iso_next": null,
+      "body_next": "pending=bp-ab200:BP:beginPath,try=1,load=11",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:20",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab200,abs=200,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:22",
+      "iso_next": null,
+      "body_next": "pending=bp-ab200:BP:beginPath,try=2,load=12",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:25",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab400,abs=400,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:26",
+      "iso_next": null,
+      "body_next": "pending=bp-ab400:BP:beginPath,try=1,load=14",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:27",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab400,abs=400,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:29",
+      "iso_next": null,
+      "body_next": "pending=bp-ab400:BP:beginPath,try=2,load=15",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:32",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab800,abs=800,try=1,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:34",
+      "iso_next": null,
+      "body_next": "pending=bp-ab800:BP:beginPath,try=1,load=17",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "BP",
+      "t_pre": "18:09:34",
+      "iso_pre": null,
+      "body_pre": "stage=bp-ab800,abs=800,try=2,beginPath",
+      "next_event": "CRASH",
+      "t_next": "18:09:36",
+      "iso_next": null,
+      "body_next": "pending=bp-ab800:BP:beginPath,try=2,load=18",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:39",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab50,abs=50,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:41",
+      "iso_next": null,
+      "body_next": "pending=save-ab50:SAVE:save-canary,try=1,load=20",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:42",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab50,abs=50,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:44",
+      "iso_next": null,
+      "body_next": "pending=save-ab50:SAVE:save-canary,try=2,load=21",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:47",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab100,abs=100,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:49",
+      "iso_next": null,
+      "body_next": "pending=save-ab100:SAVE:save-canary,try=1,load=23",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:49",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab100,abs=100,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:51",
+      "iso_next": null,
+      "body_next": "pending=save-ab100:SAVE:save-canary,try=2,load=24",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:54",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab200,abs=200,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:56",
+      "iso_next": null,
+      "body_next": "pending=save-ab200:SAVE:save-canary,try=1,load=26",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:09:57",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab200,abs=200,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:09:59",
+      "iso_next": null,
+      "body_next": "pending=save-ab200:SAVE:save-canary,try=2,load=27",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:02",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab400,abs=400,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:07",
+      "iso_next": null,
+      "body_next": "pending=save-ab400:SAVE:save-canary,try=1,load=29",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:08",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab400,abs=400,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:16",
+      "iso_next": null,
+      "body_next": "pending=save-ab400:SAVE:save-canary,try=2,load=30",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:19",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab800,abs=800,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:25",
+      "iso_next": null,
+      "body_next": "pending=save-ab800:SAVE:save-canary,try=1,load=32",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:26",
+      "iso_pre": null,
+      "body_pre": "stage=save-ab800,abs=800,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:29",
+      "iso_next": null,
+      "body_next": "pending=save-ab800:SAVE:save-canary,try=2,load=33",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:32",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab50,abs=50,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:34",
+      "iso_next": null,
+      "body_next": "pending=rr-ab50:SAVE:save-canary,try=1,load=35",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:35",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab50,abs=50,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:37",
+      "iso_next": null,
+      "body_next": "pending=rr-ab50:SAVE:save-canary,try=2,load=36",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:40",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab100,abs=100,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:45",
+      "iso_next": null,
+      "body_next": "pending=rr-ab100:SAVE:save-canary,try=1,load=38",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:46",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab100,abs=100,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:52",
+      "iso_next": null,
+      "body_next": "pending=rr-ab100:SAVE:save-canary,try=2,load=39",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:55",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab200,abs=200,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:56",
+      "iso_next": null,
+      "body_next": "pending=rr-ab200:SAVE:save-canary,try=1,load=41",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:10:57",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab200,abs=200,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:10:59",
+      "iso_next": null,
+      "body_next": "pending=rr-ab200:SAVE:save-canary,try=2,load=42",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:11:02",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab400,abs=400,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:11:04",
+      "iso_next": null,
+      "body_next": "pending=rr-ab400:SAVE:save-canary,try=1,load=44",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:11:04",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab400,abs=400,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:11:07",
+      "iso_next": null,
+      "body_next": "pending=rr-ab400:SAVE:save-canary,try=2,load=45",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:11:09",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab800,abs=800,try=1,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:11:12",
+      "iso_next": null,
+      "body_next": "pending=rr-ab800:SAVE:save-canary,try=1,load=47",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V923C",
+      "step": "SAVE",
+      "t_pre": "18:11:13",
+      "iso_pre": null,
+      "body_pre": "stage=rr-ab800,abs=800,try=2,save-canary",
+      "next_event": "CRASH",
+      "t_next": "18:11:16",
+      "iso_next": null,
+      "body_next": "pending=rr-ab800:SAVE:save-canary,try=2,load=48",
+      "outcome": "crash-or-reload-after-pre"
+    }
+  ],
+  "crashes": [
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:08:47",
+      "iso": null,
+      "body": "pending=bp-nospray:BP:beginPath,try=1,load=2",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:08:50",
+      "iso": null,
+      "body": "pending=bp-nospray:BP:beginPath,try=2,load=3",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:08:50",
+      "iso": null,
+      "body": "pending=bp-nospray:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:08:55",
+      "iso": null,
+      "body": "pending=bp-ab50:BP:beginPath,try=1,load=5",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:08:57",
+      "iso": null,
+      "body": "pending=bp-ab50:BP:beginPath,try=2,load=6",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:08:58",
+      "iso": null,
+      "body": "pending=bp-ab50:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:02",
+      "iso": null,
+      "body": "pending=bp-ab100:BP:beginPath,try=1,load=8",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:14",
+      "iso": null,
+      "body": "pending=bp-ab100:BP:beginPath,try=2,load=9",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:15",
+      "iso": null,
+      "body": "pending=bp-ab100:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:19",
+      "iso": null,
+      "body": "pending=bp-ab200:BP:beginPath,try=1,load=11",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:22",
+      "iso": null,
+      "body": "pending=bp-ab200:BP:beginPath,try=2,load=12",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:22",
+      "iso": null,
+      "body": "pending=bp-ab200:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:26",
+      "iso": null,
+      "body": "pending=bp-ab400:BP:beginPath,try=1,load=14",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:29",
+      "iso": null,
+      "body": "pending=bp-ab400:BP:beginPath,try=2,load=15",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:29",
+      "iso": null,
+      "body": "pending=bp-ab400:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:34",
+      "iso": null,
+      "body": "pending=bp-ab800:BP:beginPath,try=1,load=17",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:36",
+      "iso": null,
+      "body": "pending=bp-ab800:BP:beginPath,try=2,load=18",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:37",
+      "iso": null,
+      "body": "pending=bp-ab800:BP:beginPath",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:41",
+      "iso": null,
+      "body": "pending=save-ab50:SAVE:save-canary,try=1,load=20",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:44",
+      "iso": null,
+      "body": "pending=save-ab50:SAVE:save-canary,try=2,load=21",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:44",
+      "iso": null,
+      "body": "pending=save-ab50:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:49",
+      "iso": null,
+      "body": "pending=save-ab100:SAVE:save-canary,try=1,load=23",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:51",
+      "iso": null,
+      "body": "pending=save-ab100:SAVE:save-canary,try=2,load=24",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:09:51",
+      "iso": null,
+      "body": "pending=save-ab100:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:56",
+      "iso": null,
+      "body": "pending=save-ab200:SAVE:save-canary,try=1,load=26",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:09:59",
+      "iso": null,
+      "body": "pending=save-ab200:SAVE:save-canary,try=2,load=27",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:00",
+      "iso": null,
+      "body": "pending=save-ab200:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:07",
+      "iso": null,
+      "body": "pending=save-ab400:SAVE:save-canary,try=1,load=29",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:16",
+      "iso": null,
+      "body": "pending=save-ab400:SAVE:save-canary,try=2,load=30",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:16",
+      "iso": null,
+      "body": "pending=save-ab400:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:25",
+      "iso": null,
+      "body": "pending=save-ab800:SAVE:save-canary,try=1,load=32",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:29",
+      "iso": null,
+      "body": "pending=save-ab800:SAVE:save-canary,try=2,load=33",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:29",
+      "iso": null,
+      "body": "pending=save-ab800:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:34",
+      "iso": null,
+      "body": "pending=rr-ab50:SAVE:save-canary,try=1,load=35",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:37",
+      "iso": null,
+      "body": "pending=rr-ab50:SAVE:save-canary,try=2,load=36",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:37",
+      "iso": null,
+      "body": "pending=rr-ab50:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:45",
+      "iso": null,
+      "body": "pending=rr-ab100:SAVE:save-canary,try=1,load=38",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:52",
+      "iso": null,
+      "body": "pending=rr-ab100:SAVE:save-canary,try=2,load=39",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:52",
+      "iso": null,
+      "body": "pending=rr-ab100:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:56",
+      "iso": null,
+      "body": "pending=rr-ab200:SAVE:save-canary,try=1,load=41",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:10:59",
+      "iso": null,
+      "body": "pending=rr-ab200:SAVE:save-canary,try=2,load=42",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:10:59",
+      "iso": null,
+      "body": "pending=rr-ab200:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:11:04",
+      "iso": null,
+      "body": "pending=rr-ab400:SAVE:save-canary,try=1,load=44",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:11:07",
+      "iso": null,
+      "body": "pending=rr-ab400:SAVE:save-canary,try=2,load=45",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:11:07",
+      "iso": null,
+      "body": "pending=rr-ab400:SAVE:save-canary",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:11:12",
+      "iso": null,
+      "body": "pending=rr-ab800:SAVE:save-canary,try=1,load=47",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "CRASH",
+      "t": "18:11:16",
+      "iso": null,
+      "body": "pending=rr-ab800:SAVE:save-canary,try=2,load=48",
+      "bound_pre": null
+    },
+    {
+      "probe": "V923C",
+      "event": "BLACKLIST",
+      "t": "18:11:16",
+      "iso": null,
+      "body": "pending=rr-ab800:SAVE:save-canary",
+      "bound_pre": null
+    }
+  ],
+  "per_step": {
+    "BP": {
+      "pre": 12,
+      "crash_after": 12,
+      "survived": 0
+    },
+    "SAVE": {
+      "pre": 20,
+      "crash_after": 20,
+      "survived": 0
+    }
+  }
+}

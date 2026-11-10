@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V974C - FontFace thenable/then diagnostic (14.20) - why V974B NOTRIG</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V974C - FontFace.prototype.then / font promise diagnostic (single pass, no reclaim/leak)</h1>
+<p class="key"><b>Purpose (diagnostic only).</b> Explains V974B NOTRIG on 14.20: checks <code>FontFace.prototype.then</code> descriptor,
+tests <code>FontFace(...).load().then</code> on <b>local-fail</b> vs <b>HTTP success</b> font, and arms a getter on
+<code>FontFace.prototype.then</code> around <code>document.fonts.load()</code> using an HTTP-served font. No AB wave, no reclaim,
+no memory writes. <code>?reset=1</code> clears local state. <code>&amp;font=/assets/fonts/minimal.ttf</code> overrides font URL.</p>
+<pre id="out">starting...</pre>
+<script>
+'use strict';
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Qs = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=([^&]+)')); return m ? decodeURIComponent(m[1]) : d; };
+var FONT = Qs('font', '/assets/fonts/minimal.ttf');
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function lsGet(k) { try { return localStorage.getItem('v974c_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem('v974c_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { localStorage.removeItem('v974c_' + k); } catch (e) {} }
+function bks(tag, body) {
+  var u = '/beacon/V974C-' + tag + '?d=' + encodeURIComponent(String(body == null ? '' : body).slice(0, 700)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { (new Image()).src = u; } catch (e2) {} }
+}
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || e).slice(0, 160) : 'none'; }
+function descStr(obj, prop) {
+  try {
+    var d = Object.getOwnPropertyDescriptor(obj, prop);
+    if (!d) return 'none';
+    return 'has get=' + (typeof d.get) + ' set=' + (typeof d.set) + ' val=' + (typeof d.value) + ' cfg=' + !!d.configurable + ' enum=' + !!d.enumerable + ' wri=' + !!d.writable;
+  } catch (e) { return 'err:' + errOf(e); }
+}
+
+var TRIG = 0;
+function armGetter(tag) {
+  TRIG = 0;
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        TRIG++;
+        bks('THEN-GET', tag + ',n=' + TRIG);
+        return undefined; /* stop chain; diagnostic only */
+      },
+      configurable: true
+    });
+    bks('THEN-ARMED', tag);
+  } catch (e) { bks('THEN-ARM-ERR', tag + ',' + errOf(e)); }
+}
+function disarmGetter() {
+  try { delete FontFace.prototype.then; } catch (e) { try { Object.defineProperty(FontFace.prototype, 'then', { value: undefined, configurable: true, writable: true }); } catch (e2) {} }
+}
+
+function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+function run() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('done'); bks('RESET', 'cleared'); say('cleared. reloading...');
+    setTimeout(function () { location.href = SEEK + '?op=auto&font=' + encodeURIComponent(FONT) + '&r=' + Date.now(); }, 1200);
+    return;
+  }
+  if (lsGet('done') === '1') { bks('ALREADY', 'done'); say('done. ?reset=1 to rerun'); return; }
+  lsSet('done', '1');
+
+  bks('BOOT', 'ua=' + navigator.userAgent.slice(0, 120));
+  bks('ENV', 'FontFace=' + (typeof FontFace) + ',document.fonts=' + (typeof document.fonts) + ',fonts.load=' + (typeof (document.fonts && document.fonts.load)) + ',font=' + FONT);
+  bks('THEN-DESC-PROTO', descStr(FontFace.prototype, 'then'));
+  bks('THEN-OWN-PROTO', Object.prototype.hasOwnProperty.call(FontFace.prototype, 'then') ? 'own' : 'no-own');
+  try { bks('THEN-IN', ('then' in FontFace.prototype) ? 'in' : 'not-in'); } catch (e) { bks('THEN-IN', 'err:' + errOf(e)); }
+
+  /* Stage B1: local-fail face.load() promise behavior (no getter armed) */
+  disarmGetter();
+  var famFail = 'v974cfail' + Date.now().toString(36);
+  try {
+    var ff1 = new FontFace(famFail, 'local("NoSuchFontV974C_' + Date.now().toString(36) + '")');
+    bks('B1-CREATED', 'status=' + ff1.status + ',thenDesc=' + descStr(ff1, 'then'));
+    var p1 = ff1.load();
+    bks('B1-LOADRET', 'type=' + typeof p1 + ',thenType=' + (p1 && typeof p1.then) + ',faceStatus=' + ff1.status);
+    p1.then(function (v) { bks('B1-RESOLVED', 'status=' + ff1.status + ',v=' + (v && v.family)); afterB1(); },
+            function (e) { bks('B1-REJECTED', 'status=' + ff1.status + ',' + errOf(e)); afterB1(); });
+  } catch (e) { bks('B1-ERR', errOf(e)); afterB1(); }
+
+  function afterB1() {
+    /* Stage B2: HTTP font face.load() promise behavior */
+    disarmGetter();
+    var famOk = 'v974cok' + Date.now().toString(36);
+    try {
+      var ff2 = new FontFace(famOk, 'url(' + JSON.stringify(FONT) + ')');
+      bks('B2-CREATED', 'font=' + FONT + ',status=' + ff2.status);
+      var p2 = ff2.load();
+      bks('B2-LOADRET', 'type=' + typeof p2 + ',faceStatus=' + ff2.status);
+      p2.then(function (v) { bks('B2-RESOLVED', 'status=' + ff2.status + ',v=' + (v && v.family)); afterB2(); },
+              function (e) { bks('B2-REJECTED', 'status=' + ff2.status + ',' + errOf(e)); afterB2(); });
+    } catch (e) { bks('B2-ERR', errOf(e)); afterB2(); }
+  }
+
+  function afterB2() {
+    /* Stage C: arm getter, use document.fonts.load() with HTTP @font-face (CSS-connected style, like V974B but success src) */
+    armGetter('C');
+    var famC = 'v974cC' + Date.now().toString(36);
+    try {
+      var st = document.createElement('style');
+      st.id = 'v974cvictim';
+      st.textContent = '@font-face { font-family: "' + famC + '"; src: url(' + JSON.stringify(FONT) + '); }';
+      document.body.appendChild(st);
+      bks('C-SETUP', 'family=' + famC + ',font=' + FONT);
+      var pc = document.fonts.load('16px "' + famC + '"');
+      bks('C-LOADPRE', 'type=' + typeof pc + ',thenType=' + (pc && typeof pc.then));
+      pc.then(function (v) { bks('C-RESOLVED', 'len=' + (v && v.length) + ',trig=' + TRIG); afterC(); },
+              function (e) { bks('C-REJECTED', errOf(e) + ',trig=' + TRIG); afterC(); });
+    } catch (e) { bks('C-ERR', errOf(e) + ',trig=' + TRIG); afterC(); }
+  }
+
+  function afterC() {
+    bks('C-TRIG-SUM', 'trig=' + TRIG);
+    /* Stage D: arm getter + fonts.load() with local-fail (mirror V974B) to confirm NOTRIG on fail path */
+    armGetter('D');
+    var famD = 'v974cD' + Date.now().toString(36);
+    try {
+      var st2 = document.createElement('style');
+      st2.id = 'v974cvictimD';
+      st2.textContent = '@font-face { font-family: "' + famD + '"; src: local("NoSuchFontV974C_D_' + Date.now().toString(36) + '"); }';
+      document.body.appendChild(st2);
+      bks('D-SETUP', 'family=' + famD + ',src=local-fail');
+      var pd = document.fonts.load('16px "' + famD + '"');
+      bks('D-LOADPRE', 'type=' + typeof pd);
+      pd.then(function (v) { bks('D-RESOLVED', 'len=' + (v && v.length) + ',trig=' + TRIG); finish(); },
+              function (e) { bks('D-REJECTED', errOf(e) + ',trig=' + TRIG); finish(); });
+    } catch (e) { bks('D-ERR', errOf(e) + ',trig=' + TRIG); finish(); }
+  }
+
+  function finish() {
+    bks('D-TRIG-SUM', 'trig=' + TRIG);
+    bks('DONE', 'complete');
+    say('done. V974C complete (see beacons).');
+  }
+}
+
+try { run(); } catch (e) { bks('FATAL', errOf(e)); say('FATAL ' + errOf(e)); }
+</script>
+</body>
+</html>

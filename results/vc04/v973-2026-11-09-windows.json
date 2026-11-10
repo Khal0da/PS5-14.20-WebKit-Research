@@ -1,0 +1,273 @@
+{
+  "beacon_file": "C:\\Users\\Khaled.ADMINISTRATOR\\AppData\\Local\\Temp\\opencode\\v973-beacons.jsonl",
+  "probe": "V973",
+  "n_events": 25,
+  "windows": [
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:27:33",
+      "iso_pre": "2026-11-09T22:27:33.862",
+      "body_pre": "mode=save,try=1,call=save,devMs=1794263265339",
+      "next_event": "CRASH",
+      "t_next": "22:27:37",
+      "iso_next": "2026-11-09T22:27:37.875",
+      "body_next": "pending=save:save:try=1:devMs=1794263265339,try=1,load=2,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:27:42",
+      "iso_pre": "2026-11-09T22:27:42.960",
+      "body_pre": "mode=save,try=2,call=save,devMs=1794263274430",
+      "next_event": "CRASH",
+      "t_next": "22:27:46",
+      "iso_next": "2026-11-09T22:27:46.715",
+      "body_next": "pending=save:save:try=2:devMs=1794263274430,try=2,load=4,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:27:51",
+      "iso_pre": "2026-11-09T22:27:51.785",
+      "body_pre": "mode=save,try=3,call=save,devMs=1794263283257",
+      "next_event": "CRASH",
+      "t_next": "22:27:55",
+      "iso_next": "2026-11-09T22:27:55.080",
+      "body_next": "pending=save:save:try=3:devMs=1794263283257,try=3,load=6,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:29:10",
+      "iso_pre": "2026-11-09T22:29:10.161",
+      "body_pre": "mode=save,try=1,call=save,devMs=1794263361638",
+      "next_event": "CRASH",
+      "t_next": "22:29:13",
+      "iso_next": "2026-11-09T22:29:13.210",
+      "body_next": "pending=save:save:try=1:devMs=1794263361638,try=1,load=2,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:29:18",
+      "iso_pre": "2026-11-09T22:29:18.275",
+      "body_pre": "mode=save,try=2,call=save,devMs=1794263369754",
+      "next_event": "CRASH",
+      "t_next": "22:29:21",
+      "iso_next": "2026-11-09T22:29:21.044",
+      "body_next": "pending=save:save:try=2:devMs=1794263369754,try=2,load=4,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "SAVE",
+      "t_pre": "22:29:26",
+      "iso_pre": "2026-11-09T22:29:26.173",
+      "body_pre": "mode=save,try=3,call=save,devMs=1794263377640",
+      "next_event": "CRASH",
+      "t_next": "22:29:28",
+      "iso_next": "2026-11-09T22:29:28.904",
+      "body_next": "pending=save:save:try=3:devMs=1794263377640,try=3,load=6,mode=save",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:32:46",
+      "iso_pre": "2026-11-09T22:32:46.337",
+      "body_pre": "mode=bp,try=1,call=beginPath,devMs=1794263577799",
+      "next_event": "CRASH",
+      "t_next": "22:32:50",
+      "iso_next": "2026-11-09T22:32:50.155",
+      "body_next": "pending=bp:beginPath:try=1:devMs=1794263577799,try=1,load=2,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:32:55",
+      "iso_pre": "2026-11-09T22:32:55.322",
+      "body_pre": "mode=bp,try=2,call=beginPath,devMs=1794263586778",
+      "next_event": "CRASH",
+      "t_next": "22:32:59",
+      "iso_next": "2026-11-09T22:32:59.247",
+      "body_next": "pending=bp:beginPath:try=2:devMs=1794263586778,try=2,load=4,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:33:04",
+      "iso_pre": "2026-11-09T22:33:04.372",
+      "body_pre": "mode=bp,try=3,call=beginPath,devMs=1794263595834",
+      "next_event": "CRASH",
+      "t_next": "22:33:07",
+      "iso_next": "2026-11-09T22:33:07.400",
+      "body_next": "pending=bp:beginPath:try=3:devMs=1794263595834,try=3,load=6,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:34:00",
+      "iso_pre": "2026-11-09T22:34:00.677",
+      "body_pre": "mode=bp,try=1,call=beginPath,devMs=1794263652137",
+      "next_event": "RESET",
+      "t_next": "22:34:02",
+      "iso_next": "2026-11-09T22:34:02.979",
+      "body_next": "cleared,mode=bp",
+      "outcome": "no-post-no-crash-marker"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:34:05",
+      "iso_pre": "2026-11-09T22:34:05.677",
+      "body_pre": "mode=bp,try=1,call=beginPath,devMs=1794263657125",
+      "next_event": "CRASH",
+      "t_next": "22:34:09",
+      "iso_next": "2026-11-09T22:34:09.039",
+      "body_next": "pending=bp:beginPath:try=1:devMs=1794263657125,try=1,load=2,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:34:14",
+      "iso_pre": "2026-11-09T22:34:14.358",
+      "body_pre": "mode=bp,try=2,call=beginPath,devMs=1794263665818",
+      "next_event": "CRASH",
+      "t_next": "22:34:19",
+      "iso_next": "2026-11-09T22:34:19.006",
+      "body_next": "pending=bp:beginPath:try=2:devMs=1794263665818,try=2,load=4,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    },
+    {
+      "probe": "V973",
+      "step": "BEGINPATH",
+      "t_pre": "22:34:24",
+      "iso_pre": "2026-11-09T22:34:24.245",
+      "body_pre": "mode=bp,try=3,call=beginPath,devMs=1794263675685",
+      "next_event": "CRASH",
+      "t_next": "22:34:27",
+      "iso_next": "2026-11-09T22:34:27.858",
+      "body_next": "pending=bp:beginPath:try=3:devMs=1794263675684,try=3,load=6,mode=bp",
+      "outcome": "crash-or-reload-after-pre"
+    }
+  ],
+  "crashes": [
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:27:37",
+      "iso": "2026-11-09T22:27:37.875",
+      "body": "pending=save:save:try=1:devMs=1794263265339,try=1,load=2,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:27:46",
+      "iso": "2026-11-09T22:27:46.715",
+      "body": "pending=save:save:try=2:devMs=1794263274430,try=2,load=4,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:27:55",
+      "iso": "2026-11-09T22:27:55.080",
+      "body": "pending=save:save:try=3:devMs=1794263283257,try=3,load=6,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:29:13",
+      "iso": "2026-11-09T22:29:13.210",
+      "body": "pending=save:save:try=1:devMs=1794263361638,try=1,load=2,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:29:21",
+      "iso": "2026-11-09T22:29:21.044",
+      "body": "pending=save:save:try=2:devMs=1794263369754,try=2,load=4,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:29:28",
+      "iso": "2026-11-09T22:29:28.904",
+      "body": "pending=save:save:try=3:devMs=1794263377640,try=3,load=6,mode=save",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:32:50",
+      "iso": "2026-11-09T22:32:50.155",
+      "body": "pending=bp:beginPath:try=1:devMs=1794263577799,try=1,load=2,mode=bp",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:32:59",
+      "iso": "2026-11-09T22:32:59.247",
+      "body": "pending=bp:beginPath:try=2:devMs=1794263586778,try=2,load=4,mode=bp",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:33:07",
+      "iso": "2026-11-09T22:33:07.400",
+      "body": "pending=bp:beginPath:try=3:devMs=1794263595834,try=3,load=6,mode=bp",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:34:09",
+      "iso": "2026-11-09T22:34:09.039",
+      "body": "pending=bp:beginPath:try=1:devMs=1794263657125,try=1,load=2,mode=bp",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:34:19",
+      "iso": "2026-11-09T22:34:19.006",
+      "body": "pending=bp:beginPath:try=2:devMs=1794263665818,try=2,load=4,mode=bp",
+      "bound_pre": null
+    },
+    {
+      "probe": "V973",
+      "event": "CRASH",
+      "t": "22:34:27",
+      "iso": "2026-11-09T22:34:27.858",
+      "body": "pending=bp:beginPath:try=3:devMs=1794263675684,try=3,load=6,mode=bp",
+      "bound_pre": null
+    }
+  ],
+  "per_step": {
+    "SAVE": {
+      "pre": 6,
+      "crash_after": 6,
+      "survived": 0
+    },
+    "BEGINPATH": {
+      "pre": 7,
+      "crash_after": 6,
+      "survived": 0
+    }
+  }
+}

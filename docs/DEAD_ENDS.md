@@ -134,7 +134,7 @@ Eager promise + setProperty adopt path writes `m_status 0x03` to freed FastMallo
 
 ### Canvas getContext() UAF (CVE-2026-43720)  - ~~DEAD~~ ALIVE: IsoHeap is OFF on PS5
 
-**RETRACTED.** IsoHeap (`WTF_MAKE_ISO_ALLOCATED`) compiles to standard FastMalloc on FreeBSD/PlayStation. Confirmed by `BPLATFORM(PLAYSTATION)` in BPlatform.h:341 and Synacktiv writeup. Same-type reclaim, AB reclaim, and bidirectional R/W all CONFIRMED WORKING on device. See CONFIRMED_VULNS.md #1.
+**RETRACTED.** IsoHeap (`WTF_MAKE_ISO_ALLOCATED`) compiles to standard FastMalloc on FreeBSD/PlayStation. Confirmed by `BPLATFORM(PLAYSTATION)` in BPlatform.h:341 and Synacktiv writeup. **Corrected 2026-11-10:** the device-backed result is **UAF+reclaim-consistent aliasing with typed Canvas2D state-field R/W** through the stale wrapper (V925/V926B), not arbitrary memory R/W and not a pointer read. Same-type/AB reclaim is real; the **raw pointer leak is still missing**. See `docs/CANVAS_UAF_REOPEN_REVIEW_14.20.md`; the older “bidirectional R/W” wording is qualified there and in CONFIRMED_VULNS.md #1.
 
 ### OffscreenCanvas getContext()  - DEAD: API Missing
 
@@ -666,4 +666,4 @@ The only new finding is the 1 GiB canvas DoS.
 reclaim, inline state stack read, non-Vector member read, AB-owned slot calls). They are
 listed above but not folded into the 49/44/5 counts, which describe the original audit.
 
-Note: Canvas getContext() UAF (CVE-2026-43720) was previously listed as dead due to IsoHeap but has been **retracted**  - IsoHeap is OFF on PS5. It is now the primary exploitation vector with confirmed R/W. See CONFIRMED_VULNS.md.
+Note: Canvas getContext() UAF (CVE-2026-43720) was previously listed as dead due to IsoHeap but has been **retracted**  - IsoHeap is OFF on PS5. It is a confirmed UAF+reclaim-consistent alias with **typed Canvas2D state-field R/W**; arbitrary R/W and a raw pointer leak are **not** demonstrated. See CONFIRMED_VULNS.md and `docs/CANVAS_UAF_REOPEN_REVIEW_14.20.md`.

